@@ -1,0 +1,31 @@
+SELECT count(*) > 0 AS extension_functions_found
+FROM pg_proc AS p
+JOIN pg_depend AS d
+  ON d.classid = 'pg_proc'::regclass
+ AND d.objid = p.oid
+ AND d.refclassid = 'pg_extension'::regclass
+ AND d.deptype = 'e'
+JOIN pg_extension AS e ON e.oid = d.refobjid
+WHERE e.extname = 'pgwarc_lance';
+ extension_functions_found 
+---------------------------
+ t
+(1 row)
+
+SELECT count(*) AS public_executable_functions
+FROM pg_proc AS p
+JOIN pg_depend AS d
+  ON d.classid = 'pg_proc'::regclass
+ AND d.objid = p.oid
+ AND d.refclassid = 'pg_extension'::regclass
+ AND d.deptype = 'e'
+JOIN pg_extension AS e ON e.oid = d.refobjid
+CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) AS acl
+WHERE e.extname = 'pgwarc_lance'
+  AND acl.grantee = 0
+  AND acl.privilege_type = 'EXECUTE';
+ public_executable_functions 
+-----------------------------
+                           0
+(1 row)
+

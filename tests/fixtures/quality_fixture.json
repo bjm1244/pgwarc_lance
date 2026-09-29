@@ -1,0 +1,38 @@
+{
+  "name": "external-smoke",
+  "vector_dim": 4,
+  "docs": [
+    {
+      "doc_id": 2001,
+      "target_uri": "https://fixture.example/korean",
+      "text": "한국어 검색 품질 BM25 fixture document",
+      "vector": [1.0, 0.0, 0.0, 0.0]
+    },
+    {
+      "doc_id": 2002,
+      "target_uri": "https://fixture.example/vector",
+      "text": "vector embedding nearest neighbor fixture document",
+      "vector": [0.0, 1.0, 0.0, 0.0]
+    },
+    {
+      "doc_id": 2003,
+      "target_uri": "https://fixture.example/noise",
+      "text": "unrelated fixture control document",
+      "vector": [0.0, 0.0, 1.0, 0.0]
+    }
+  ],
+  "queries": [
+    {
+      "name": "fixture_korean",
+      "query": "검색 품질",
+      "vector": [1.0, 0.0, 0.0, 0.0],
+      "expected_doc_ids": [2001]
+    },
+    {
+      "name": "fixture_vector",
+      "query": "vector embedding",
+      "vector": [0.0, 1.0, 0.0, 0.0],
+      "expected_doc_ids": [2002]
+    }
+  ]
+}

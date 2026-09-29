@@ -1,0 +1,72 @@
+-- search core tests for pgwarc_lance
+SELECT lance_create_table('/tmp/pgwarc_lance_regress.lance', 4, true);
+
+SELECT lance_vector_dim('/tmp/pgwarc_lance_regress.lance') AS dim;
+
+SELECT lance_insert('/tmp/pgwarc_lance_regress.lance', 1, ARRAY[0,0,0,0]::float4[], 'doc1');
+
+SELECT lance_insert_many(
+    '/tmp/pgwarc_lance_regress.lance',
+    ARRAY[2,3]::bigint[],
+    ARRAY[10,0,0,0,1,0,0,0]::float4[],
+    4,
+    ARRAY['doc2','doc3']::text[]
+);
+
+SELECT lance_count('/tmp/pgwarc_lance_regress.lance') AS rows;
+
+SELECT id, label, distance < 0.0001 AS near
+FROM lance_vector_search('/tmp/pgwarc_lance_regress.lance', ARRAY[0,0,0,0]::float4[], 1);
+
+BEGIN;
+DELETE FROM pgwarc_lance.bm25_term;
+DELETE FROM pgwarc_lance.bm25_doc;
+DELETE FROM pgwarc_lance.warc_record;
+
+SELECT bm25_index_document(1, 'PostgreSQL 검색 엔진');
+SELECT bm25_index_document(2, 'Lance vector search');
+
+INSERT INTO pgwarc_lance.warc_record (
+    doc_id,
+    target_uri,
+    warc_date,
+    content_type,
+    http_status,
+    payload_digest,
+    text_len,
+    source_file
+) VALUES
+    (1, 'https://example.test/search', '2026-06-30T00:00:00Z', 'text/html', 200, 'sha1:one', 18, 'sample.warc'),
+    (2, 'https://example.test/vector', '2026-06-30T00:01:00Z', 'text/plain', 200, 'sha1:two', 19, 'sample.warc');
+
+SELECT lance_create_table('/tmp/pgwarc_lance_hybrid_regress.lance', 4, true);
+
+SELECT lance_insert_many(
+    '/tmp/pgwarc_lance_hybrid_regress.lance',
+    ARRAY[1,2]::bigint[],
+    ARRAY[0,0,0,0,10,0,0,0]::float4[],
+    4,
+    ARRAY['doc1','doc2']::text[]
+);
+
+SELECT doc_id, source
+FROM hybrid_search('검색', ARRAY[0,0,0,0]::float4[], '/tmp/pgwarc_lance_hybrid_regress.lance', 2)
+ORDER BY doc_id;
+
+COPY (
+    SELECT doc_id::text || '|' || source || '|' || target_uri || '|' || warc_date || '|' || http_status::text AS result
+    FROM hybrid_warc_search('검색', ARRAY[0,0,0,0]::float4[], '/tmp/pgwarc_lance_hybrid_regress.lance', 2)
+    ORDER BY doc_id
+) TO STDOUT;
+
+COPY (
+    SELECT doc_id::text || '|' || target_uri AS result
+    FROM hybrid_warc_search('검색', ARRAY[0,0,0,0]::float4[], '/tmp/pgwarc_lance_hybrid_regress.lance', 2)
+    WHERE http_status = 200
+      AND content_type ILIKE 'text/html%'
+      AND warc_date::timestamptz >= '2026-06-30T00:00:00Z'::timestamptz
+      AND source_file = 'sample.warc'
+    ORDER BY doc_id
+) TO STDOUT;
+
+ROLLBACK;

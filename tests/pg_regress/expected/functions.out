@@ -1,0 +1,92 @@
+-- scalar function smoke tests for pgwarc_lance
+SELECT hello_pgwarc_lance()                AS hello;
+        hello         
+----------------------
+ Hello, pgwarc_lance!
+(1 row)
+
+SELECT add_numbers(3, 4)              AS sum;
+ sum 
+-----
+   7
+(1 row)
+
+SELECT fibonacci(10)                  AS fib10;
+ fib10 
+-------
+    55
+(1 row)
+
+SELECT fibonacci(0)                   AS fib0;
+ fib0 
+------
+    0
+(1 row)
+
+SELECT fibonacci(-1)                  AS fib_neg;
+ fib_neg 
+---------
+       0
+(1 row)
+
+SELECT array_sum(ARRAY[1,2,3,4,5])    AS arr_sum;
+ arr_sum 
+---------
+      15
+(1 row)
+
+SELECT shout('hello world')           AS shout;
+    shout     
+--------------
+ HELLO WORLD!
+(1 row)
+
+SELECT greatest_of(3, 7, 2)           AS greatest;
+ greatest 
+----------
+        7
+(1 row)
+
+SELECT is_even(8)                     AS even8;
+ even8 
+-------
+ t
+(1 row)
+
+SELECT is_even(7)                     AS even7;
+ even7 
+-------
+ f
+(1 row)
+
+SELECT word_count('hello world from pgwarc_lance') AS words;
+ words 
+-------
+     4
+(1 row)
+
+SELECT double_or_none(21)             AS doubled;
+ doubled 
+---------
+      42
+(1 row)
+
+SELECT double_or_none(NULL::int4)     AS doubled_null;
+ doubled_null 
+--------------
+             
+(1 row)
+
+SELECT greeting('pgwarc_lance')            AS greeting_default;
+             greeting_default              
+-------------------------------------------
+ Hello pgwarc_lance, you are 20 years old!
+(1 row)
+
+SELECT greeting('pgwarc_lance', 42)        AS greeting_age;
+               greeting_age                
+-------------------------------------------
+ Hello pgwarc_lance, you are 42 years old!
+(1 row)
+
+-- end scalar function smoke tests

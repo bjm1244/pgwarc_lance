@@ -1,0 +1,17 @@
+{
+  "name": "built-smoke",
+  "queries": [
+    {
+      "name": "built_korean",
+      "query": "검색 품질",
+      "vector": [1.0, 0.0, 0.0, 0.0],
+      "expected_doc_ids": [2001]
+    },
+    {
+      "name": "built_vector",
+      "query": "vector embedding",
+      "vector": [0.0, 1.0, 0.0, 0.0],
+      "expected_doc_ids": [2002]
+    }
+  ]
+}

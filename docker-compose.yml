@@ -1,0 +1,26 @@
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PG_MAJOR: ${PG_MAJOR:-16}
+        DEV_PERMISSIONS: ${DEV_PERMISSIONS:-1}
+    image: pgwarc_lance:dev
+    environment:
+      POSTGRES_USER: pgwarc_lance
+      POSTGRES_PASSWORD: ${PGWARC_DEV_PASSWORD:?Set PGWARC_DEV_PASSWORD for the disposable development database}
+      POSTGRES_DB: pgwarc_lance_test
+    ports:
+      - "127.0.0.1:${PGWARC_DEV_PORT:-55432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pgwarc_lance -d pgwarc_lance_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  pgdata:

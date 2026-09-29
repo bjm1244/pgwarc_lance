@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fast-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Python unit and contract tests
+        run: make test-warc
+      - name: Documentation and whitespace
+        run: |
+          make check-docs
+          git diff --check
+      - name: Rust formatting
+        run: cargo fmt --check

@@ -1,0 +1,6 @@
+comment = 'pgwarc_lance: WARC-oriented BM25 + Lance hybrid search extension powered by pgrx'
+default_version = '@CARGO_VERSION@'
+module_pathname = 'pgwarc_lance'
+relocatable = false
+superuser = true
+trusted = false

@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pglance.invalid/contracts/quality_attempt_identity.v1.schema.json",
+  "title": "pgwarc_lance quality query attempt identity envelope (prospective v1, synthetic)",
+  "description": "Prospective, synthetic envelope for correlating a future quality query attempt. This schema checks structural consistency only. A structurally valid envelope is not evidence that any PostgreSQL backend existed or still exists, that a statement or transaction was actually executed or identified, that cancellation was requested or completed, that a rollback happened, or that session/transaction resources were cleaned up. attempt_id is a correlation-only handle and carries no authenticity, ordering, or ownership guarantee. session_identity is an author-supplied claim, not a value observed from PostgreSQL in this repository. transaction_identity is fixed to the single unobserved state for v1 and never asserts a transaction id, rollback, or cleanup. No cancellation, termination, retry, or rollback fields are defined; unsupported claims are rejected by additionalProperties=false. This contract is not produced, consumed, or enforced by eval-quality, doctor_run_directory, run finalization, or make verify.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "attempt_id",
+    "capture_state",
+    "session_identity",
+    "transaction_identity",
+    "capture_source"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Contract version. Only v1 is defined, as a strict JSON integer.",
+      "type": "integer",
+      "const": 1
+    },
+    "attempt_id": {
+      "description": "Correlation-only non-empty identifier for one synthetic attempt. It is not an authentic backend, statement, or transaction identifier.",
+      "type": "string",
+      "minLength": 1
+    },
+    "capture_state": {
+      "description": "Whether the synthetic envelope claims a captured session identity or records it as unavailable.",
+      "enum": [
+        "unavailable",
+        "captured"
+      ]
+    },
+    "session_identity": {
+      "description": "Null when capture_state is 'unavailable'. When capture_state is 'captured' it is exactly the two-field author-supplied claim {backend_pid, backend_start}; it is not independently verified against PostgreSQL.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "backend_pid",
+            "backend_start"
+          ],
+          "properties": {
+            "backend_pid": {
+              "description": "Claimed positive backend process id. Booleans are not integers and are rejected.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "backend_start": {
+              "description": "ISO-8601 date-time with an explicit timezone offset. A date-time without a timezone is rejected.",
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
+            }
+          }
+        }
+      ]
+    },
+    "transaction_identity": {
+      "description": "Exactly {state: 'unobserved'} for v1. No transaction id, rollback, or cleanup claim is allowed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "const": "unobserved"
+        }
+      }
+    },
+    "capture_source": {
+      "description": "'none' when capture_state is 'unavailable'. 'query_session' when capture_state is 'captured'. The source names where a future runtime would capture identity; it does not prove a capture happened.",
+      "enum": [
+        "none",
+        "query_session"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "capture_state": {
+            "const": "unavailable"
+          }
+        },
+        "required": [
+          "capture_state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "session_identity": {
+            "type": "null"
+          },
+          "capture_source": {
+            "const": "none"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capture_state": {
+            "const": "captured"
+          }
+        },
+        "required": [
+          "capture_state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "session_identity": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "backend_pid",
+              "backend_start"
+            ],
+            "properties": {
+              "backend_pid": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "backend_start": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
+              }
+            }
+          },
+          "capture_source": {
+            "const": "query_session"
+          }
+        }
+      }
+    }
+  ]
+}
