@@ -1,9 +1,13 @@
 [package]
 name = "pgwarc_lance"
-version = "0.1.0"
+version = "0.1.5"
 edition = "2021"
-license = "Apache-2.0"
 publish = false
+license = "Apache-2.0"
+description = "PostgreSQL extension (pgrx) providing BM25 + Lance vector hybrid search for WARC/web archive records"
+readme = "README.md"
+keywords = ["postgres", "postgresql", "pgrx", "bm25", "vector-search"]
+categories = ["database"]
 
 [lib]
 crate-type = ["cdylib"]
@@ -22,7 +26,7 @@ pgrx = "=0.19.1"
 lance = { version = "7", default-features = false }
 arrow = "58"
 arrow-array = "58"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 futures = "0.3"
 
 [dev-dependencies.pgrx-tests]

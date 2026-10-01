@@ -6,7 +6,7 @@ services:
       args:
         PG_MAJOR: ${PG_MAJOR:-16}
         DEV_PERMISSIONS: ${DEV_PERMISSIONS:-1}
-    image: pgwarc_lance:dev
+    image: pgwarc_lance:latest
     environment:
       POSTGRES_USER: pgwarc_lance
       POSTGRES_PASSWORD: ${PGWARC_DEV_PASSWORD:?Set PGWARC_DEV_PASSWORD for the disposable development database}

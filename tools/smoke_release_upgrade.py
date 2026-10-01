@@ -100,6 +100,11 @@ def run_create_old_smoke(
         [
             f"CREATE EXTENSION {EXTENSION_NAME} VERSION {sql_literal(old_version)};",
             "SELECT hello_pgwarc_lance();",
+            "SELECT bm25_index_document(-101,'first shared');",
+            "SELECT bm25_index_document(-102,'second shared');",
+            "INSERT INTO pgwarc_lance.warc_record (doc_id,text_len,source_file) VALUES (-101,12,'upgrade-smoke'),(-102,13,'upgrade-smoke');",
+            "SELECT lance_create_table('/tmp/pgwarc_artifact_upgrade.lance',4,false);",
+            "SELECT lance_insert_many('/tmp/pgwarc_artifact_upgrade.lance',ARRAY[-101,-102]::bigint[],ARRAY[0,0,0,0,1,0,0,0]::float4[],4,ARRAY['first','second']);",
         ]
     )
     smoke_release_artifacts.run_command(
@@ -136,6 +141,14 @@ def run_update_smoke(
                 f"WHERE extname = {sql_literal(EXTENSION_NAME)};"
             ),
             "SELECT hello_pgwarc_lance();",
+            """DO $$ BEGIN
+                IF bm25_doc_count() <> 2 OR (SELECT count(*) FROM pgwarc_lance.warc_record) <> 2
+                   OR (SELECT count(*) FROM bm25_search('shared',10)) <> 2
+                   OR lance_count('/tmp/pgwarc_artifact_upgrade.lance') <> 2
+                   OR (SELECT count(*) FROM lance_dataset_versions('/tmp/pgwarc_artifact_upgrade.lance')) < 2 THEN
+                    RAISE EXCEPTION 'old-binary data did not survive the artifact upgrade';
+                END IF;
+            END $$;""",
         ]
     )
     smoke_release_artifacts.run_command(

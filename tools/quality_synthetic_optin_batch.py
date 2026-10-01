@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Internal batch consumer for the synthetic opt-in eligibility/plan contract.
 
-Astra Small decision ASTRA-20260916-03, Issue C slice. This module folds an
+Development decision 2026-09-16, Issue C slice. This module folds an
 ordered list of synthetic opt-in requests through the existing Phase 85
 evaluator one element at a time. It never opens a DB connection, observes a
 backend, grants a permission, sends a cancellation, performs any I/O, reads a

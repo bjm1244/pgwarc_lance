@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use arrow::array::{
     Array, ArrayRef, FixedSizeListArray, Float32Array, Int64Array, RecordBatch,
@@ -8,9 +10,16 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, FieldRef, Schema};
 use futures::StreamExt;
 use lance::dataset::builder::DatasetBuilder;
-use lance::dataset::{Dataset, WriteMode, WriteParams};
+use lance::dataset::{
+    Dataset, MergeInsertBuilder, WhenMatched, WhenNotMatched, WriteMode, WriteParams,
+};
+use pgrx::check_for_interrupts;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
+
+/// How often a blocking wait returns control to PostgreSQL so that the backend
+/// can observe a cancel request or `statement_timeout`.
+const INTERRUPT_POLL: Duration = Duration::from_millis(50);
 
 pub struct SearchResult {
     pub id: i64,
@@ -24,13 +33,45 @@ pub struct ScanRow {
     pub label: Option<String>,
 }
 
-fn runtime() -> &'static Runtime {
-    static RT: OnceLock<Runtime> = OnceLock::new();
-    RT.get_or_init(|| Runtime::new().expect("failed to create tokio runtime"))
+pub struct DatasetVersion {
+    pub version: i64,
+    pub created_ms: i64,
 }
 
-fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    runtime().block_on(f)
+/// Runtime used to drive Lance futures.
+///
+/// Runs inside a PostgreSQL backend process, so it is kept as small as possible:
+/// a single worker thread instead of one per core. A multi-thread runtime is
+/// still required because Lance's IO stack relies on `block_in_place` and the
+/// tokio reactor, neither of which work from a current-thread runtime.
+fn runtime() -> &'static Runtime {
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("failed to create tokio runtime")
+    })
+}
+
+/// Runs `fut` to completion while polling for PostgreSQL interrupts.
+///
+/// Without this every Lance operation would be uninterruptible: neither
+/// `pg_cancel_backend()` nor `statement_timeout` could stop a long scan.
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    let mut fut = Box::pin(fut);
+    loop {
+        // The timeout must be created inside the runtime context.
+        let outcome =
+            runtime().block_on(async { tokio::time::timeout(INTERRUPT_POLL, &mut fut).await });
+        match outcome {
+            Ok(output) => return output,
+            Err(_) => {
+                check_for_interrupts!();
+            }
+        }
+    }
 }
 
 fn item_field() -> FieldRef {
@@ -47,6 +88,13 @@ fn schema(vector_dim: i32) -> Arc<Schema> {
         ),
         Field::new("label", DataType::Utf8, true),
     ]))
+}
+
+fn open_dataset(uri: &str) -> Result<Dataset, Box<dyn std::error::Error>> {
+    check_for_interrupts!();
+    let dataset = block_on(async { DatasetBuilder::from_uri(uri).load().await })?;
+    check_for_interrupts!();
+    Ok(dataset)
 }
 
 fn to_fixed_size_list(
@@ -79,7 +127,13 @@ fn make_batch(
         )
         .into());
     }
-    let expected_values = ids.len() * vector_dim as usize;
+    if flat_vectors.iter().any(|value| !value.is_finite()) {
+        return Err("vector values must be finite".into());
+    }
+    let expected_values = ids
+        .len()
+        .checked_mul(vector_dim as usize)
+        .ok_or("vector value count overflow")?;
     if flat_vectors.len() != expected_values {
         return Err(format!(
             "vector value count mismatch: expected {}, got {}",
@@ -121,7 +175,6 @@ pub fn create_dataset(
     overwrite: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let batch = make_batch(vec![], vec![], vec![], vector_dim)?;
-    let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema(vector_dim));
     let params = WriteParams {
         mode: if overwrite {
             WriteMode::Overwrite
@@ -130,7 +183,10 @@ pub fn create_dataset(
         },
         ..Default::default()
     };
+    let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema(vector_dim));
+    check_for_interrupts!();
     block_on(async { Dataset::write(reader, uri, Some(params)).await })?;
+    check_for_interrupts!();
     Ok(())
 }
 
@@ -140,7 +196,7 @@ pub fn insert_rows(
     vectors: Vec<Vec<f32>>,
     labels: Vec<Option<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut dataset = block_on(async { DatasetBuilder::from_uri(uri).load().await })?;
+    let mut dataset = open_dataset(uri)?;
     let vector_dim = dataset_vector_dim(&dataset)?;
 
     let mut flat = Vec::with_capacity(vectors.len() * vector_dim as usize);
@@ -160,6 +216,7 @@ pub fn insert_rows(
     let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema(vector_dim));
 
     block_on(async { dataset.append(reader, None).await })?;
+    check_for_interrupts!();
     Ok(())
 }
 
@@ -171,7 +228,7 @@ pub fn insert_flat_rows(
     labels: Vec<Option<String>>,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let row_count = ids.len();
-    let mut dataset = block_on(async { DatasetBuilder::from_uri(uri).load().await })?;
+    let mut dataset = open_dataset(uri)?;
     let dataset_dim = dataset_vector_dim(&dataset)?;
     if vector_dim != dataset_dim {
         return Err(format!(
@@ -185,18 +242,107 @@ pub fn insert_flat_rows(
     let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema(vector_dim));
 
     block_on(async { dataset.append(reader, None).await })?;
+    check_for_interrupts!();
+    Ok(row_count)
+}
+
+/// Idempotent writes keyed by document ID. The SQL caller holds the same writer
+/// lock used by append/restore for the entire validation and merge operation.
+pub fn upsert_flat_rows(
+    uri: &str,
+    ids: Vec<i64>,
+    flat_vectors: Vec<f32>,
+    vector_dim: i32,
+    labels: Vec<Option<String>>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let row_count = ids.len();
+    if row_count == 0 {
+        return Ok(0);
+    }
+    let dataset = open_dataset(uri)?;
+    if dataset_vector_dim(&dataset)? != vector_dim {
+        return Err("vector dimension mismatch in upsert".into());
+    }
+    let filter = format!(
+        "id IN ({})",
+        ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+    );
+    let mut scanner = dataset.scan();
+    scanner
+        .filter(&filter)?
+        .project(&["id"])?
+        .limit(Some((row_count + 1) as i64), None)?;
+    let stream = block_on(async { scanner.try_into_stream().await })?;
+    let batches = collect_batches(&mut Box::pin(stream))?;
+    let mut seen = HashSet::new();
+    for batch in batches {
+        check_for_interrupts!();
+        let values = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or("id column not Int64")?;
+        for index in 0..values.len() {
+            if values.is_null(index) || !seen.insert(values.value(index)) {
+                return Err("upsert target contains duplicate/null document IDs; reconcile legacy append data first".into());
+            }
+        }
+    }
+    let batch = make_batch(ids, flat_vectors, labels, vector_dim)?;
+    let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema(vector_dim));
+    let mut builder = MergeInsertBuilder::try_new(Arc::new(dataset), vec!["id".to_string()])?;
+    builder
+        .when_matched(WhenMatched::UpdateAll)
+        .when_not_matched(WhenNotMatched::InsertAll);
+    let job = builder.try_build()?;
+    block_on(async { job.execute_reader(reader).await })?;
+    check_for_interrupts!();
     Ok(row_count)
 }
 
 pub fn count_rows(uri: &str) -> Result<usize, Box<dyn std::error::Error>> {
-    let dataset = block_on(async { DatasetBuilder::from_uri(uri).load().await })?;
+    let dataset = open_dataset(uri)?;
     let count = block_on(async { dataset.count_rows(None).await })?;
+    check_for_interrupts!();
     Ok(count)
 }
 
 pub fn vector_dim(uri: &str) -> Result<i32, Box<dyn std::error::Error>> {
-    let dataset = block_on(async { DatasetBuilder::from_uri(uri).load().await })?;
+    let dataset = open_dataset(uri)?;
     dataset_vector_dim(&dataset)
+}
+
+pub fn versions(uri: &str) -> Result<Vec<DatasetVersion>, Box<dyn std::error::Error>> {
+    let dataset = open_dataset(uri)?;
+    let versions = block_on(async { dataset.versions().await })?;
+    check_for_interrupts!();
+    Ok(versions
+        .into_iter()
+        .map(|v| DatasetVersion {
+            version: v.version as i64,
+            created_ms: v.timestamp.timestamp_millis(),
+        })
+        .collect())
+}
+
+/// Restores `version` as the dataset tip by making it the newest version again.
+///
+/// This is the compensation path for a write that PostgreSQL rolled back after
+/// Lance already committed it.
+pub fn restore_version(uri: &str, version: i64) -> Result<i64, Box<dyn std::error::Error>> {
+    if version < 0 {
+        return Err(format!("version must be non-negative: {version}").into());
+    }
+    let mut dataset = block_on(async {
+        DatasetBuilder::from_uri(uri)
+            .with_version(version as u64)
+            .load()
+            .await
+    })?;
+    check_for_interrupts!();
+    block_on(async { dataset.restore().await })?;
+    check_for_interrupts!();
+    Ok(version)
 }
 
 pub fn vector_search(
@@ -208,7 +354,7 @@ pub fn vector_search(
         return Ok(Vec::new());
     }
 
-    let dataset = block_on(async { DatasetBuilder::from_uri(uri).load().await })?;
+    let dataset = open_dataset(uri)?;
     let vector_dim = dataset_vector_dim(&dataset)?;
     if query.len() != vector_dim as usize {
         return Err(format!(
@@ -228,12 +374,11 @@ pub fn vector_search(
         .project(&["id", "label", "_distance"])?;
 
     let stream = block_on(async { scanner.try_into_stream().await })?;
-    let batches = block_on(async { stream.collect::<Vec<_>>().await })
-        .into_iter()
-        .collect::<Result<Vec<RecordBatch>, _>>()?;
+    let batches = collect_batches(&mut Box::pin(stream))?;
 
     let mut results = Vec::new();
     for batch in batches {
+        check_for_interrupts!();
         let id_array = batch
             .column(0)
             .as_any()
@@ -277,7 +422,7 @@ pub fn scan_rows(uri: &str, limit: i64) -> Result<Vec<ScanRow>, Box<dyn std::err
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let dataset = block_on(async { DatasetBuilder::from_uri(uri).load().await })?;
+    let dataset = open_dataset(uri)?;
 
     let mut scanner = dataset.scan();
     scanner.project(&["id", "vector", "label"])?;
@@ -286,12 +431,11 @@ pub fn scan_rows(uri: &str, limit: i64) -> Result<Vec<ScanRow>, Box<dyn std::err
     }
 
     let stream = block_on(async { scanner.try_into_stream().await })?;
-    let batches = block_on(async { stream.collect::<Vec<_>>().await })
-        .into_iter()
-        .collect::<Result<Vec<RecordBatch>, _>>()?;
+    let batches = collect_batches(&mut Box::pin(stream))?;
 
     let mut rows = Vec::new();
     for batch in batches {
+        check_for_interrupts!();
         let id_array = batch
             .column(0)
             .as_any()
@@ -327,6 +471,27 @@ pub fn scan_rows(uri: &str, limit: i64) -> Result<Vec<ScanRow>, Box<dyn std::err
                 label,
             });
         }
+        if rows.len() as i64 >= limit {
+            rows.truncate(limit as usize);
+            break;
+        }
     }
     Ok(rows)
+}
+
+/// Drains a Lance stream while checking for PostgreSQL interrupts between
+/// batches instead of materializing everything before the first yield.
+fn collect_batches<S>(stream: &mut S) -> Result<Vec<RecordBatch>, Box<dyn std::error::Error>>
+where
+    S: futures::Stream<Item = Result<RecordBatch, lance::Error>> + Unpin,
+{
+    let mut batches = Vec::new();
+    loop {
+        check_for_interrupts!();
+        match block_on(stream.next()) {
+            Some(Ok(batch)) => batches.push(batch),
+            Some(Err(e)) => return Err(e.into()),
+            None => return Ok(batches),
+        }
+    }
 }

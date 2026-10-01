@@ -1,9 +1,11 @@
 import importlib.util
 import gzip
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -37,6 +39,124 @@ def warc_response(uri: str, date: str, html: str) -> bytes:
 
 
 class WarcImporterTests(unittest.TestCase):
+    def test_spooled_cli_matches_legacy_sql_in_every_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "input.warc"
+            path.write_bytes(b"".join(warc_response(f"https://example.test/{i}", "2026-10-01T00:00:00Z", f"body shared {i}") for i in range(3)))
+            records = warc_importer.load_import_records([path], None, 1)
+            for mode in ["function", "bulk", "copy"]:
+                output = root / f"{mode}.sql"
+                warc_importer.main([str(path), "--output", str(output), "--lance-uri", "/tmp/spool.lance", "--batch-size", "2", "--bm25-mode", mode])
+                expected = warc_importer.emit_sql(records, "/tmp/spool.lance", 3, False, True, batch_size=2, bm25_mode=mode)
+                self.assertEqual(output.read_text(), expected)
+
+    def test_spooled_cli_late_duplicate_never_executes_sql(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "duplicate.warc"
+            record = warc_response("https://example.test/one", "2026-10-01T00:00:00Z", "duplicate body")
+            path.write_bytes(record + record)
+            with mock.patch.object(warc_importer.subprocess, "run") as execute:
+                with self.assertRaisesRegex(ValueError, "duplicate imported doc_id"):
+                    warc_importer.main([str(path), "--execute", "--batch-size", "1", "--temp-dir", tmp])
+                execute.assert_not_called()
+            self.assertEqual(list(Path(tmp).glob("pgwarc-import-*")), [])
+
+    def test_spooled_cli_late_missing_vector_never_executes_sql(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path, vectors = root / "input.warc", root / "vectors.jsonl"
+            path.write_bytes(b"".join(warc_response(f"https://example.test/{i}", "2026-10-01T00:00:00Z", f"body {i}") for i in range(2)))
+            first = warc_importer.load_import_records([path], 1, 1)[0]
+            vectors.write_text(json.dumps({"doc_id": first.doc_id, "vector": [1, 2, 3]}) + "\n")
+            with mock.patch.object(warc_importer.subprocess, "run") as execute:
+                with self.assertRaisesRegex(ValueError, "missing vectors"):
+                    warc_importer.main([str(path), "--execute", "--lance-uri", "/tmp/spool.lance", "--embedding-jsonl", str(vectors), "--batch-size", "1"])
+                execute.assert_not_called()
+
+    def test_spooled_cli_byte_budget_splits_batches_and_streams_vectors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path, vectors, output = root / "input.warc", root / "vectors.jsonl", root / "import.sql"
+            path.write_bytes(b"".join(warc_response(f"https://example.test/{i}", "2026-10-01T00:00:00Z", f"body {i}") for i in range(2)))
+            records = warc_importer.load_import_records([path], None, 1)
+            vectors.write_text("".join(json.dumps({"doc_id": r.doc_id, "vector": [i, 2, 3]}) + "\n" for i, r in enumerate(records)))
+            warc_importer.main([str(path), "--output", str(output), "--lance-uri", "/tmp/spool.lance", "--embedding-jsonl", str(vectors), "--batch-max-bytes", "1"])
+            sql = output.read_text()
+            self.assertEqual(sql.count("SELECT lance_create_table("), 1)
+            self.assertEqual(sql.count("SELECT lance_insert_many("), 2)
+            self.assertIn("batch 1/2: records 1-1", sql)
+            self.assertIn("batch 2/2: records 2-2", sql)
+            self.assertIn("ARRAY[0.00000000,2.00000000,3.00000000]", sql)
+
+    def test_spooled_embedding_command_uses_file_streams(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path, script, output = root / "input.warc", root / "embed.py", root / "import.sql"
+            path.write_bytes(warc_response("https://example.test/one", "2026-10-01T00:00:00Z", "body"))
+            script.write_text("import sys,json\nfor line in sys.stdin:\n r=json.loads(line); print(json.dumps({'doc_id':r['doc_id'],'vector':[1,2,3]}))\n")
+            warc_importer.main([str(path), "--output", str(output), "--lance-uri", "/tmp/spool.lance", "--embedding-command", f"{sys.executable} {script}"])
+            self.assertIn("ARRAY[1.00000000,2.00000000,3.00000000]", output.read_text())
+
+    def test_spooled_embedding_timeout_cleans_up_before_sql_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path, script, output = root / "input.warc", root / "embed.py", root / "import.sql"
+            path.write_bytes(warc_response("https://example.test/one", "2026-10-01T00:00:00Z", "body"))
+            script.write_text("import time\ntime.sleep(30)\n")
+            with self.assertRaises(subprocess.TimeoutExpired):
+                warc_importer.main([str(path), "--output", str(output), "--lance-uri", "/tmp/spool.lance", "--embedding-command", f"{sys.executable} {script}", "--embedding-timeout", "0.1", "--temp-dir", tmp])
+            self.assertFalse(output.exists())
+            self.assertEqual(list(root.glob("pgwarc-import-*")), [])
+
+    def test_finite_float64_embedding_overflow_is_rejected_before_sql(self):
+        with self.assertRaisesRegex(ValueError, "out-of-range float4"):
+            warc_importer.parse_embedding_jsonl('{"doc_id":1,"vector":[1e100]}', {1}, 1, "vectors.jsonl")
+
+    def test_upsert_cli_never_recreates_the_existing_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path, output = root / "input.warc", root / "import.sql"
+            path.write_bytes(warc_response("https://example.test/replay", "2026-10-01T00:00:00Z", "body"))
+            warc_importer.main([str(path), "--output", str(output), "--lance-uri", "/tmp/replay.lance", "--lance-mode", "upsert"])
+            sql = output.read_text()
+            self.assertIn("SELECT lance_upsert_many(", sql)
+            self.assertNotIn("SELECT lance_create_table(", sql)
+            self.assertNotIn("SELECT lance_insert_many(", sql)
+            self.assertNotIn("WARNING:", sql)
+        with self.assertRaisesRegex(SystemExit, "must not exceed 10000"):
+            warc_importer.main(["unused.warc", "--lance-uri", "/tmp/replay.lance", "--lance-mode", "upsert", "--batch-size", "10001"])
+
+    def test_declared_oversized_record_fails_before_payload_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "oversized.warc"
+            path.write_bytes(b"WARC/1.1\r\nContent-Length: 1000000000\r\n\r\n")
+            with self.assertRaisesRegex(ValueError, "exceeds max_record_bytes"):
+                list(warc_importer.iter_warc_records(path, max_record_bytes=32))
+
+    def test_headers_and_preamble_lines_are_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "oversized.warc"
+            path.write_bytes(b"WARC/1.1\r\nX-Header: " + b"x" * 65536 + b"\r\n\r\n")
+            with self.assertRaisesRegex(ValueError, "headers exceed"):
+                list(warc_importer.iter_warc_records(path))
+            path.write_bytes(b"x" * 65537 + b"\n")
+            with self.assertRaisesRegex(ValueError, "record line exceeds"):
+                list(warc_importer.iter_warc_records(path))
+
+    def test_gzip_http_expansion_and_uncompressed_body_are_bounded(self):
+        with self.assertRaisesRegex(ValueError, "decoded HTTP payload exceeds"):
+            warc_importer.decode_body(gzip.compress(b"x" * 100), {"content-encoding": "gzip"}, "text/plain", max_decoded_bytes=16)
+        with self.assertRaisesRegex(ValueError, "decoded HTTP payload exceeds"):
+            warc_importer.decode_body(b"x" * 17, {}, "text/plain", max_decoded_bytes=16)
+        self.assertEqual(warc_importer.decode_body(gzip.compress(b"x" * 16), {"content-encoding": "gzip"}, "text/plain", max_decoded_bytes=16), "x" * 16)
+
+    def test_record_size_limit_is_validated_by_api_and_cli(self):
+        with self.assertRaisesRegex(ValueError, "max_record_bytes must be positive"):
+            warc_importer.load_import_records([], None, 1, max_record_bytes=0)
+        with self.assertRaisesRegex(SystemExit, "--max-record-bytes must be positive"):
+            warc_importer.main(["unused.warc", "--max-record-bytes", "0"])
+
     def test_dechunks_valid_chunks_and_trailers(self):
         body = (
             b"4\r\nWiki\r\n"
@@ -99,6 +219,67 @@ class WarcImporterTests(unittest.TestCase):
             ),
             "café",
         )
+
+    def test_http_legacy_charset_aliases(self):
+        for label, codec, text in [("WINDOWS-874", "cp874", "ภาษาไทย"),
+                                   ("Windows-31J", "cp932", "日本語")]:
+            with self.subTest(label=label):
+                self.assertEqual(warc_importer.decode_body(text.encode(codec), {},
+                    "text/plain; charset=" + label), text)
+
+    def test_unknown_charset_requires_explicit_override(self):
+        with self.assertRaises(LookupError):
+            warc_importer.decode_body(b"text", {}, "text/plain; charset=None")
+        policy = warc_importer.CharsetPolicy.from_options(["None=utf-8", "uft-8=utf-8"])
+        self.assertEqual(warc_importer.decode_body("한글".encode(), {},
+            "text/plain; charset=None", charset_policy=policy), "한글")
+        self.assertEqual(policy.used, {"none": 1})
+        with self.assertRaises(UnicodeDecodeError):
+            warc_importer.decode_body(b"\xff", {}, "text/plain; charset=uft-8",
+                charset_policy=policy)
+        self.assertEqual(policy.used, {"none": 1})
+
+    def test_charset_override_validation(self):
+        for options in [["None"], ["=utf-8"], ["None="],
+                        ["None=made-up-codec"], ["None=base64_codec"],
+                        ["None=utf-8", "NONE=latin1"]]:
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                warc_importer.CharsetPolicy.from_options(options)
+
+    def test_charset_override_cli_summary_and_preexecution_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, output, summary = root / "test.warc", root / "test.sql", root / "summary.json"
+            source.write_bytes(warc_response("https://example.test/charset", "2026-06-30",
+                "<p>한글</p>").replace(b"charset=utf-8", b"charset=None "))
+            # Equal-length header replacement preserves the WARC payload length.
+            args = [str(source), "--output", str(output), "--summary-json", str(summary),
+                    "--charset-override", "None=utf-8"]
+            self.assertEqual(warc_importer.main(args), 0)
+            data = json.loads(summary.read_text())
+            self.assertEqual(data["charset_overrides"], {"none": "utf-8"})
+            self.assertEqual(data["charset_override_records"], {"none": 1})
+            self.assertEqual(data["records"], 1)
+            output.unlink()
+            with mock.patch.object(warc_importer.subprocess, "run") as run:
+                with self.assertRaises(LookupError):
+                    warc_importer.main([str(source), "--execute", "--output", str(output)])
+                run.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_late_oversized_term_rejected_before_sql_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source, output = Path(tmp) / "test.warc", Path(tmp) / "test.sql"
+            source.write_bytes(warc_response("https://example.test/good", "2026-06-30",
+                "<p>valid words</p>") + warc_response("https://example.test/large", "2026-06-30",
+                "<p>" + "a" * 2001 + "</p>"))
+            for mode in warc_importer.BM25_MODES:
+                with self.subTest(mode=mode), mock.patch.object(warc_importer.subprocess, "run") as run:
+                    with self.assertRaisesRegex(ValueError, "BM25 ASCII term exceeds 2000"):
+                        warc_importer.main([str(source), "--execute", "--batch-size", "1",
+                            "--bm25-mode", mode, "--output", str(output)])
+                    run.assert_not_called()
+                self.assertFalse(output.exists())
 
     def test_import_limit_zero_returns_no_records(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -712,6 +893,18 @@ class WarcImporterTests(unittest.TestCase):
             sql,
         )
         self.assertIn("ARRAY[3]::bigint[], ARRAY[0.50000000,0.60000000]::float4[], 2", sql)
+
+
+class ExistingSchemaTests(unittest.TestCase):
+    def test_existing_schema_omits_ddl_without_dropping_upsert(self):
+        record = warc_importer.ImportRecord(doc_id=1, target_uri="https://example.test", warc_date=None, content_type="text/plain", http_status=200, payload_digest=None, text="words", source_file="source.warc")
+        sql = warc_importer.emit_sql([record], "/tmp/existing.lance", 3, False, True,
+                                    lance_mode="upsert", skip_schema=True)
+        self.assertNotIn("CREATE ", sql)
+        self.assertIn("SET standard_conforming_strings = on", sql)
+        self.assertIn("INSERT INTO pgwarc_lance.warc_record", sql)
+        self.assertIn("SELECT lance_upsert_many(", sql)
+        self.assertIn("SELECT bm25_index_document(", sql)
 
 
 if __name__ == "__main__":

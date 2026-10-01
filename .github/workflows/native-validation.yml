@@ -1,0 +1,154 @@
+name: Native validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PGWARC_DEV_PASSWORD: ci-disposable-database-only
+
+jobs:
+  dependency-audit:
+    name: Rust dependency security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned audit tool
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Check current RustSec advisories and yanked packages
+        run: make audit-dependencies
+
+  lint:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+      - run: make test-uri-policy
+
+  python-tests:
+    name: python harness tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run harness unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Check docs/harness consistency
+        run: python3 tools/check_docs.py
+
+  build-matrix:
+    name: build pg${{ matrix.pg }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["13", "14", "15", "16", "17"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build extension image (compiles cdylib for this PostgreSQL major)
+        env:
+          PG_MAJOR: ${{ matrix.pg }}
+        run: docker compose build --pull
+      - name: Start database
+        env:
+          PG_MAJOR: ${{ matrix.pg }}
+        run: |
+          docker compose up -d
+          timeout 120 bash -c 'until docker compose exec -T postgres pg_isready -U pgwarc_lance -d pgwarc_lance_test; do sleep 2; done'
+      - name: Smoke test (install extension + tests/test.sql)
+        env:
+          PG_MAJOR: ${{ matrix.pg }}
+        run: make test
+      - name: Tokenizer unit harness
+        env:
+          PG_MAJOR: ${{ matrix.pg }}
+        run: make test-unit
+      - name: Clean up
+        if: always()
+        env:
+          PG_MAJOR: ${{ matrix.pg }}
+        run: docker compose down -v
+
+  regress:
+    name: pg_regress (pg16)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          PG_MAJOR: "16"
+        run: docker compose build --pull
+      - env:
+          PG_MAJOR: "16"
+        run: docker compose up -d
+      - name: Run pg_regress suite
+        env:
+          PG_MAJOR: "16"
+        run: make test-regress
+      - if: always()
+        env:
+          PG_MAJOR: "16"
+        run: docker compose down -v
+
+  python-db-integration:
+    name: WARC importer database test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - env:
+          PG_MAJOR: "16"
+        run: docker compose build --pull
+      - env:
+          PG_MAJOR: "16"
+        run: docker compose up -d
+      - name: Run importer integration test
+        env:
+          PG_MAJOR: "16"
+        run: make test-warc-db
+      - name: Runtime safety (concurrency, permissions, timeout and recovery)
+        env:
+          PG_MAJOR: "16"
+        run: make test-runtime-safety
+      - name: Idempotent ingestion, concurrency and backend termination
+        env:
+          PG_MAJOR: "16"
+        run: make test-ingest-replay
+      - name: Active write cancellation and retry
+        env:
+          PG_MAJOR: "16"
+        run: make test-write-cancellation
+      - name: BM25 scoring, search bounds, executor spill and cancellation
+        run: make test-search-memory
+      - name: BM25 statistics consistency during concurrent ingestion
+        run: make test-bm25-snapshot
+      - name: SQL and Lance backup restore
+        env:
+          PG_MAJOR: "16"
+        run: make test-backup-restore
+      - name: Storage errors and PostgreSQL crash recovery from the built artifact
+        run: |
+          version=$(awk -F'"' '/^version =/ {print $2; exit}' Cargo.toml)
+          mkdir -p dist/storage-fault-pg16
+          docker compose cp postgres:/usr/lib/postgresql/16/lib/pgwarc_lance.so dist/storage-fault-pg16/
+          docker compose cp postgres:/usr/share/postgresql/16/extension/pgwarc_lance.control dist/storage-fault-pg16/
+          docker compose cp "postgres:/usr/share/postgresql/16/extension/pgwarc_lance--${version}.sql" dist/storage-fault-pg16/
+          python3 tests/db_storage_faults.py --dist-dir dist/storage-fault-pg16 --version "$version" --json-output /tmp/pgwarc-storage-faults.json
+      - name: Corrupt Lance files and restore SQL, roles and Lance into a clean instance
+        run: |
+          version=$(awk -F'"' '/^version =/ {print $2; exit}' Cargo.toml)
+          python3 tests/db_storage_corruption.py --dist-dir dist/storage-fault-pg16 --version "$version" --json-output /tmp/pgwarc-storage-corruption.json
+      - if: always()
+        env:
+          PG_MAJOR: "16"
+        run: docker compose down -v

@@ -84,3 +84,68 @@ WHERE http_status = 200
   AND source_file = 'sample.warc'
 ORDER BY doc_id;
 ROLLBACK;
+
+\echo '=== lance write log ==='
+
+SELECT count(*) AS write_log_rows
+FROM pgwarc_lance.lance_write_log
+WHERE uri = '/tmp/pgwarc_lance_smoke.lance';
+
+\echo '=== lance dataset versions ==='
+
+SELECT count(*) >= 1 AS has_versions
+FROM lance_dataset_versions('/tmp/pgwarc_lance_smoke.lance');
+
+\echo '=== invalid parameters are reported, not panicked ==='
+
+DO $$
+BEGIN
+    PERFORM lance_create_table('/tmp/pgwarc_lance_negative.lance', 0, true);
+    RAISE NOTICE 'unexpected: zero dimension accepted';
+EXCEPTION
+    WHEN invalid_parameter_value THEN RAISE NOTICE 'rejected zero vector_dim';
+END $$;
+
+\echo '=== destructive operations can be disabled ==='
+
+SET pgwarc_lance.allow_destructive_ops = off;
+
+DO $$
+BEGIN
+    PERFORM lance_create_table('/tmp/pgwarc_lance_smoke.lance', 4, true);
+    RAISE NOTICE 'unexpected: overwrite accepted while disabled';
+EXCEPTION
+    WHEN insufficient_privilege THEN RAISE NOTICE 'overwrite blocked by allow_destructive_ops';
+END $$;
+
+RESET pgwarc_lance.allow_destructive_ops;
+
+\echo '=== dataset paths can be restricted ==='
+
+SET pgwarc_lance.allowed_uri_prefix = '/tmp';
+
+SELECT count(*) AS smoke_rows_under_prefix FROM lance_count('/tmp/pgwarc_lance_smoke.lance');
+
+DO $$
+BEGIN
+    PERFORM lance_count('/var/lib/outside_prefix.lance');
+    RAISE NOTICE 'unexpected: path outside prefix accepted';
+EXCEPTION
+    WHEN insufficient_privilege THEN RAISE NOTICE 'blocked by allowed_uri_prefix';
+END $$;
+
+RESET pgwarc_lance.allowed_uri_prefix;
+
+\echo '=== scan row budget ==='
+
+SET pgwarc_lance.max_scan_rows = 1;
+
+DO $$
+BEGIN
+    PERFORM count(*) FROM lance_scan('/tmp/pgwarc_lance_smoke.lance', 4);
+    RAISE NOTICE 'unexpected: scan above max_scan_rows accepted';
+EXCEPTION
+    WHEN program_limit_exceeded THEN RAISE NOTICE 'scan blocked by max_scan_rows';
+END $$;
+
+RESET pgwarc_lance.max_scan_rows;

@@ -451,7 +451,10 @@ class QueryTimeoutTests(unittest.TestCase):
         self.assertEqual(kwargs["timeout"], 2.5)
         self.assertTrue(kwargs["shell"])
         self.assertTrue(kwargs["capture_output"])
-        self.assertEqual(kwargs["input"], "SELECT 1;")
+        self.assertTrue(kwargs["input"].endswith("SELECT 1;"))
+        self.assertIn("\\pset format unaligned", kwargs["input"])
+        self.assertIn("\\pset tuples_only on", kwargs["input"])
+        self.assertIn("\\pset fieldsep '|'", kwargs["input"])
 
     def test_run_sql_without_timeout_omits_timeout_kwarg(self):
         completed = mock.Mock(returncode=0, stdout="row\n", stderr="")
@@ -622,6 +625,19 @@ class QueryTimeoutTests(unittest.TestCase):
         self.assertEqual(payload["hit_rate_at_k"], 1.0)
         self.assertEqual(payload["mrr_at_k"], 1.0)
         self.assertEqual(seen, [None, None, None])
+
+    def test_setup_timeout_can_differ_without_relaxing_query_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture_path = self.write_fixture(tmp)
+            seen = []
+            def fake_run_sql(psql, sql, timeout=None):
+                seen.append(timeout)
+                return "1|0.5|lance\n" if "hybrid_warc_search" in sql else ""
+            argv = ["eval_quality.py", "--fixture-json", str(fixture_path),
+                    "--setup-timeout-seconds", "120", "--query-timeout-seconds", "2"]
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(eval_quality, "run_sql", side_effect=fake_run_sql):
+                self.assertEqual(eval_quality.main(), 0)
+            self.assertEqual(seen, [120.0, 2.0, 2.0])
 
     def test_main_setup_timeout_emits_non_success_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:

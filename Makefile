@@ -265,13 +265,13 @@ test-regress:
 	docker compose exec -T --user postgres postgres bash -lc 'set -euo pipefail; export USER=postgres RUSTUP_HOME=/root/.rustup CARGO_HOME=/root/.cargo PATH="/root/.cargo/bin:$$PATH"; cargo pgrx install --pg-config /usr/bin/pg_config; cargo pgrx stop pg16 || true; cargo pgrx start pg16; until pg_isready -h localhost -p 28816 >/dev/null; do sleep 1; done; dropdb -h localhost -p 28816 --if-exists pgwarc_lance_regress; createdb -h localhost -p 28816 pgwarc_lance_regress; rm -rf /tmp/pgwarc_lance_pg_regress; mkdir -p /tmp/pgwarc_lance_pg_regress; tests=$$(find /build/tests/pg_regress/sql -maxdepth 1 -type f -name "*.sql" ! -name "setup.sql" -printf "%f\n" | sed "s/\.sql$$//" | sort | tr "\n" " "); cd /build/tests/pg_regress && /usr/lib/postgresql/16/lib/pgxs/src/test/regress/pg_regress --host localhost --port 28816 --use-existing --dbname=pgwarc_lance_regress --inputdir=/build/tests/pg_regress --outputdir=/tmp/pgwarc_lance_pg_regress setup $$tests'
 
 # all harnesses
-test-all: test-unit test-warc test-regress test test-warc-db
+test-all: test-unit test-uri-policy test-warc test-regress test test-warc-db test-runtime-safety test-backup-restore test-ingest-replay test-write-cancellation test-search-memory test-bm25-snapshot
 
 check-docs:
 	python3 tools/check_docs.py
 
 verify: test-all eval-quality check-docs
-	python3 -m py_compile tools/warc_importer.py tools/bench_bm25.py tools/bench_lance.py tools/bench_warc.py tools/bench_warc_bm25_modes.py tools/compare_benchmark_runs.py tools/eval_quality.py tools/execution_budget.py tools/make_quality_fixture.py tools/doctor_quality_labels.py tools/report_quality_fixture.py tools/doctor_quality_baseline.py tools/doctor_real_corpus_input.py tools/preflight_quality_inputs.py tools/make_public_warc_quality_fixture.py tools/check_release_artifacts.py tools/smoke_release_artifacts.py tools/smoke_release_upgrade.py tools/doctor_release_upgrade_inputs.py tools/report_release_upgrade_smoke_matrix.py tools/report_release_artifacts.py tools/report_release_smoke_matrix.py tools/doctor_import_summary.py tools/report_run_directory.py tools/write_run_metadata.py tools/doctor_run_directory.py tools/embed_records_openai.py tools/smoke_public_warc.py tools/check_docs.py tests/test_warc_importer.py tests/test_eval_quality.py tests/test_execution_budget.py tests/test_make_quality_fixture.py tests/test_doctor_quality_labels.py tests/test_report_quality_fixture.py tests/test_doctor_quality_baseline.py tests/test_doctor_real_corpus_input.py tests/test_preflight_quality_inputs.py tests/test_public_warc_quality_fixture.py tests/test_check_release_artifacts.py tests/test_smoke_release_artifacts.py tests/test_smoke_release_upgrade.py tests/test_doctor_release_upgrade_inputs.py tests/test_report_release_upgrade_smoke_matrix.py tests/test_report_release_artifacts.py tests/test_report_release_smoke_matrix.py tests/test_doctor_import_summary.py tests/test_report_run_directory.py tests/test_write_run_metadata.py tests/test_doctor_run_directory.py tests/test_check_docs.py tests/test_compare_benchmark_runs.py tests/db_warc_importer.py
+	python3 -m py_compile tools/*.py tests/*.py
 	git diff --check
 
 bench: bench-bm25 bench-lance bench-warc
@@ -548,8 +548,55 @@ release-artifacts: build-pg-version
 	docker cp $(ARTIFACT_CONTAINER):/usr/share/postgresql/$(PG_MAJOR)/extension/pgwarc_lance.control $(DIST_DIR)/
 	docker cp $(ARTIFACT_CONTAINER):/usr/share/postgresql/$(PG_MAJOR)/extension/pgwarc_lance--$(EXT_VERSION).sql $(DIST_DIR)/
 	docker rm $(ARTIFACT_CONTAINER) >/dev/null
+	cp LICENSE NOTICE $(DIST_DIR)/
+	cp sql/pgwarc_lance--*--*.sql sql/pgwarc_lance-restrict-access.sql $(DIST_DIR)/
 	$(MAKE) check-release-artifacts
 	@printf 'wrote %s\n' "$(DIST_DIR)"
 
 clean:
 	docker compose down -v
+
+.PHONY: test-uri-policy
+# Pure filesystem containment tests; no PostgreSQL or running database required.
+test-uri-policy:
+	@set -eu; output=$$(mktemp /tmp/pgwarc-uri-policy.XXXXXX); trap 'rm -f "$$output"' EXIT; rustc --edition=2021 --test src/uri_policy.rs -o "$$output"; "$$output"
+
+.PHONY: test-runtime-safety
+test-runtime-safety:
+	python3 tests/db_runtime_safety.py
+
+.PHONY: test-backup-restore
+test-backup-restore:
+	python3 tests/db_backup_restore.py --pg-bin /usr/lib/postgresql/$(PG_MAJOR)/bin
+
+.PHONY: test-ingest-replay
+test-ingest-replay:
+	python3 tests/db_ingest_replay.py --pg-bin /usr/lib/postgresql/$(PG_MAJOR)/bin
+
+.PHONY: test-write-cancellation
+test-write-cancellation:
+	python3 tests/db_write_cancellation.py
+
+.PHONY: audit-dependencies
+# Requires cargo-audit 0.22.2; fetch the current advisory database on every run.
+# Maintenance warnings remain visible; known vulnerabilities, unsoundness and yanks fail.
+audit-dependencies:
+	cargo audit --deny unsound --deny yanked --target-arch x86_64 --target-os linux
+
+.PHONY: test-storage-faults
+# Requires extracted PG16 release artifacts. Creates and removes its own container.
+test-storage-faults:
+	python3 tests/db_storage_faults.py --dist-dir "$(DIST_DIR)" --version "$(EXT_VERSION)" --postgres-image "$(ARTIFACT_SMOKE_IMAGE)"
+
+.PHONY: test-search-memory
+test-search-memory:
+	python3 tests/db_search_memory.py
+
+.PHONY: test-bm25-snapshot
+test-bm25-snapshot:
+	python3 tests/db_bm25_snapshot.py
+
+.PHONY: test-storage-corruption
+# Damages only generated copies and restores SQL/Lance/roles into a fresh cluster.
+test-storage-corruption:
+	python3 tests/db_storage_corruption.py --dist-dir "$(DIST_DIR)" --version "$(EXT_VERSION)" --postgres-image "$(ARTIFACT_SMOKE_IMAGE)"

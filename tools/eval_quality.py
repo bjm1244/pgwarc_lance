@@ -284,6 +284,11 @@ DEFAULT_FIXTURE: dict[str, Any] = {
 
 
 def sql_string(value: str) -> str:
+    # Explicit escape strings preserve backslashes even when the connection
+    # inherited standard_conforming_strings=off. Plain quote doubling remains
+    # sufficient for values without backslashes.
+    if "\\" in value:
+        return "E'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
     return "'" + value.replace("'", "''") + "'"
 
 
@@ -317,6 +322,16 @@ def is_statement_timeout_diagnostic(stderr: str | bytes | None) -> bool:
 
 
 def run_sql(psql: str, sql: str, timeout: float | None = None) -> str:
+    # The evaluator parses pipe-separated tuples. Set the psql output contract
+    # in its input too, so an otherwise valid custom connection command without
+    # -At (or with another field separator) cannot turn headings into hit IDs.
+    sql = (
+        "\\set QUIET on\n"
+        "\\pset format unaligned\n"
+        "\\pset tuples_only on\n"
+        "\\pset fieldsep '|'\n"
+        "\\set ON_ERROR_STOP on\n"
+    ) + sql
     kwargs: dict[str, Any] = {
         "shell": True,
         "input": sql,
@@ -503,7 +518,25 @@ def load_fixture(
     )
 
 
-def setup_sql(fixture: dict[str, Any], lance_uri: str) -> str:
+def setup_sql(fixture: dict[str, Any], lance_uri: str, bm25_mode: str = "function") -> str:
+    # This harness rebuilds a disposable corpus. Prepare its planner statistics
+    # and visibility map before any query measurement, so timing does not
+    # depend on whether the next autovacuum tick happened during a profile.
+    maintenance_sql = (
+        "VACUUM (ANALYZE) pgwarc_lance.bm25_doc, "
+        "pgwarc_lance.bm25_term, pgwarc_lance.warc_record;\n"
+    )
+    if bm25_mode != "function":
+        import warc_importer
+        records = [warc_importer.ImportRecord(
+            doc_id=doc["doc_id"], target_uri=doc["target_uri"], warc_date=doc["warc_date"],
+            content_type=doc["content_type"], http_status=doc["http_status"],
+            payload_digest=None, text=doc["text"], source_file=doc["source_file"],
+        ) for doc in fixture["docs"]]
+        vectors = {doc["doc_id"]: doc["vector"] for doc in fixture["docs"]}
+        return ("DROP EXTENSION IF EXISTS pgwarc_lance CASCADE;\nCREATE EXTENSION pgwarc_lance;\n" +
+                warc_importer.emit_sql(records, lance_uri, int(fixture["vector_dim"]), True,
+                                      False, vectors, batch_size=500, lance_mode="overwrite", bm25_mode=bm25_mode) + maintenance_sql)
     docs = fixture["docs"]
     vector_dim = int(fixture["vector_dim"])
     ids = ",".join(str(doc["doc_id"]) for doc in docs)
@@ -512,6 +545,7 @@ def setup_sql(fixture: dict[str, Any], lance_uri: str) -> str:
     lines = [
         "DROP EXTENSION IF EXISTS pgwarc_lance CASCADE;",
         "CREATE EXTENSION pgwarc_lance;",
+        "CREATE INDEX IF NOT EXISTS bm25_term_doc_id_idx ON pgwarc_lance.bm25_term (doc_id);",
         f"SELECT lance_create_table({sql_string(lance_uri)}, {vector_dim}, true);",
         "BEGIN;",
     ]
@@ -533,7 +567,7 @@ def setup_sql(fixture: dict[str, Any], lance_uri: str) -> str:
             ),
         ]
     )
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n" + maintenance_sql
 
 
 def query_sql(
@@ -1017,11 +1051,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--psql", default=DEFAULT_PSQL)
     parser.add_argument("--lance-uri", default="/tmp/pgwarc_lance_quality.lance")
     parser.add_argument("--fixture-json", type=Path, help="labeled quality fixture JSON")
+    parser.add_argument("--setup-bm25-mode", choices=["function", "bulk", "copy"], default="function", help="fixture-loading SQL path; use bulk/copy for larger corpora")
     parser.add_argument("--k", type=int, default=3)
     parser.add_argument("--max-iterations", type=int, default=None)
     parser.add_argument("--max-queries", type=int, default=None)
     parser.add_argument("--deadline-seconds", type=float, default=None)
     parser.add_argument("--query-timeout-seconds", type=float, default=None)
+    parser.add_argument("--setup-timeout-seconds", type=float, default=None, help="separate client timeout for fixture loading; defaults to the query timeout")
     parser.add_argument("--query-statement-timeout-seconds", default=None)
     parser.add_argument("--budget-status-json", type=Path)
     parser.add_argument("--json-output", type=Path)
@@ -1127,10 +1163,14 @@ def main() -> int:
 
     fixture = load_fixture(args.fixture_json)
 
-    setup_timeout = query_timeout
+    try:
+        setup_timeout = validate_query_timeout(args.setup_timeout_seconds) if args.setup_timeout_seconds is not None else query_timeout
+    except ValueError as error:
+        print(f"eval-quality setup timeout rejected: {error}", file=sys.stderr)
+        return 2
     if budget is not None:
         try:
-            setup_timeout = effective_timeout(budget, query_timeout)
+            setup_timeout = effective_timeout(budget, setup_timeout)
         except BudgetExhausted as error:
             payload = exhausted_payload(
                 fixture=fixture,
@@ -1146,7 +1186,7 @@ def main() -> int:
             return 3
 
     try:
-        run_sql(args.psql, setup_sql(fixture, args.lance_uri), timeout=setup_timeout)
+        run_sql(args.psql, setup_sql(fixture, args.lance_uri, args.setup_bm25_mode), timeout=setup_timeout)
     except SqlTimeout as error:
         return emit_timeout(args, fixture, stage="setup", error=error, results=[])
     except StatementTimeout as error:

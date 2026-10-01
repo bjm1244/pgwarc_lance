@@ -1,4 +1,4 @@
-name: CI
+name: Source preview CI
 
 on:
   push:
@@ -23,3 +23,17 @@ jobs:
           git diff --check
       - name: Rust formatting
         run: cargo fmt --check
+
+  dependency-audit:
+    name: Rust dependency security audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Install pinned audit tool
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Check current RustSec advisories and yanked packages
+        run: make audit-dependencies

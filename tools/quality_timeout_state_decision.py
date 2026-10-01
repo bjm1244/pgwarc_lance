@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure, deterministic timeout-after-timeout state decision contract (synthetic).
 
-Astra Small decision ASTRA-20260915-01, Issue C slice. This module is a pure
+Development decision 2026-09-15, Issue C slice. This module is a pure
 function over a caller-supplied, ordered list of synthetic evidence events. It
 never opens a DB connection, observes a backend, sends a cancellation, or
 modifies any runtime state, and its output values are contract decisions, not

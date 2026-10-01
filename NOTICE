@@ -1,0 +1,15 @@
+pgwarc_lance
+Copyright 2026 pgwarc_lance contributors
+
+This product includes software developed as part of the Apache Arrow and
+Lance projects (https://arrow.apache.org, https://lancedb.github.io/lance),
+licensed under the Apache License, Version 2.0.
+
+This product depends on pgrx (https://github.com/pgcentralfoundation/pgrx),
+licensed under the MIT License.
+
+Licensed under the Apache License, Version 2.0. See LICENSE for details.
+
+For a binary distribution, also retain the dependency notice review bundle
+(DEPENDENCY_NOTICES.txt, dependency-notices.json and texts/) described in
+THIRD_PARTY.md. This short NOTICE does not replace those dependency texts.

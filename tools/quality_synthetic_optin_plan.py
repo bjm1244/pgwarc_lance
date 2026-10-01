@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure, deterministic synthetic opt-in eligibility and plan contract.
 
-Astra Small decision ASTRA-20260915-02, Issue C slice. This module is a pure
+Development decision 2026-09-15, Issue C slice. This module is a pure
 function over one caller-supplied synthetic opt-in request. It never opens a
 DB connection, observes a backend, grants a permission, sends a cancellation,
 captures a real identity, or modifies any runtime state.

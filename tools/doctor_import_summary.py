@@ -20,7 +20,7 @@ REQUIRED_FIELDS = {
     "execute",
     "psql",
 }
-LANCE_MODES = {"none", "create", "overwrite", "append"}
+LANCE_MODES = {"none", "create", "overwrite", "append", "upsert"}
 LANCE_APPEND_DUPLICATES = {"none", "possible"}
 BM25_MODES = {"function", "bulk", "copy"}
 

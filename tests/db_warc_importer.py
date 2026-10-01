@@ -6,6 +6,7 @@ from __future__ import annotations
 import gzip
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -20,13 +21,13 @@ assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = warc_importer
 SPEC.loader.exec_module(warc_importer)
 
-PSQL = (
+PSQL = os.environ.get("PGWARC_PSQL", (
     "docker compose exec -T postgres "
     "psql -U pgwarc_lance -d pgwarc_lance_test "
     "-v ON_ERROR_STOP=1 -q -At"
-)
+))
 PSQL_EXEC = PSQL + " -o /dev/null"
-LANCE_URI = "/tmp/pgwarc_lance_warc_importer_db.lance"
+LANCE_URI = os.environ.get("PGWARC_TEST_LANCE_URI", "/tmp/pgwarc_lance_warc_importer_db.lance")
 
 
 def run_sql(sql: str) -> str:

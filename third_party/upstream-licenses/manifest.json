@@ -1,0 +1,361 @@
+{
+  "alloc-stdlib@0.2.4": {
+    "files": [
+      {
+        "path": "rust-alloc-no-stdlib-ae42d22078b9-LICENSE",
+        "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+        "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE"
+      }
+    ],
+    "git_revision": "ae42d22078b98549e987d2f03d12df7b984fde47",
+    "repository": "https://github.com/dropbox/rust-alloc-no-stdlib"
+  },
+  "deepsize_derive@0.1.2": {
+    "files": [
+      {
+        "path": "deepsize-1383a60f86a0-LICENSE",
+        "sha256": "fe8b540ab44320970451d14804e4389d0467e93a58617ef458fc60ab0962a443",
+        "url": "https://raw.githubusercontent.com/Aeledfyr/deepsize/1383a60f86a0ee0a67c76eead74af442eb8a3c9b/LICENSE"
+      }
+    ],
+    "git_revision": "1383a60f86a0ee0a67c76eead74af442eb8a3c9b",
+    "repository": "https://github.com/Aeledfyr/deepsize",
+    "verification": "Published crate .rs files and Cargo.toml.orig match this upstream commit byte-for-byte; recorded crate VCS revision unavailable"
+  },
+  "defmt-parser@1.0.0": {
+    "files": [
+      {
+        "path": "defmt-4a8cdb44891e-LICENSE-APACHE",
+        "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90",
+        "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE"
+      },
+      {
+        "path": "defmt-4a8cdb44891e-LICENSE-MIT",
+        "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50",
+        "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT"
+      }
+    ],
+    "git_revision": "4a8cdb44891ed57b8ff5a023b6bec7137c48708f",
+    "repository": "https://github.com/knurling-rs/defmt"
+  },
+  "enum-map-derive@0.17.0": {
+    "files": [
+      {
+        "path": "enum-map-2026968c30ad-LICENSES-MIT.txt",
+        "sha256": "b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0",
+        "url": "https://codeberg.org/xfix/enum-map/raw/commit/2026968c30ad14d268f3d70c618a704e22a3b980/LICENSES/MIT.txt"
+      },
+      {
+        "path": "enum-map-2026968c30ad-LICENSES-Apache-2.0.txt",
+        "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+        "url": "https://codeberg.org/xfix/enum-map/raw/commit/2026968c30ad14d268f3d70c618a704e22a3b980/LICENSES/Apache-2.0.txt"
+      },
+      {
+        "path": "enum-map-2026968c30ad-LICENSES-CC0-1.0.txt",
+        "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+        "url": "https://codeberg.org/xfix/enum-map/raw/commit/2026968c30ad14d268f3d70c618a704e22a3b980/LICENSES/CC0-1.0.txt"
+      }
+    ],
+    "git_revision": "2026968c30ad14d268f3d70c618a704e22a3b980",
+    "repository": "https://codeberg.org/xfix/enum-map"
+  },
+  "enum-map@2.7.3": {
+    "files": [
+      {
+        "path": "enum-map-c788a9c4bd04-LICENSES-Apache-2.0.txt",
+        "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+        "url": "https://codeberg.org/xfix/enum-map/raw/commit/c788a9c4bd0431308d889942719f7a38761d9884/LICENSES/Apache-2.0.txt"
+      },
+      {
+        "path": "enum-map-c788a9c4bd04-LICENSES-MIT.txt",
+        "sha256": "b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0",
+        "url": "https://codeberg.org/xfix/enum-map/raw/commit/c788a9c4bd0431308d889942719f7a38761d9884/LICENSES/MIT.txt"
+      },
+      {
+        "path": "enum-map-c788a9c4bd04-LICENSES-CC0-1.0.txt",
+        "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+        "url": "https://codeberg.org/xfix/enum-map/raw/commit/c788a9c4bd0431308d889942719f7a38761d9884/LICENSES/CC0-1.0.txt"
+      }
+    ],
+    "git_revision": "c788a9c4bd0431308d889942719f7a38761d9884",
+    "repository": "https://codeberg.org/xfix/enum-map"
+  },
+  "flatbuffers@25.12.19": {
+    "files": [
+      {
+        "path": "flatbuffers-7e163021e59c-LICENSE",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+        "url": "https://raw.githubusercontent.com/google/flatbuffers/7e163021e59cca4f8e1e35a7c828b5c6b7915953/LICENSE"
+      }
+    ],
+    "git_revision": "7e163021e59cca4f8e1e35a7c828b5c6b7915953",
+    "repository": "https://github.com/google/flatbuffers"
+  },
+  "fsst@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-arrow@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-bitpacking@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-core@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-datafusion@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-datagen@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-encoding@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-file@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-index@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-io@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-linalg@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-namespace-reqwest-client@0.7.7": {
+    "files": [
+      {
+        "path": "lance-namespace-2e4de1555fb8-LICENSE",
+        "sha256": "03c4e02af8cbe96dd3a9bfaac9ee27ec6a8e9a3ee38ed7b290d50495c11eea48",
+        "url": "https://raw.githubusercontent.com/lance-format/lance-namespace/2e4de1555fb8eed8057484f1f3b47ef11ed88d80/LICENSE"
+      }
+    ],
+    "git_revision": "2e4de1555fb8eed8057484f1f3b47ef11ed88d80",
+    "repository": "https://github.com/lance-format/lance-namespace"
+  },
+  "lance-namespace@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-table@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance-tokenizer@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "lance@7.0.0": {
+    "files": [
+      {
+        "path": "lance-a15ae30939b9-LICENSE",
+        "sha256": "3788e71aa43d61a457749d4aa070d9705c36d25ed978cd52c5766ec4bd361aa9",
+        "url": "https://raw.githubusercontent.com/lance-format/lance/a15ae30939b9242d74b00aed1fb83abf7d15bf7f/LICENSE"
+      }
+    ],
+    "git_revision": "a15ae30939b9242d74b00aed1fb83abf7d15bf7f",
+    "repository": "https://github.com/lance-format/lance"
+  },
+  "pathsearch@0.2.0": {
+    "files": [
+      {
+        "path": "wzsh-b91fa4e4b3aa-LICENSE.md",
+        "sha256": "43c331652dc60152fd33c03ccf9e1445a64498a840e1a1966e759d246859869d",
+        "url": "https://raw.githubusercontent.com/wez/wzsh/b91fa4e4b3aaefa9bcc9cbf9e90e820e82f48449/LICENSE.md"
+      }
+    ],
+    "git_revision": "b91fa4e4b3aaefa9bcc9cbf9e90e820e82f48449",
+    "repository": "https://github.com/wez/wzsh"
+  },
+  "pgrx-bindgen@0.19.1": {
+    "files": [
+      {
+        "path": "pgrx-16a7463a76c0-LICENSE",
+        "sha256": "074f7499b019ffe4bc37b61842f709ccd8bf9800c456e6a2d14f0353c4973fe3",
+        "url": "https://raw.githubusercontent.com/pgcentralfoundation/pgrx/16a7463a76c030f6417bee1ccc7e8e91fad07527/LICENSE"
+      }
+    ],
+    "git_revision": "16a7463a76c030f6417bee1ccc7e8e91fad07527",
+    "repository": "https://github.com/pgcentralfoundation/pgrx"
+  },
+  "pgrx-macros@0.19.1": {
+    "files": [
+      {
+        "path": "pgrx-16a7463a76c0-LICENSE",
+        "sha256": "074f7499b019ffe4bc37b61842f709ccd8bf9800c456e6a2d14f0353c4973fe3",
+        "url": "https://raw.githubusercontent.com/pgcentralfoundation/pgrx/16a7463a76c030f6417bee1ccc7e8e91fad07527/LICENSE"
+      }
+    ],
+    "git_revision": "16a7463a76c030f6417bee1ccc7e8e91fad07527",
+    "repository": "https://github.com/pgcentralfoundation/pgrx"
+  },
+  "pgrx-pg-config@0.19.1": {
+    "files": [
+      {
+        "path": "pgrx-16a7463a76c0-LICENSE",
+        "sha256": "074f7499b019ffe4bc37b61842f709ccd8bf9800c456e6a2d14f0353c4973fe3",
+        "url": "https://raw.githubusercontent.com/pgcentralfoundation/pgrx/16a7463a76c030f6417bee1ccc7e8e91fad07527/LICENSE"
+      }
+    ],
+    "git_revision": "16a7463a76c030f6417bee1ccc7e8e91fad07527",
+    "repository": "https://github.com/pgcentralfoundation/pgrx"
+  },
+  "pgrx-pg-sys@0.19.1": {
+    "files": [
+      {
+        "path": "pgrx-16a7463a76c0-LICENSE",
+        "sha256": "074f7499b019ffe4bc37b61842f709ccd8bf9800c456e6a2d14f0353c4973fe3",
+        "url": "https://raw.githubusercontent.com/pgcentralfoundation/pgrx/16a7463a76c030f6417bee1ccc7e8e91fad07527/LICENSE"
+      }
+    ],
+    "git_revision": "16a7463a76c030f6417bee1ccc7e8e91fad07527",
+    "repository": "https://github.com/pgcentralfoundation/pgrx"
+  },
+  "pgrx-sql-entity-graph@0.19.1": {
+    "files": [
+      {
+        "path": "pgrx-16a7463a76c0-LICENSE",
+        "sha256": "074f7499b019ffe4bc37b61842f709ccd8bf9800c456e6a2d14f0353c4973fe3",
+        "url": "https://raw.githubusercontent.com/pgcentralfoundation/pgrx/16a7463a76c030f6417bee1ccc7e8e91fad07527/LICENSE"
+      }
+    ],
+    "git_revision": "16a7463a76c030f6417bee1ccc7e8e91fad07527",
+    "repository": "https://github.com/pgcentralfoundation/pgrx"
+  },
+  "pgrx@0.19.1": {
+    "files": [
+      {
+        "path": "pgrx-16a7463a76c0-LICENSE",
+        "sha256": "074f7499b019ffe4bc37b61842f709ccd8bf9800c456e6a2d14f0353c4973fe3",
+        "url": "https://raw.githubusercontent.com/pgcentralfoundation/pgrx/16a7463a76c030f6417bee1ccc7e8e91fad07527/LICENSE"
+      }
+    ],
+    "git_revision": "16a7463a76c030f6417bee1ccc7e8e91fad07527",
+    "repository": "https://github.com/pgcentralfoundation/pgrx"
+  },
+  "random_word@0.5.2": {
+    "files": [
+      {
+        "coverage": "bundled-data",
+        "covered_path": "src/br/en.br",
+        "path": "random_word-dc1cab8d7951-English-word-list-NOTICE",
+        "sha256": "a1cc597b684928c8c936eeb98a4fbdb002af48063d6585abc4a27a1f675407a6",
+        "url": "https://raw.githubusercontent.com/MitchellRhysHall/random_word/dc1cab8d7951ff4285ea9158c8954d663fdd6fbf/src/license/en.txt"
+      }
+    ],
+    "git_revision": "dc1cab8d7951ff4285ea9158c8954d663fdd6fbf",
+    "repository": "https://github.com/MitchellRhysHall/random_word",
+    "verification": "Supplementary upstream declaration for the English ENABLE word list only; does not supply a package-level license for random_word code. English compressed bytes match the crate-recorded revision."
+  }
+}

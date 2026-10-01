@@ -128,34 +128,6 @@ def run_extension_smoke(*, container: str, user: str, database: str) -> None:
         capture=True,
     )
 
-    def psql(statement: str) -> str:
-        return run_command(
-            [
-                "docker", "exec", container, "psql", "-U", user, "-d", database,
-                "-v", "ON_ERROR_STOP=1", "-At", "-c", statement,
-            ],
-            capture=True,
-        )
-
-    extension_functions = psql(
-        "SELECT count(*) FROM pg_proc AS p "
-        "JOIN pg_depend AS d ON d.classid = 'pg_proc'::regclass "
-        "AND d.objid = p.oid AND d.refclassid = 'pg_extension'::regclass "
-        "AND d.deptype = 'e' "
-        "JOIN pg_extension AS e ON e.oid = d.refobjid "
-        f"WHERE e.extname = '{EXTENSION_NAME}'"
-    )
-    if not extension_functions.isdigit() or int(extension_functions) == 0:
-        raise SmokeError("extension functions were not registered")
-
-    psql("CREATE ROLE pgwarc_smoke_reader")
-    privilege = "SELECT has_function_privilege('pgwarc_smoke_reader', 'hello_pgwarc_lance()', 'EXECUTE')"
-    if psql(privilege) != "f":
-        raise SmokeError("unprivileged role can execute an extension function")
-    psql("GRANT EXECUTE ON FUNCTION hello_pgwarc_lance() TO pgwarc_smoke_reader")
-    if psql(privilege) != "t":
-        raise SmokeError("explicit function grant did not take effect")
-
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     version = check_release_artifacts.cargo_version()

@@ -28,12 +28,17 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src \
     && printf '::pgrx::pg_module_magic!(name, version);\n' > src/lib.rs \
-    && cargo build --release --no-default-features --features "pg${PG_MAJOR}"
+    && cargo build --locked --release --no-default-features --features "pg${PG_MAJOR}"
 
 COPY src ./src
 COPY tests ./tests
+COPY sql ./sql
 COPY pgwarc_lance.control ./
-RUN cargo pgrx install --pg-config "$(which pg_config)" --release --no-default-features --features "pg${PG_MAJOR}"
+# cargo-pgrx 0.19.1 has no --locked install option. Do not resolve new network
+# packages during installation, and verify that the source lockfile is unchanged.
+RUN sha256sum Cargo.lock > /tmp/pgwarc-source-lock.sha256 \
+    && CARGO_NET_OFFLINE=true cargo pgrx install --pg-config "$(which pg_config)" --release --no-default-features --features "pg${PG_MAJOR}" \
+    && sha256sum -c /tmp/pgwarc-source-lock.sha256
 
 RUN if [ "${DEV_PERMISSIONS}" = "1" ]; then \
         chmod -R a+rwX /build /root /usr/local/pgrx \
