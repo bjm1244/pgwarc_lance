@@ -1619,6 +1619,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--min-text-chars", type=int, default=1)
     parser.add_argument("--summary", action="store_true", help="print import summary to stderr")
     parser.add_argument("--summary-json", type=Path, help="write machine-readable summary JSON")
+    parser.add_argument(
+        "--audit-manifest-json",
+        type=Path,
+        help="preflight the complete input and save a private accounting/fingerprint manifest before SQL",
+    )
     return parser.parse_args(argv)
 
 
@@ -1716,6 +1721,76 @@ class ImportSpool:
 
 
 def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
+    audit_manifest: dict[str, Any] | None = None
+    audit_inputs: list[dict[str, Any]] = []
+    if args.audit_manifest_json:
+        if args.limit is not None:
+            raise SystemExit("--audit-manifest-json requires a full input scan without --limit")
+        if __name__ == "__main__":
+            repo_root = str(Path(__file__).resolve().parents[1])
+            if repo_root not in sys.path:
+                sys.path.insert(0, repo_root)
+            sys.modules.setdefault("tools.warc_importer", sys.modules[__name__])
+        from tools import audit_warc_import
+
+        audit_charset = CharsetPolicy.from_options(
+            getattr(args, "charset_override", []),
+            getattr(args, "charset_record_override", []),
+        )
+        audit_pdf = PdfTextExtractor.from_command(
+            getattr(args, "pdftotext", None),
+            getattr(args, "pdf_timeout_seconds", 30),
+            args.max_record_bytes,
+        )
+        audit_docx = (
+            DocxTextExtractor(max_output_bytes=args.max_record_bytes)
+            if args.extract_docx
+            else None
+        )
+        audit_manifest = audit_warc_import.scan_warcs(
+            args.warc,
+            max_record_bytes=args.max_record_bytes,
+            min_text_chars=args.min_text_chars,
+            charset_policy=audit_charset,
+            pdf_extractor=audit_pdf,
+            docx_extractor=audit_docx,
+            retention=ExtractionRetention(args.document_error_policy),
+            import_settings={
+                "bm25_mode": args.bm25_mode,
+                "batch_size": args.batch_size,
+                "batch_max_bytes": args.batch_max_bytes,
+                "lance_mode": lance_mode if args.lance_uri else "none",
+                "lance_uri_sha256": (
+                    hashlib.sha256(args.lance_uri.encode("utf-8")).hexdigest()
+                    if args.lance_uri
+                    else None
+                ),
+                "vector_dim": args.vector_dim,
+                "no_hash_vectors": args.no_hash_vectors,
+                "embedding_command_sha256": (
+                    hashlib.sha256(args.embedding_command.encode("utf-8")).hexdigest()
+                    if args.embedding_command
+                    else None
+                ),
+                "embedding_jsonl_sha256": (
+                    audit_warc_import.sha256_file(args.embedding_jsonl)
+                    if args.embedding_jsonl
+                    else None
+                ),
+            },
+        )
+        audit_charset.validate_record_overrides()
+        audit_warc_import.write_private_manifest(
+            args.audit_manifest_json, audit_manifest
+        )
+        if audit_manifest["status"] != "accounted":
+            raise SystemExit("WARC preflight accounting was incomplete; no SQL executed")
+        if not audit_manifest["accounting"]["import_acceptable"]:
+            raise SystemExit(
+                "WARC preflight found failed records; see the private manifest; no SQL executed"
+            )
+        audit_inputs = audit_manifest["inputs"]
+
     charset_policy = CharsetPolicy.from_options(
         getattr(args, "charset_override", []),
         getattr(args, "charset_record_override", []),
@@ -1736,6 +1811,22 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                 charset_policy, pdf_extractor, docx_extractor, retention,
             ))
             charset_policy.validate_record_overrides()
+            if audit_manifest is not None:
+                expected_records = (
+                    audit_manifest["outcomes"]["imported"]
+                    + audit_manifest["outcomes"]["metadata_only"]
+                )
+                if spool.count != expected_records:
+                    raise ValueError(
+                        "WARC preflight/import record counts differ; no SQL executed"
+                    )
+                if any(
+                    audit_warc_import.sha256_file(Path(item["path"])) != item["sha256"]
+                    for item in audit_inputs
+                ):
+                    raise ValueError(
+                        "WARC input changed after preflight; no SQL executed"
+                    )
             if args.records_jsonl:
                 spool.write_records(args.records_jsonl)
             vectors = None
@@ -1838,6 +1929,8 @@ def main(argv: list[str]) -> int:
         raise SystemExit("--limit must be non-negative")
     if args.min_text_chars < 0:
         raise SystemExit("--min-text-chars must be non-negative")
+    if args.audit_manifest_json and args.limit is not None:
+        raise SystemExit("--audit-manifest-json requires a full input scan without --limit")
     if args.embedding_command and args.embedding_jsonl:
         raise SystemExit("--embedding-command and --embedding-jsonl are mutually exclusive")
     if (args.embedding_command or args.embedding_jsonl) and not args.lance_uri:

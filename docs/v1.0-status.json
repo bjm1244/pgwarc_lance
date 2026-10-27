@@ -1,0 +1,265 @@
+{
+  "schema_version": 1,
+  "tracking_issue": 1,
+  "updated_at": "2026-10-27T05:58:55.131988+00:00",
+  "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
+  "tasks": [
+    {
+      "number": 2,
+      "title": "전체 적재 재현성과 +18 posting 차이 규명",
+      "order": 1,
+      "priority": "P0",
+      "depends_on": [],
+      "status": "done",
+      "summary": "과거 전체 적재의 UTF-8 1,000-byte term 제한이 posting/tf +18 차이의 원인임을 실제 원본으로 재현했다. 원인별 전량 accounting과 실패 시 SQL을 막는 preflight를 추가했으며, 기본 추출 설정의 실패 record 251건도 manifest에 명시했다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
+    },
+    {
+      "number": 3,
+      "title": "PG16 공식 패키징·SQL 생성 경로 복구",
+      "order": 2,
+      "priority": "P0",
+      "depends_on": [],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 4,
+      "title": "바이너리 고지 공백·SBOM·의존성 관리 정리",
+      "order": 3,
+      "priority": "P0",
+      "depends_on": [],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 5,
+      "title": "DB 커밋 이후 색인 반영 계약과 durable outbox",
+      "order": 4,
+      "priority": "P0",
+      "depends_on": [
+        2,
+        3
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 6,
+      "title": "PG–Lance 대사·idempotent 갱신·복구",
+      "order": 5,
+      "priority": "P0",
+      "depends_on": [
+        5
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 7,
+      "title": "증분 적재·checkpoint·재개 가능한 import",
+      "order": 6,
+      "priority": "P0",
+      "depends_on": [
+        2,
+        5,
+        6
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 8,
+      "title": "문서 삭제·tombstone·벡터 정리 lifecycle",
+      "order": 7,
+      "priority": "P0",
+      "depends_on": [
+        6,
+        7
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 9,
+      "title": "일관된 백업·새 인스턴스 복원·장애 복구",
+      "order": 8,
+      "priority": "P0",
+      "depends_on": [
+        3,
+        6,
+        8
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 10,
+      "title": "논리 컬렉션·임베딩 모델/버전 manifest",
+      "order": 9,
+      "priority": "P1",
+      "depends_on": [
+        6
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 11,
+      "title": "문서 청크와 원문 출처 추적",
+      "order": 10,
+      "priority": "P1",
+      "depends_on": [
+        10,
+        7
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 12,
+      "title": "후보 생성부터 적용하는 조건 검색",
+      "order": 11,
+      "priority": "P1",
+      "depends_on": [
+        10,
+        11
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 13,
+      "title": "candidate_k·RRF 옵션과 검색 설명",
+      "order": 12,
+      "priority": "P1",
+      "depends_on": [
+        12
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 14,
+      "title": "출처가 있는 snippet·안전한 highlight",
+      "order": 13,
+      "priority": "P1",
+      "depends_on": [
+        11,
+        13
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 15,
+      "title": "전체 raw-WARC·charset·문서 추출 안전성",
+      "order": 14,
+      "priority": "P1",
+      "depends_on": [
+        2,
+        7,
+        11
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 16,
+      "title": "운영 corpus의 독립 relevance 평가",
+      "order": 15,
+      "priority": "P1",
+      "depends_on": [
+        13,
+        15,
+        14
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 17,
+      "title": "규모별 검색·적재 SLA와 인덱스 비용 결정",
+      "order": 16,
+      "priority": "P1",
+      "depends_on": [
+        13,
+        15
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 18,
+      "title": "장시간 혼합 부하·자원 한도·취소 검증",
+      "order": 17,
+      "priority": "P1",
+      "depends_on": [
+        17,
+        9
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 19,
+      "title": "색인 상태·지연·실패 metrics와 운영 doctor",
+      "order": 18,
+      "priority": "P1",
+      "depends_on": [
+        6,
+        10
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 20,
+      "title": "새 API의 최소 권한·경로·필터 보안 회귀",
+      "order": 19,
+      "priority": "P0",
+      "depends_on": [
+        12,
+        19,
+        8
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 21,
+      "title": "1.0 SQL/CLI 계약·설치·검색 예제 고정",
+      "order": 20,
+      "priority": "P1",
+      "depends_on": [
+        3,
+        13,
+        14,
+        19,
+        20
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    },
+    {
+      "number": 22,
+      "title": "1.0 RC 통합 검증과 최종 출시 판정",
+      "order": 21,
+      "priority": "P0",
+      "depends_on": [
+        4,
+        9,
+        16,
+        18,
+        20,
+        21
+      ],
+      "status": "queued",
+      "criteria_passed": []
+    }
+  ]
+}

@@ -80,6 +80,7 @@ pgwarc_lance/
 │   ├── check_docs.py           # 문서 링크와 하네스 drift 검증
 │   ├── preflight_quality_inputs.py # WARC/query/qrels와 real-corpus manifest read-only preflight
 │   ├── audit_bm25_index.py    # 저장 본문과 BM25 posting read-only 일관성 검사
+│   ├── audit_warc_import.py   # raw WARC import accounting과 fingerprint manifest
 │   └── warc_importer.py       # WARC/WARC.GZ -> metadata/BM25/Lance SQL importer
 ├── src/
 │   ├── lib.rs                 # SQL 함수 진입점 + extension SQL
@@ -586,6 +587,27 @@ Importer-generated SQL은 PostgreSQL metadata/BM25 변경을 chunk 단위 `BEGIN
 - `append` mode에서 실패하거나 같은 WARC를 반복 실행하면 Lance에는 같은 `doc_id` vector row가 중복될 수 있다. PostgreSQL metadata/BM25는 `doc_id` 기준으로 갱신되지만, vector search rank는 중복 row의 영향을 받을 수 있으므로 append 재시도는 dataset 상태가 명확할 때만 사용한다.
 - 대형 import에서는 `--summary-json`을 항상 남기고 `IMPORT_SUMMARY=import.summary.json make doctor-import-summary` 또는 `IMPORT_SUMMARY=import.summary.json BENCH_OUT_DIR=benchmarks/local make finalize-import-run`으로 schema, `execute=false`, zero records, Lance append duplicate risk와 run directory completeness를 확인한다. 실패 분석이 필요할 때만 `--output import.sql`로 SQL artifact를 보관한다. 정상 실행 기본 경로는 disk에 큰 SQL 파일을 만들지 않는 `--execute` streaming이다.
 - chunk 단위 수동 복구가 필요하면 generated SQL의 `-- pgwarc_lance import batch start-end` comment를 기준으로 실패 batch를 찾는다. 이 경우에도 Lance 상태가 불확실하면 batch만 재실행하지 말고 `overwrite` 전체 재실행을 우선한다.
+
+전체 입력의 원인별 대사와 동일 입력 재현성을 확인하려면
+`tools/audit_warc_import.py`를 사용한다. 이 명령은 importer와 같은 WARC parser,
+설정된 extractor, BM25 tokenizer/storage key를 실행하며 PostgreSQL/Lance를 변경하지
+않는다. 모든 raw WARC record를 imported, metadata-only, failed, policy-skipped로
+분류하고 reason count가 각 분류와 일치하는지 검사한다. 입력 파일과 extraction/tokenizer
+설정 checksum, 문서·posting·tf fingerprint를 기록한다. 실패 record가 있어도 accounting은
+완료될 수 있으며 이때 `import_acceptable`은 `false`다. 결과는 입력 경로를 포함할 수 있어
+mode-0700 private 디렉터리에 mode-0600 파일로 저장한다.
+
+`warc_importer.py --audit-manifest-json <path>`는 같은 전체 입력 preflight를 SQL 생성 전에
+실행한다. 입력이 끝까지 대사되지 않거나 record 실패가 있으면 manifest를 남기고 SQL 실행을
+중단한다. 성공한 preflight 뒤 실제 import record 수와 입력 file checksum도 다시 확인한다.
+이 옵션은 `--limit`과 함께 사용할 수 없다.
+
+```bash
+python3 tools/warc_importer.py archive.warc.gz \
+    --audit-manifest-json /private/run/import-manifest.json \
+    --execute \
+    --document-error-policy fail
+```
 
 ### BM25 content/posting audit
 

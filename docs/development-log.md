@@ -1,5 +1,60 @@
 # Development log
 
+## 2026-10-27 — explain the historical 18-posting WARC delta
+
+- 선택 이유: 필수 대기열 최상위 P0 이슈 #2의 완료 기준에 따라 보존된 PostgreSQL
+  비교에서 관측된 posting/tf 18개 차이를 원본 WARC, 당시 적재 코드, 추출 결과,
+  tokenizer 버전으로 대조하고 전량 import accounting을 재현한다. 이전 감사의 mismatch
+  자체를 색인 버그로 간주하지 않는다.
+- 원인은 2026-10-01 전체 적재 wrapper와 repair finalizer가 BM25 term을 UTF-8 1,000
+  bytes 이하로 제한한 역사적 실행 정책이다. 원본 importer commit
+  `046bc936a36071d8842d3f5bdcb318ad0ad4845`의 SHA-256은 당시 실행 상태 checksum과
+  일치한다. normalization, Python tokenizer/frequency, Rust tokenizer는 이후 버전과
+  같은 해시다. 변경된 storage-key 경로는 2,000 bytes 초과 term을 해시 키로 저장하는
+  현재 규칙이며, 과거 1,000-byte filter 때문에 생긴 차이다. 보존된 21,873-document
+  PG16 clone의 posting 8,240,889 / sum(tf) 23,342,041과 재계산 8,240,907 /
+  23,342,059의 차이는 7문서에 걸친 term key 18개다. 새 term은 1,001–2,000-byte
+  직접 키 10개와 2,000-byte 초과 해시 키 8개이며, 각각 tf=1이다. old-only key 및
+  기존 key의 tf 변화는 없었다.
+- `tools/audit_warc_import.py`는 실제 importer의 parser, extractor, tokenizer와
+  storage key를 사용해 PostgreSQL/Lance를 쓰지 않고 raw record를 원인별로 대사한다.
+  WARC 및 설정/tool checksum, 문서/content/posting/tf fingerprint를 남기고
+  raw/imported/metadata-only/failed/policy-skipped 수와 reason 합계를 검증한다.
+  `warc_importer.py --audit-manifest-json`은 full input preflight가 EOF까지 완전하고
+  실패 record가 없을 때만 SQL을 진행하며, 이후 실제 spool count와 입력 checksum도
+  다시 확인한다. README에 사용 예와 private manifest 경계를 기록했다.
+- 같은 원본에서 mismatch 문서 7건을 private slice로 재생했다. 역사적 extraction text
+  hash는 일곱 문서 모두 현재 parser/역사적 UTF-8 보정 결과와 일치했고, 과거 cutoff를
+  다시 적용한 뒤 current storage-key 결과와 비교해 posting/tf delta 18/18을 재현했다.
+  일곱 record CLI preflight는 지원하지 않는 binary MIME 1건을 failed로 남기고 SQL을
+  만들지 않았다. 나머지 여섯 record를 실제 CLI로 두 번 가져와 document/posting/tf 및
+  설정 fingerprint와 SQL hash가 같음을 확인했다. 1,001-byte term synthetic regression
+  fixture도 추가했다. 초기 직접 CLI 실행은 script 경로에서 `tools` import를 찾지 못해
+  실패했으며, repo root 경로 보정과 직접 실행 regression test로 고쳤다.
+- 전체 원본 WARC SHA-256은
+  `4b6b55dc25afdb8ef9bb0e48213faa73cf07756f195b0863ba2693638bf784f8`이다. 전량 read-only
+  대사는 raw 66,190건을 imported 21,624, metadata-only 0, failed 251,
+  policy-skipped 44,315건으로 완전 분류하고 outcome/reason/record type 합계를
+  검증했다. 실패 원인은 PDF extractor 미설정 221, DOCX extractor 미설정 3, 알 수 없는
+  charset 2, unsupported MIME 25건이다. policy-skipped는 비문서 WARC type 44,127건과
+  empty extraction 188건이다. 따라서 manifest는 `accounted`지만 `import_acceptable=false`;
+  이는 read-only accounting 결과이며 전체 적재를 실행하거나 실패를 묵살하지 않았다.
+- 검증: `python3 -B -m unittest tests.test_audit_warc_import tests.test_warc_importer`
+  87개, `python3 -B -m unittest discover -s tests -p 'test_*.py'` 474개,
+  `python3 -B -m py_compile tools/audit_warc_import.py tools/warc_importer.py
+  tests/test_audit_warc_import.py`, `make check-docs`, `git diff --check`가 통과했다.
+  Python 3.12.15 환경이며 C1/C2 원본 비교·CLI SQL은 전부 비공개 run evidence에
+  저장했다. 관련 변경은 importer preflight가 예상대로 direct CLI에서 동작하도록 한
+  Python/documentation/test 범위이고 src/SQL/Cargo/vendor/control/Dockerfile은 바꾸지
+  않았다. 커밋된 tracked snapshot의 native fingerprint, Cargo.lock 및 artifact SHA-256이
+  기존 PG16 validation receipt와 일치해 해당 실제 native 증거를 재사용했다. 저장 SQL은
+  private evidence에만 생성했고 DB 실행은 하지 않았다.
+- 한계와 다음 작업: 현 기본 extractor 설정으로 원본 전체를 적재할 수 있다는 의미는
+  아니다. 위 251개 failed record의 extractor/charset 정책 판정이 남아 있고, 실제 CLI도
+  해당 binary MIME record를 fail-closed 처리했다. posting 재현은 수학적·입력 fingerprint
+  일치이며 relevance 품질, 추출 정답성, 운영 승인 또는 release를 입증하지 않는다.
+  다음 이슈는 queue runner의 필수 선행 조건과 선택을 따른다.
+
 ## 2026-10-27 — audit BM25 postings against stored WARC content
 
 - 선택 이유: 직전 `.18`/`.19` write 비교에서 보존된 `.18` database clone이 현재 importer
