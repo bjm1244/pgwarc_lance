@@ -20,11 +20,62 @@ FROM lance_vector_search('/tmp/pgwarc_lance_regress.lance', ARRAY[0,0,0,0]::floa
 
 BEGIN;
 DELETE FROM pgwarc_lance.bm25_term;
+DELETE FROM pgwarc_lance.bm25_long_term;
 DELETE FROM pgwarc_lance.bm25_doc;
 DELETE FROM pgwarc_lance.warc_record;
 
 SELECT bm25_index_document(1, 'PostgreSQL 검색 엔진');
 SELECT bm25_index_document(2, 'Lance vector search');
+
+-- Match the longest exact token observed in the audited Common Crawl slice.
+COPY (
+    SELECT bm25_index_document(3, repeat('x', 2298914)) IS NOT NULL
+) TO STDOUT;
+COPY (
+    SELECT doc_id::text
+    FROM bm25_search(repeat('x', 2298914), 10)
+    ORDER BY doc_id
+) TO STDOUT;
+
+DO $$
+BEGIN
+    UPDATE pgwarc_lance.bm25_long_term
+    SET term = 'collision fixture'
+    WHERE term_key = (
+        SELECT term FROM pgwarc_lance.bm25_term WHERE doc_id = 3
+    );
+    BEGIN
+        PERFORM 1 FROM bm25_search(repeat('x', 2298914), 10);
+        RAISE EXCEPTION 'long-term hash collision was not detected';
+    EXCEPTION WHEN data_exception THEN
+        NULL;
+    END;
+    UPDATE pgwarc_lance.bm25_long_term
+    SET term = repeat('x', 2298914)
+    WHERE term_key = (
+        SELECT term FROM pgwarc_lance.bm25_term WHERE doc_id = 3
+    );
+END $$;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM bm25_index_document(4, repeat('x', 2500001));
+        RAISE EXCEPTION 'token above the searchable limit was indexed';
+    EXCEPTION WHEN program_limit_exceeded THEN
+        NULL;
+    END;
+END $$;
+
+-- Reindexing removes the posting even though the dictionary may retain its key.
+COPY (
+    SELECT bm25_index_document(3, 'replacement ordinary') IS NOT NULL
+) TO STDOUT;
+COPY (
+    SELECT doc_id::text
+    FROM bm25_search(repeat('x', 2298914), 10)
+    ORDER BY doc_id
+) TO STDOUT;
 
 INSERT INTO pgwarc_lance.warc_record (
     doc_id,
@@ -49,6 +100,17 @@ SELECT lance_insert_many(
     ARRAY['doc1','doc2']::text[]
 );
 
+-- This result has no WARC metadata row; it must keep default metadata values.
+DO $$
+BEGIN
+    PERFORM lance_insert(
+        '/tmp/pgwarc_lance_hybrid_regress.lance',
+        4,
+        ARRAY[1000,0,0,0]::float4[],
+        'no-metadata'
+    );
+END $$;
+
 SELECT doc_id, source
 FROM hybrid_search('검색', ARRAY[0,0,0,0]::float4[], '/tmp/pgwarc_lance_hybrid_regress.lance', 2)
 ORDER BY doc_id;
@@ -67,6 +129,12 @@ COPY (
       AND warc_date::timestamptz >= '2026-06-30T00:00:00Z'::timestamptz
       AND source_file = 'sample.warc'
     ORDER BY doc_id
+) TO STDOUT;
+
+COPY (
+    SELECT doc_id, target_uri IS NULL, text_len
+    FROM hybrid_warc_search('검색', ARRAY[0,0,0,0]::float4[], '/tmp/pgwarc_lance_hybrid_regress.lance', 10)
+    WHERE doc_id = 4
 ) TO STDOUT;
 
 ROLLBACK;

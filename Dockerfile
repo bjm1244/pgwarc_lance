@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
 RUN mkdir -p src \
     && printf '::pgrx::pg_module_magic!(name, version);\n' > src/lib.rs \
     && cargo build --locked --release --no-default-features --features "pg${PG_MAJOR}"

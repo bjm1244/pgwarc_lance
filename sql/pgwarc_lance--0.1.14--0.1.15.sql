@@ -1,0 +1,1 @@
+-- Runtime implementation change only; the extension SQL catalog is unchanged.

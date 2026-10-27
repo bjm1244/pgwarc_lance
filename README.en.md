@@ -2,17 +2,33 @@
 
 PostgreSQL extension (built with [pgrx](https://github.com/pgcentralfoundation/pgrx)) that adds table-backed BM25 search, Lance-based vector search, and RRF hybrid search for WARC / web-archive records — all callable from SQL. Korean documentation is in [README.md](README.md).
 
-> **Status: research prototype — not production-ready.** The 0.1.5 candidate fixes mixed BM25 statement snapshots during concurrent ingestion. It passed 433 Python tests, 122 database checks, the public SciFact baseline and 2,000 prepared load transactions. The original unprepared performance failure and the fixture preparation correction remain documented. Do not deploy the vulnerable 0.1.2 binary. Operational WARC quality, workload targets and incident procedures remain open. Read [SECURITY.md](SECURITY.md) before deploying it anywhere that matters.
+> **Status: research prototype — not production-ready.** The current source candidate is **0.1.20**. It consolidates the completed BM25 index, bounded PDF/DOCX extraction and record-scoped charset work, and fixes the zstd dependencies flagged by current RustSec advisories. See [PUBLICATION.md](PUBLICATION.md) for actual PostgreSQL 16 install/upgrade/search evidence and its limits. Independent relevance evaluation, operational SLA, full raw-WARC ingestion and binary license notices remain open. Read [SECURITY.md](SECURITY.md) for security and transaction boundaries.
 
 Production acceptance gates are recorded in [PRODUCTION.md](PRODUCTION.md).
-The 0.1.5 candidate provides upgrade scripts from 0.1.0/0.1.1/0.1.2/0.1.3/0.1.4, backup tests,
-a disk-backed importer CLI and idempotent `--lance-mode upsert` for an existing dataset. Use `--temp-dir`, `--batch-size`, `--batch-max-bytes`, and
-`--embedding-timeout` to set ingestion resource limits; see the production guide
-for their precise limits and recovery procedure.
+Earlier 0.1.18 posting-window and IDF trials are recorded separately in the development log. The 0.1.19 term-frequency-index candidate reduces work in the q6 document-frequency scan, while its end-to-end latency and write costs remain inconclusive. Result fingerprints matched, but no independent qrels were available. See the [development log](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), and [THIRD_PARTY.md](THIRD_PARTY.md) for scope and limitations.
+
+The 0.1.19 candidate adds a narrow BM25 term index through a 0.1.18-to-0.1.19 migration. The supported script path continues from 0.1.11 through 0.1.14, 0.1.15, 0.1.16, 0.1.17, 0.1.18 and 0.1.19; the 0.1.11 baseline has migrations from 0.1.0 through 0.1.11, backup tests, a disk-backed importer CLI and idempotent `--lance-mode upsert` for an existing dataset. Use `--temp-dir`, `--batch-size`, `--batch-max-bytes`, and `--embedding-timeout` to set ingestion resource limits; see the production guide for their precise limits and recovery procedure.
 
 License: Apache-2.0 ([LICENSE](LICENSE), [NOTICE](NOTICE)).
 
 Source publication review: [PUBLICATION.md](PUBLICATION.md).
+
+The 0.1.11 baseline retains both the BM25 posting covering index and
+the narrow `bm25_doc(doc_len)` statistics index, and adds `doc_len` to the BM25
+document primary key's INCLUDE columns. A PG16.15 locked package, fresh install,
+SQL smoke, four regressions and a populated 0.1.10-to-0.1.11 Common Crawl clone
+upgrade passed. The upgrade took 1.23 seconds and retained 21,873 documents,
+8,240,889 postings and 21,873 WARC rows with a validated foreign key. Alternating
+baseline and covering-key schemas across three warm 8-client runs each gave p95
+medians of 170.92→133.13 ms for BM25 and 335.63→319.22 ms for hybrid. Backend CPU
+fell from 10.33→9.27 and 47.30→46.09 ms/request. Result hashes matched. The stats
+scan remained at 30 shared hits; the multi-term document scan changed from a
+1,598-hit sequential scan to an 86-hit index-only scan, and rare-term lookups
+fell from 17,289 to 11,527 shared hits with zero heap fetches. The host was under
+substantial shared load; raw WARC was not reimported and cold I/O was not
+measured. These are not SLA results. Binary notice review and production approval remain open
+because two package license texts are missing; see [the development
+log](docs/development-log.md), [SECURITY.md](SECURITY.md) and [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Contents
 
@@ -136,3 +152,15 @@ This is not the operational WARC corpus; see [PRODUCTION.md](PRODUCTION.md) for
 reproduction, migration and remaining acceptance gates.
 
 See [OPERATIONS.md](OPERATIONS.md) for tested reader/writer grants, DDL-free ingestion, monitoring and incident response.
+
+## Document extraction failures
+
+PDF and DOCX extraction is opt-in: use `--pdftotext /path/to/pdftotext` and
+`--extract-docx`. The default `--document-error-policy fail` stops before SQL on
+extraction failure. Explicit `--document-error-policy metadata-only` retains a
+failed document with empty text and reports it in `extraction_retention`; it
+receives no vector, and embedding commands only see text-bearing records.
+Diagnostics retain at most 16 error messages of 512 characters each and count
+additional omitted errors. This policy does not suppress missing extractors, HTTP decoding/size or
+charset errors. PDF signatures are recognized after HTTP decoding. Empty text is not
+OCR or evidence of successful content recovery.

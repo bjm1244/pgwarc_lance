@@ -4,12 +4,12 @@
 
 ## 지원 버전
 
-보안 수정은 최신 `master`에만 반영한다. PostgreSQL 13–17 빌드를 지원하지만, 각 major의 보안 패치 보증을 제공하지 않는다.
+보안 수정은 최신 공개 `main` 소스 후보에 반영한다. PostgreSQL 13–17 빌드를 지원하지만, 각 major의 보안 패치 보증을 제공하지 않는다.
 
 ## 알려진 보안 제약 (현재 코드 기준)
 
 1. **확장은 `superuser = true`, `trusted = false`로 설치된다.** `CREATE EXTENSION`에 슈퍼유저 권한이 필요하다. 일반 사용자에게 확장 소유권을 넘기지 마라.
-2. **파일 접근은 PostgreSQL 서버 프로세스의 OS 권한으로 동작한다.** SQL 호출자의 OS 권한이 아니다. 새 설치는 모든 확장 함수의 `PUBLIC EXECUTE`를 회수한다. 관리자는 신뢰한 역할에 필요한 함수와 테이블 권한만 개별적으로 부여하라. 기존 0.1.0 설치에는 전체 upgrade SQL을 포함한 0.1.5 artifact를 설치하고, `sql/pgwarc_lance-restrict-access.sql`을 업그레이드 바깥에서 먼저 실행한 뒤 `ALTER EXTENSION pgwarc_lance UPDATE TO '0.1.5';`을 적용하라. 설치에 슈퍼유저가 필요하다는 사실만으로 이후 함수 호출이 제한되지는 않는다.
+2. **파일 접근은 PostgreSQL 서버 프로세스의 OS 권한으로 동작한다.** SQL 호출자의 OS 권한이 아니다. 새 설치는 모든 확장 함수의 `PUBLIC EXECUTE`를 회수한다. 관리자는 신뢰한 역할에 필요한 함수와 테이블 권한만 개별적으로 부여하라. 기존 0.1.0 설치에는 전체 upgrade SQL을 포함한 최신 artifact를 설치하고, `sql/pgwarc_lance-restrict-access.sql`을 업그레이드 바깥에서 먼저 실행한 뒤 현재 지원 대상 버전으로 업데이트하라. 설치에 슈퍼유저가 필요하다는 사실만으로 이후 함수 호출이 제한되지는 않는다.
 3. **경로 제한은 관리자가 설정한다.** `pgwarc_lance.allowed_uri_prefix`는 실제 존재하는 로컬 디렉토리다. 설정하면 경로 구성요소 경계와 심볼릭 링크를 확인하고, `..`, 상대 경로, 원격 URI, percent encoding, 깨진 심볼릭 링크를 거부한다. 파일 접근·쓰기 잠금·로그에는 확인된 실제 경로를 사용한다. 비어 있으면 신뢰한 역할의 URI를 제한하지 않는다. 경로 검사와 파일 접근 사이에 OS 사용자가 디렉토리나 심볼릭 링크를 교체하는 경쟁까지 막지는 못하므로, 데이터 루트와 상위 디렉토리는 신뢰한 OS 사용자만 수정할 수 있게 하라.
 4. **자원 제한은 관리자만 변경한다.** `pgwarc_lance.max_scan_rows`, `allowed_uri_prefix`, `allow_destructive_ops`는 슈퍼유저 설정이다. `max_scan_rows = 0`은 무제한이므로 필요에 맞는 양수 상한을 설정하라.
 5. **`overwrite = true`는 되돌릴 수 없다.** `lance_create_table(uri, dim, true)`는 기존 Lance 데이터셋을 삭제하고 새로 만든다.
@@ -48,6 +48,26 @@ Compose의 `DEV_PERMISSIONS=1`은 테스트를 위해 빌드/설치 디렉토리
 
 ## 의존성 보안 검사
 
+### 2026-10-27 current source candidate: zstd remediation
+
+A fresh scan against RustSec DB
+`3279c99911354c400e1d41e47c7d60e39258b147` (1,378 advisories) failed on the
+0.1.19 lockfile: three vulnerabilities and ten unsound warnings in zstd 0.13.3
+and zstd-safe 7.2.4. Earlier clean audits below are historical results.
+
+The 0.1.20 source candidate locks zstd 0.14.3, zstd-safe 8.2.0 and
+zstd-sys 2.1.2+zstd.1.5.7, containing the
+[upstream fixes](https://github.com/gyscos/zstd-rs/pull/384).
+Arrow IPC 58.3.0 and Lance encoding 7.0.0 still require the older zstd line;
+[the two vendored source patches](vendor/README.md) change only those manifest
+requirements and preserve upstream source and license provenance. No zstd
+package is relabeled and no advisory is ignored. The same audit now reports
+zero vulnerabilities, unsound or yanked findings. Three unmaintained warnings
+remain. This is a point-in-time dependency result, not production acceptance.
+
+The following versioned results document earlier scans:
+
+
 0.1.2 후보의 2026-10-01 RustSec 검사에서 알려진 취약점 3건과 unsound 경고가
 발견됐다. 그 바이너리는 운영에 사용하지 마라. 0.1.3은 `crossbeam-epoch` 0.9.20,
 `h2` 0.4.16, `rustls` 0.23.45 (`rustls-webpki` 0.103.15), `event-listener` 5.4.2로
@@ -78,6 +98,64 @@ cargo install cargo-audit --version 0.22.2 --locked
 make audit-dependencies
 ```
 
+### 2026-10-20 재검사: 0.1.6 기준점과 0.1.7 후보
+
+RustSec DB revision `999ec89d5d3f10f20be14750ec8c2d8b44e0ac9b`
+(1,338 advisories)로 0.1.6 lockfile을 재검사했을 때 알려진 취약점 9건이
+발견됐다. 과거의 0건 결과는 당시 검사 시점의 기록이다.
+`quinn-proto` 0.11.15는 [RUSTSEC-2026-0338](https://rustsec.org/advisories/RUSTSEC-2026-0338.html)~0342,
+`rustls` 0.23.45는 [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346)~0349에 해당한다.
+권고의 수정 범위는 각각
+`quinn-proto >=0.11.18`, `rustls >=0.23.46`이다.
+
+0.1.7 후보는 이 최소 수정 버전으로 `quinn-proto`와 `rustls`를 갱신하고
+Cargo.lock의 재현 가능한 의존성 그래프를 빌드했다. 보안 검사 예외는 추가하지
+않았다. 같은 revision에서 `make audit-dependencies`가 561개 의존성을 검사해
+취약점, unsound, yanked를 각각 0건으로 통과했다. `paste`, `proc-macro-error2`,
+`serde_cbor`의 기존 유지보수 중단 경고 3건은 계속 표시된다. PostgreSQL 16
+fresh install, SQL smoke, 네 SQL regression 및 데이터가 있는 0.1.6→0.1.7
+upgrade도 통과했다. 두 미해결 package license text 때문에 binary 배포 검토는
+완료되지 않았으며, 이 개발 후보와 기존 바이너리는 운영 배포 승인을 받지 않았다.
+상세 실행 결과는 [개발 기록](docs/development-log.md)과
+[THIRD_PARTY.md](THIRD_PARTY.md)에 있다.
+
+### 2026-10-21 재검사: 최신 RustSec DB와 0.1.8 후보
+
+최신 확인 DB revision `e6f94f3760d5e6c54c1b05f204002263bc025524`
+(1,348 advisories)에서 0.1.6은 기존 9건 외에
+`rustls-webpki` 0.103.15의 [RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382.html)까지
+취약점 10건으로 실패했다. 이 권고는 `rustls-webpki >=0.103.16`에서 수정된다.
+같은 DB로 0.1.7 후보를 다시 검사하면 이 1건이 남는다.
+
+0.1.8 후보는 `quinn-proto` 0.11.18, `rustls` 0.23.46 및
+`rustls-webpki` 0.103.16을 잠근다. `make audit-dependencies`는 Linux x86_64에서
+561개 의존성을 검사해 취약점, unsound, yanked 패키지를 각각 0건으로 보고했다.
+`paste`, `proc-macro-error2`, `serde_cbor`의 유지보수 중단 경고 3건은 남아 있다.
+PG16.15 신규 설치, SQL smoke와 네 SQL 회귀가 통과했고 별도 `postgres:16.6`
+컨테이너의 데이터가 있는 0.1.7→0.1.8 업그레이드도 통과했다. 이는 검증한 플랫폼과
+lockfile의 결과이며 운영 승인은 아니다.
+`random_word`와 `seahash`의 primary license text 공백으로 바이너리 재배포 검토도
+미완료다.
+
+### 2026-10-24 재검사: 0.1.17 후보
+
+RustSec DB revision `21d909e4c8bd4e14c7aea58bf980c881a0053ab1`
+(1,352 advisories)에서 0.1.16 lockfile의 `ctutils` 0.4.2와 `tokio` 1.52.3이
+각각 [RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385.html),
+[RUSTSEC-2026-0386](https://rustsec.org/advisories/RUSTSEC-2026-0386.html)에
+해당했다. 0.1.17 후보는 수정 버전인 `ctutils` 0.4.4와 `tokio` 1.53.3을
+잠근다. Cargo.lock SHA-256은
+`0696a9cc0b14c0f8dcea5e1b6a35b6cd63afc1df971380c89a7461c3cf52638a`다.
+현재 감사는 561개 의존성을 검사해 알려진 취약점, unsound, yanked를 각각 0건으로
+보고했다. `paste`, `proc-macro-error2`, `serde_cbor`의 미관리 경고 3건은 남아 있다.
+
+Linux x86_64 / PostgreSQL 16.15의 locked package, 네 SQL 회귀와 populated
+0.1.16→0.1.17 upgrade smoke도 통과했다. 이는 이 lockfile과 테스트 환경에 대한
+개발 근거이며 운영 승인은 아니다. `random_word` 0.5.2와 `seahash` 4.1.0의
+기본 license text가 strict notice inventory에 없어 바이너리 재배포 검토는
+미완료다. 상세 범위와 재개 작업은 [개발 기록](docs/development-log.md)과
+[THIRD_PARTY.md](THIRD_PARTY.md)에 있다.
+
 ## 제보
 
 보안 취약점은 공개 이슈로 올리지 말고 저장소 관리자에게 비공개로 전달하라(Security Advisory). 포함할 내용:
@@ -105,7 +183,10 @@ WARC importer의 ID 생성 규칙은 바뀌지 않았다. 입력 identity/conten
 ## 검색 입력과 중간 메모리
 
 0.1.4부터 BM25/vector/hybrid 검색의 `k`는 최대 10,000이며 BM25/hybrid 질의는
-UTF-8 기준 65,536바이트까지 허용한다. 초과하면 SQLSTATE 54000으로 실패한다.
+UTF-8 기준 65,536바이트까지 허용한다. 0.1.16 후보에서는 Common Crawl에서
+확인한 최장 토큰 검색을 위해 2,500,000바이트로 상향하며, 그보다 크면 SQLSTATE
+54000으로 실패한다. SHA-256 key 사전은 원래 긴 토큰을 보관하고 extension config
+dump 대상이므로 독자/작성자 역할 권한과 보존 기간도 운영 설정에 포함해야 한다.
 음수 `k`는 계속 22023으로 거부하고 `k=0`은 빈 결과를 반환한다.
 BM25는 PostgreSQL에서 점수를 합산하고 정렬한 뒤 상위 `k`행만 Rust로 가져온다.
 전체 posting과 전체 문서 점수를 Rust Vec/HashMap으로 복사하던 경로를 제거했다.

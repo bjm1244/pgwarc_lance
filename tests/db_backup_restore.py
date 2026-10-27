@@ -7,6 +7,7 @@ and extension installation privileges. Snapshot directories remain for inspectio
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shlex
 import subprocess
@@ -55,6 +56,8 @@ def main() -> int:
             raise AssertionError(f"{name}: expected {expected!r}, got {actual!r}")
         checks[name] = True
 
+    long_token = "".join(hashlib.sha256(str(index).encode()).hexdigest() for index in range(120))
+    legacy_long_token = "x" * 2001
     summary_sql = """SELECT json_build_object(
         'docs', (SELECT count(*) FROM pgwarc_lance.bm25_doc),
         'terms', (SELECT count(*) FROM pgwarc_lance.bm25_term),
@@ -82,6 +85,15 @@ def main() -> int:
             SELECT setval('pgwarc_lance.lance_write_log_id_seq',10000,true);
             CREATE ROLE {role} NOLOGIN;
         """)
+        if args.upgrade_from == "0.1.15":
+            # Model a posting stored by the old schema before the new binary
+            # is used to upgrade it. This term fits old 8 KiB B-tree limits.
+            sql(source_db, f"""
+                INSERT INTO pgwarc_lance.bm25_doc(doc_id,content,doc_len)
+                    VALUES (3,'legacy {legacy_long_token}',2);
+                INSERT INTO pgwarc_lance.bm25_term(term,doc_id,tf)
+                    VALUES ('legacy',3,1),('{legacy_long_token}',3,1);
+            """)
         role_created = True
         sql(source_db, f"""
             GRANT USAGE ON SCHEMA pgwarc_lance TO {role};
@@ -110,12 +122,23 @@ def main() -> int:
                 raise AssertionError("upgrade changed SQL data or BM25 results")
             expect(sql(source_db, f"SELECT string_agg(version::text,',' ORDER BY version) FROM lance_dataset_versions('{uri}');"), original_versions, "upgrade_preserves_lance_versions")
             expect(sql(source_db, f"SET ROLE {role}; SELECT count(*) FROM bm25_search('shared',10);"), "2", "upgrade_preserves_selective_grants")
+            if old_version == "0.1.15":
+                sql(source_db, f"GRANT SELECT ON pgwarc_lance.bm25_long_term TO {role};")
+                expect(
+                    sql(source_db, f"SET ROLE {role}; SELECT doc_id FROM bm25_search('legacy {legacy_long_token}',10);"),
+                    "3",
+                    "upgrade_rekeys_existing_long_posting",
+                )
             checks["populated_extension_upgrade"] = True
-        expect(sql(source_db, "SELECT cardinality(extconfig) FROM pg_extension WHERE extname='pgwarc_lance';"), "5", "all_tables_and_sequence_registered")
+        sql(source_db, f"SELECT bm25_index_document(3, '{long_token}');")
+        sql(source_db, f"GRANT SELECT ON pgwarc_lance.bm25_long_term TO {role};")
+        expect(sql(source_db, f"SET ROLE {role}; SELECT doc_id FROM bm25_search('{long_token}',10);"), "3", "long_token_search_works_for_reader")
+        original_summary = json.loads(sql(source_db, summary_sql))
+        expect(sql(source_db, "SELECT cardinality(extconfig) FROM pg_extension WHERE extname='pgwarc_lance';"), "6", "all_tables_and_sequence_registered")
         # The fixture has no concurrent writers. Production must quiesce writers
         # before taking the SQL and filesystem snapshots as one backup set.
         dump = run(tool("pg_dump") + ["--no-owner", "-d", source_db])
-        for table in ["bm25_doc", "bm25_term", "warc_record", "lance_write_log"]:
+        for table in ["bm25_doc", "bm25_term", "bm25_long_term", "warc_record", "lance_write_log"]:
             if f"COPY pgwarc_lance.{table} " not in dump:
                 raise AssertionError(f"pg_dump omitted {table} data")
         checks["dump_contains_all_extension_table_data"] = True
@@ -125,6 +148,7 @@ def main() -> int:
         if json.loads(sql(restored_db, summary_sql)) != original_summary:
             raise AssertionError("restored SQL data/search results differ")
         checks["sql_data_and_bm25_results_restored"] = True
+        expect(sql(restored_db, f"SET ROLE {role}; SELECT doc_id FROM bm25_search('{long_token}',10);"), "3", "long_token_search_restored_for_reader")
         expect(sql(restored_db, "SELECT nextval('pgwarc_lance.lance_write_log_id_seq');"), "10001", "write_log_sequence_state_restored")
         expect(sql(restored_db, f"SELECT lance_count('{restored_uri}');"), "2", "lance_row_count_restored")
         expect(sql(restored_db, f"SELECT string_agg(version::text,',' ORDER BY version) FROM lance_dataset_versions('{restored_uri}');"), original_versions, "lance_versions_restored")

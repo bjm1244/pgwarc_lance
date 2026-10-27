@@ -126,6 +126,22 @@ def main() -> int:
         # Scan enough vectors to exercise Lance cancellation, then reuse the same
         # backend connection. ON_ERROR_STOP=off permits the post-cancel query.
         sql(f"SELECT lance_insert_many('{uri}', ARRAY(SELECT x FROM generate_series(10,50009) x)::bigint[], ARRAY(SELECT 0::float4 FROM generate_series(1,200000)), 4, ARRAY(SELECT 'scan' FROM generate_series(1,50000)));")
+        hybrid_timeout = subprocess.run(
+            command + ["-v", "ON_ERROR_STOP=0"],
+            input=(
+                f"SET statement_timeout='5ms'; "
+                f"SELECT count(*) FROM hybrid_search('shared',ARRAY[0,0,0,0]::float4[],'{uri}',10); "
+                "RESET statement_timeout; SELECT 'backend-reusable';"
+            ),
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        if "57014" not in hybrid_timeout.stderr or "backend-reusable" not in hybrid_timeout.stdout:
+            raise AssertionError(
+                f"hybrid timeout/backend reuse failed: {hybrid_timeout.stdout} {hybrid_timeout.stderr}"
+            )
+        checks["hybrid_search_timeout_and_backend_reuse"] = True
         resumed = subprocess.run(command + ["-v", "ON_ERROR_STOP=0"], input=f"SET statement_timeout='10ms'; SELECT count(*) FROM lance_scan('{uri}',50001); RESET statement_timeout; SELECT 'backend-reusable';", text=True, capture_output=True, timeout=30)
         if "57014" not in resumed.stderr or "backend-reusable" not in resumed.stdout:
             raise AssertionError(f"Lance scan cancellation/reuse failed: {resumed.stdout} {resumed.stderr}")

@@ -1,6 +1,10 @@
 # Production readiness
 
 This is still a source preview. Passing unit tests is not a production approval.
+The current source candidate is 0.1.20. Its security-only native update follows
+0.1.19 with a no-DDL migration; earlier versioned examples below are historical.
+Install the complete consecutive upgrade chain and reconnect existing backends.
+See [PUBLICATION.md](PUBLICATION.md) for current evidence and limitations.
 The initial validation profile is PostgreSQL 16, a single instance, local Lance
 storage, trusted operators, and a separate disposable validation database.
 Confirm the intended workload and corpus before assigning release thresholds.
@@ -57,20 +61,22 @@ with no network, published ports or host data mounts. It restores role definitio
 from a separate backup into the second cluster, verifies grants and database
 policies, and verifies a new write after restoring SQL and Lance.
 
-## Upgrade from 0.1.0, 0.1.1, 0.1.2, 0.1.3 or 0.1.4
+## Upgrade from 0.1.0 through 0.1.10
 
-The 0.1.5 candidate includes `sql/pgwarc_lance--0.1.0--0.1.1.sql`,
+The 0.1.11 candidate includes `sql/pgwarc_lance--0.1.0--0.1.1.sql`,
 `sql/pgwarc_lance--0.1.1--0.1.2.sql`, `sql/pgwarc_lance--0.1.2--0.1.3.sql`,
-`sql/pgwarc_lance--0.1.3--0.1.4.sql` and `sql/pgwarc_lance--0.1.4--0.1.5.sql`. Stop writers,
+`sql/pgwarc_lance--0.1.3--0.1.4.sql` through `sql/pgwarc_lance--0.1.10--0.1.11.sql`. Stop writers,
 back up SQL and Lance together, install the new shared library/control/install
 SQL/upgrade SQL, and reconnect all sessions that loaded the previous library.
 For a legacy 0.1.0 installation, run `sql/pgwarc_lance-restrict-access.sql` as the extension owner **before**
-`ALTER EXTENSION pgwarc_lance UPDATE TO '0.1.5';` in each database.
+`ALTER EXTENSION pgwarc_lance UPDATE TO '0.1.11';` in each database.
 The first migration registers backup data and requires PUBLIC function access to be
 revoked. The second adds the document posting index and a new upsert function
 with PUBLIC execution revoked; existing function grants are preserved. The third, fourth and fifth
 only advance versions for the dependency, executor and statement-snapshot changes; they perform no DDL or
-grant changes. The chain retains data and explicit role grants. Privilege changes must be
+grant changes. The 0.1.10→0.1.11 update replaces the `bm25_doc` primary-key index
+and rebuilds the extension-owned foreign key as validated. The chain retains
+data and explicit role grants. Privilege changes must be
 applied outside the extension update so PostgreSQL does not record user grants
 as extension defaults and omit them from later dumps. Recheck those grants and runtime
 settings before resuming service. Older backups from unregistered 0.1.0 tables
@@ -82,6 +88,91 @@ SQL and the upgrade script must be installed. Also exercise
 `--legacy-public-execute` to verify pre-upgrade remediation and grants after
 restoring a legacy installation. Never replace the shared library
 while application backends are actively using it.
+
+The 0.1.11 distribution includes consecutive upgrade scripts through
+0.1.10→0.1.11. The latest populated check upgraded a prepared PostgreSQL 16.15
+Common Crawl clone with 21,873 documents, 8,240,889 postings and 21,873 WARC
+rows in 1.23 seconds; it preserved all rows and a validated foreign key. This
+does not revalidate every legacy starting version or production lock behavior.
+
+## 0.1.10 BM25 corpus-statistics index candidate
+
+The candidate adds `bm25_doc(doc_len)` to support the `count(*)` and `avg(doc_len)`
+aggregate in BM25 search. The preceding Common Crawl profile had 21,873 documents;
+that statistics CTE used a sequential scan touching 1,598 shared blocks, with no
+temporary reads or writes. A synthetic fixture with 21,873 rows and about 512
+bytes of high-entropy content per row occupied 12 MiB; the new index occupied
+184 KiB. On that fixture, the baseline sequential scan touched 1,563 shared
+blocks and took 4.052 ms for the aggregate. Immediately after insert, PostgreSQL
+still chose a sequential scan. After VACUUM marked the table pages all-visible,
+the aggregate used an index-only scan, touched 23 shared blocks, had zero heap
+fetches, and took 2.342 ms. Both plans reported zero read and temporary blocks.
+The ordered BM25 result rows before and after had the same SHA-256. In three
+warm repetitions of 1,000 aggregate calls, median backend CPU from `/proc` ticks
+was 2.68 s before versus 1.17 s after; median observed wall time was 2.838 s
+versus 1.206 s. These fixture measurements include loop overhead and are not
+search request latency.
+
+This isolates the aggregate plan; its measurements are not request latency. A
+follow-up compared 0.1.9 and 0.1.10 on separate PostgreSQL 16.15 copies of the
+prepared Common Crawl corpus (21,873 documents, 8,240,889 postings, 21,873
+metadata rows and 21,825 vectors). The saved source WARC checksum was
+`4b6b55dc25afdb8ef9bb0e48213faa73cf07756f195b0863ba2693638bf784f8`. The run
+copied the loaded validation database and Lance dataset; it did not reimport raw
+WARC. Both versions used eight clients, eight warmups per client, 128 requests
+per client, `k=5` and the same eight-query mix. Each mode completed 1,024 requests
+without errors, and all eight per-query BM25/hybrid result hashes matched.
+
+After `VACUUM (ANALYZE)`, the median of three warm runs per version was:
+
+| Measure | 0.1.9 | 0.1.10 | Change |
+| --- | ---: | ---: | ---: |
+| BM25 p95 (ms) | 92.85 | 90.81 | −2.2% |
+| BM25 backend CPU (ms/request) | 11.51 | 10.15 | −11.9% |
+| Hybrid p95 (ms) | 234.63 | 230.77 | −1.6% |
+| Hybrid backend CPU (ms/request) | 52.14 | 50.57 | −3.0% |
+
+For the simple `privacy` query, the statistics scan changed from a 1,598-hit
+sequential scan to a 30-hit index-only scan with zero heap fetches. A second
+document scan remains for a multi-term plan. Before VACUUM, the candidate still
+used a sequential scan and CPU/p95 were effectively unchanged. The index occupied
+240 KiB. The warm plans reported zero shared reads and temporary blocks; physical
+device I/O and cold-cache latency were not measured. The p95 changes are modest,
+the host was shared, and these values are not an SLA.
+
+Import throughput, index write overhead, autovacuum timing, fresh raw-WARC
+ingestion, independent qrels and sustained load remain unmeasured. On PostgreSQL
+16.6, the populated 0.1.9→0.1.10 upgrade preserved the BM25, WARC and Lance
+fixture rows and produced a valid `doc_len` index. A fresh artifact install also
+passed on PG16.6. This candidate remains outside production approval.
+
+## 0.1.11 BM25 document covering primary-key candidate
+
+The 0.1.11 candidate adds `doc_len` as an INCLUDE column on `bm25_doc_pkey`,
+while retaining the smaller `bm25_doc(doc_len)` statistics index. After
+`VACUUM (ANALYZE)`, a prepared Common Crawl comparison showed the rare-term
+document join use an index-only scan: shared hits fell from 17,289 to 11,527
+across 5,763 loops, with zero heap fetches. A multi-term document scan changed
+from a 1,598-hit heap sequential scan to an 86-hit index-only scan. The
+corpus-statistics scan remained an index-only scan with 30 shared hits.
+
+Three alternating warm 8-client runs per schema on PostgreSQL 16.15 had p95
+medians of 170.92→133.13 ms for BM25 and 335.63→319.22 ms for hybrid. Backend
+CPU estimates were 10.33→9.27 and 47.30→46.09 ms/request. The shared host was
+under substantial load, so these observations are not an SLA. A primary-key-only
+pilot did not improve BM25 p95; retaining the narrow statistics index is part
+of the measured candidate schema.
+
+The 0.1.10→0.1.11 migration replaces the primary key and revalidates the
+extension-owned foreign key. The prepared-clone command took 1.23 seconds, but
+locks, peak disk use and larger production corpus behavior were not measured.
+Index construction and foreign-key validation occur during the extension
+update transaction; schedule a maintenance window, test on a full-size restore,
+and keep a verified SQL plus Lance backup before using this candidate. The
+package passed fresh install, the project SQL smoke, four SQL regressions and
+the populated clone upgrade on PG16.15. Independent qrels, fresh raw-WARC
+ingestion, write overhead, cold I/O and sustained load remain unmeasured. This
+candidate is not production approved.
 
 ## Backup and restore procedure
 
@@ -548,24 +639,280 @@ This small compatibility map is not a complete browser encoding implementation.
 See the [WHATWG encoding labels](https://encoding.spec.whatwg.org/) and
 [Python codecs](https://docs.python.org/3/library/codecs.html).
 
-Unknown labels still fail before SQL execution. For a reviewed source with a
-malformed declaration, an operator may explicitly specify, for example,
-`--charset-override None=utf-8`. These corrections
-use strict decoding: invalid bytes fail rather than being silently replaced.
-The JSON summary preserves the normalized mapping and successfully decoded
-record counts for each override. Corrections are corpus-specific decisions;
-do not apply this example to arbitrary archives without reviewing their bytes.
-PDF, office, archive and other binary payloads still require separate extraction;
-byte-to-text conversion alone does not establish usable document text.
+Unknown labels still fail before SQL execution unless an operator supplies a
+corpus-level `--charset-override LABEL=CODEC`. Label overrides use strict
+decoding: invalid bytes abort rather than being silently replaced.
+
+For one reviewed record with a malformed label, use
+`--charset-record-override '<WARC-Record-ID>=CODEC'`. The override is limited to
+that exact WARC ID and uses replacement decoding; the JSON summary records the
+ID, number of imported records and observed U+FFFD characters. The selected ID
+must be unique and must produce an imported text record. A missing, duplicate,
+filtered or conflicting target fails before SQL generation. Review the source
+bytes and declarations before choosing a codec; do not generalize a record
+correction to other records.
+
+On the reviewed Common Crawl segment, response record 16,350 has an HTTP
+`uft-8` label and an internal HTML UTF-8 declaration. Its 59,582-byte body is
+not strict UTF-8; explicit record-scoped UTF-8 replacement yielded 65 observed
+U+FFFD characters. A two-record disposable PostgreSQL 16.6 smoke imported this
+record and a separate `None`-label record using the existing strict label
+override, and BM25 search returned both. This verifies import plumbing only;
+it does not establish the malformed record's semantic text accuracy or full
+archive acceptance. Broader charset coverage remains open.
+
+PDF, office, archive and other binary payloads still require separate
+extraction; byte-to-text conversion alone does not establish usable document
+text.
 
 
-## Importer preflight for oversized terms
+## 0.1.16 candidate: oversized BM25 terms
 
-The CLI now rejects ASCII alphanumeric token runs longer than 2,000 bytes before
-executing SQL, in all three BM25 import modes. This is a conservative limit for
-the term/doc_id B-tree on standard 8 KiB PostgreSQL pages; custom page sizes need
-separate validation. CJK bigrams are unaffected. The guard does not truncate text
-or silently drop postings. A malformed late record fails while the complete
-input is still being spooled, so earlier batches are not executed.
-Direct SQL indexing APIs can still reach PostgreSQL's own index-row-size error;
-the Python guard is not a change to the extension's tokenizer or database format.
+The 0.1.15 importer rejected ASCII alphanumeric tokens longer than 2,000 bytes
+because they cannot safely be stored directly in a standard PostgreSQL B-tree
+entry. The 0.1.16 candidate preserves those tokens: it stores a fixed-size
+SHA-256 posting key in `bm25_term` and keeps the original token in
+`bm25_long_term` for collision checks and stable score ordering. Function, bulk,
+and COPY import modes use the same representation. Import SQL checks the
+installed extension version before any schema or batch work when such a token
+is present. The candidate raises the search-input limit to 2,500,000 UTF-8 bytes;
+this covers the 2,298,914-character maximum observed in the audited Common Crawl
+slice. It does not change tokenizer rules or truncate/drop terms.
+Tokens longer than that configured searchable-input bound fail explicitly in
+direct indexing calls and during the importer's pre-execution spool pass.
+
+The long-term dictionary is included in extension configuration dumps and keeps
+orphan entries after reindex/delete to avoid races with concurrent indexing.
+During a writer maintenance window, operators can prune entries not referenced
+by `bm25_term`; see [OPERATIONS.md](OPERATIONS.md). PDF/office extraction,
+charset quality and unrelated import failures remain separate work.
+
+The disposable PostgreSQL 16.15 validation passed the release build, fresh
+install, four SQL regressions, SQL smoke, all three importer modes, populated
+0.1.15-to-0.1.16 upgrade with a legacy 2,001-byte posting, backup/restore, and
+least-privilege ingest replay. The upgrade reindexed the legacy posting and
+preserved searchability. This is a development candidate, not production
+approval; full raw-WARC acceptance, independent relevance labels, operational
+charset/PDF/office extraction, sustained/cold SLA, current RustSec review, and
+binary license notice review remain open.
+
+## 0.1.6 development: Common Crawl BM25 planning (2026-10-20)
+
+This development candidate adds the bound query-term restriction to the scoring
+posting scan as well as the frequency scan. The materialized frequency CTE hides
+its values from the planner; the join alone can overestimate matching postings
+and trigger expensive JIT compilation. Scoring, tokenization, ordered summation,
+input limits and the single-statement snapshot remain unchanged. The control
+template generates version 0.1.6; the new upgrade script changes no DDL or grants.
+Existing artifacts and manifests were preserved. No binary release is approved.
+The private development binary SHA-256 is
+`efd2dcad09ea88ffe7f2e1cf3c32d2cc55e79d720804e0c6485ec385b7b19ceb`.
+
+In an instrumented native `privacy` query, 0.1.5 spent 336.686 ms in JIT out of
+375.273 ms execution; 0.1.6 took 47.229 ms with no JIT. Recorded PostgreSQL read
+time was 8.873/6.483 ms respectively. Shared-buffer reads remained, and these
+figures do not measure physical-device reads or all Lance I/O. None of the eight
+native diagnostic plans spilled at 4 MiB work_mem. The separate diagnostic
+`jit=off` experiment supports CPU attribution; load runs retained `jit=on`
+and default planner settings.
+
+The same prepared Common Crawl corpus (21,873 documents, 8,240,889 postings,
+21,825 E5 vectors of dimension 384) was copied into disposable infrastructure.
+Validation-only C wrappers loaded preserved 0.1.1/0.1.5 binaries beside 0.1.6
+against the same tables and copied dataset. Linux PG16.15, Rust 1.96.0,
+pgrx 0.19.1, four CPUs, 16 GiB, 128 MiB shared_buffers and 4 MiB work_mem were
+used. The host was shared; CPUs were not reserved.
+
+Both runs used the original eight-query mix, k=5, eight warm-ups per client,
+128 timed requests per persistent client, concurrency 1 and 8, and URL/160-character
+snippet fetching. Connection and embedding time were excluded. Run A measured
+0.1.1→0.1.5→0.1.6; run B reversed that order. Eight-client p95 in milliseconds:
+
+| Native binary | BM25 A / B | Hybrid A / B |
+| --- | ---: | ---: |
+| 0.1.1 | 621.48 / 592.86 | 645.67 / 752.75 |
+| 0.1.5 | 1195.95 / 1736.09 | 1678.72 / 1588.25 |
+| 0.1.6 | 572.46 / 500.84 | 645.47 / 625.81 |
+
+All 13,824 timed requests succeeded. These are two warm, short measurements,
+with visible host variation, not an SLA or a direct comparison to historical
+host timings. Concurrency 2/4, sustained load and cold acceptance were not
+remeasured. Initial cold diagnostics hit the retained 30-second timeout;
+subsequent diagnostic preparation used 180 seconds, while warm load retained
+the original 30-second limit.
+
+All 48 BM25/hybrid results for 24 queries retained baseline IDs and scores
+within 1e-9; preserved 0.1.1 results also matched. Five independently calculated
+Common Crawl BM25 references passed at 1e-9 and 24 NumPy squared-L2 references
+passed at 1e-5. This verifies calculations, not labelled operational relevance.
+No new qrels quality score or fresh raw-WARC ingestion is claimed.
+
+The locked optimized build/package, artifact checks, fresh install and populated
+old/new-binary 0.1.5→0.1.6 upgrade passed. Four SQL regressions, SQL smoke, importer
+DB smoke and 59 selected database checks passed: runtime safety 17, search
+memory 22, statement snapshots 7, upgrade/backup 13. The snapshot fixture saw
+both states in 400 searches against 120 writer transactions. The forced-hash
+resource fixture retained 78,003,228 temporary-file bytes under 64 KiB work_mem,
+observed backend VmHWM 236,720 KiB, and reusable backends after timeout/quota
+errors. This is a fixed synthetic stress observation, not a universal RSS bound.
+Python tests (433), tokenizer tests, formatting and documentation checks passed.
+
+The 0.1.6 baseline audit found nine advisories in `quinn-proto` and `rustls`.
+The 0.1.7 follow-up updates both dependencies and its current RustSec gate
+passes; strict binary notice collection still lacks primary license texts for
+`random_word` 0.5.2 and `seahash` 4.1.0. Representative relevance, fresh input
+extraction, operational SLA and host/storage durability gates also remain open.
+The failed initial importer test used a non-writable validation URI; the same
+fixture passed in a new database with a writable dedicated scratch URI. See
+[the development log](docs/development-log.md) for scope and next work.
+
+## 0.1.7 security follow-up (2026-10-20)
+
+The locked Linux x86_64 PostgreSQL 16.15 build and package passed with Rust
+1.96.0 and pgrx 0.19.1. The current RustSec database revision scanned 561 locked
+dependencies and reported zero vulnerabilities, unsound or yanked packages;
+three existing unmaintained warnings remain. Fresh extension install, the
+project SQL smoke, all four `pg_regress` cases and a populated 0.1.6-to-0.1.7
+upgrade passed. The upgrade preserved BM25, WARC and Lance test records. These
+checks do not close the license-notice, labelled relevance, raw-input extraction,
+operational SLA or durability gates, and do not approve production use or binary
+redistribution. Full commands and artifact identity are in
+[the development log](docs/development-log.md).
+
+## 0.1.8 security follow-up (2026-10-21)
+
+The latest RustSec database identified RUSTSEC-2026-0382 in `rustls-webpki`
+0.103.15. Version 0.1.8 updates that locked dependency to 0.103.16. On Linux
+x86_64 with PostgreSQL 16.15, Rust 1.96.0 and pgrx 0.19.1, the locked optimized
+package and artifact checks passed. The current audit scanned 561 dependencies:
+zero vulnerabilities, unsound packages or yanked packages, with three
+unmaintained warnings. A fresh install, `tests/test.sql` and all four SQL
+regressions passed on PG16.15. A separate disposable `postgres:16.6` container
+passed the populated 0.1.7-to-0.1.8 artifact upgrade. Its fixture contained two
+BM25 documents, two WARC rows and two Lance rows and verified their preservation.
+This is PG16 development validation, not production approval.
+
+The lockfile-triggered strict notice collection covered 440 target dependencies
+and remains `needs_review` (exit 2) for missing primary texts for `random_word`
+0.5.2 and `seahash` 4.1.0. Production workload/relevance, raw-WARC extraction,
+other PostgreSQL majors, operational durability and binary redistribution remain
+open. The exact environment, artifact hash, commands, and setup corrections are
+recorded in [the development log](docs/development-log.md).
+
+## 0.1.9 BM25 index follow-up (2026-10-21)
+
+The 0.1.9 candidate changes `bm25_term` to use a `(term, doc_id)` primary-key
+index that includes `tf`, then removes the redundant term-only index. The
+covered posting scan can read all scoring columns from the index. An earlier
+controlled Common Crawl run on the same code change measured BM25 8-client warm
+p95 median at 286.925→136.565 ms, estimated backend CPU per request at
+18.905→11.905 ms, and total BM25 index size at 766→446 MiB, with query result
+hashes unchanged. The 0.1.8 source retained this search implementation, but
+these are reused 0.1.6-to-0.1.7 measurements; no full-corpus benchmark was run
+for 0.1.9. The hybrid p95 observation improved as well, while vector-only
+latency moved, so the hybrid change is not attributed solely to the index.
+
+The PG16.15 locked candidate package, fresh install, project SQL smoke, four SQL
+regressions and populated adjacent upgrade passed. The upgrade fixture held two
+BM25 documents, two WARC rows and two Lance rows. Full-corpus upgrade lock time,
+peak disk use, labelled relevance, cold/sustained load and production SLA remain
+unverified. See [the development log](docs/development-log.md) for the exact
+commands, artifact identity and observed setup failures.
+
+## 0.1.17 dependency security follow-up (2026-10-24)
+
+The 0.1.16 lockfile was rechecked against RustSec database revision
+`21d909e4c8bd4e14c7aea58bf980c881a0053ab1` (1,352 advisories). It identified
+`ctutils` 0.4.2 and `tokio` 1.52.3; 0.1.17 locks `ctutils` 0.4.4 and `tokio`
+1.53.3. The updated scan covered 561 dependencies and found zero vulnerabilities,
+unsound or yanked packages. Three unmaintained warnings remain.
+
+On Linux x86_64 with PostgreSQL 16.15, Rust 1.96.0 and pgrx 0.19.1, the locked
+optimized package, artifact checks and four SQL regressions passed. A populated
+0.1.16-to-0.1.17 upgrade in a disposable PostgreSQL 16 container preserved two
+BM25 documents, two WARC rows, two Lance rows and the Lance dataset versions.
+The migration only advances the extension version. This verifies the adjacent
+upgrade path; it does not revalidate older starting versions, production load or
+recovery behavior. Strict notice collection remains `needs_review` for missing
+primary license texts for `random_word` 0.5.2 and `seahash` 4.1.0. Binary
+redistribution and production approval remain open. See the [development log](docs/development-log.md).
+
+## 2026-10-25 Common Crawl BM25 posting-frequency trial
+
+On PostgreSQL 16.15, the 0.1.17 baseline and a temporary 0.1.18 posting-window candidate were run against two copies of the same Common Crawl clone. Three alternating warm rounds used eight fixed queries, clients 1 and 8, eight warmups and 128 requests per client. Eight-query BM25/hybrid result fingerprints matched exactly. At eight clients, BM25 p95/backend CPU changed from 94.63 ms/13.86 ms per request to 101.78 ms/15.04 ms; hybrid changed from 190.95 ms/46.69 ms to 192.07 ms/46.59 ms. The candidate cut shared-hit blocks roughly in half, with zero warm physical reads and temporary bytes, but its 100,000-document/800,000-posting stress run wrote 108,300,700 temporary bytes versus 78,003,228 for 0.1.17 under 64 KiB `work_mem`. Both search-memory runs passed correctness, cancellation and quota checks. The candidate was not retained. This is a warm-clone observation, not a production SLA or relevance evaluation; host load varied, cold/sustained performance is unmeasured, and independent qrels remain required. See [PUBLICATION.md](PUBLICATION.md) and [the development log](docs/development-log.md).
+
+## 0.1.18 BM25 IDF amortization candidate (2026-10-25)
+
+A separate 0.1.18 candidate materializes one IDF value per unique query term in
+both the standard and long-token BM25 paths. On the same PostgreSQL 16.15
+Common Crawl fixture (21,873 documents and 8,240,889 postings), three
+alternating eight-client warm rounds used eight queries, `k=5`, eight warmups
+and 128 requests per client. All result fingerprints matched exactly and no
+requests failed. Median BM25 p95/backend CPU changed from 99.31 ms/13.74
+ms per request on 0.1.17 to 93.75 ms/13.28 ms on the candidate; hybrid changed
+from 197.04 ms/47.34 ms to 192.63 ms/46.94 ms. The six-term BM25 plan processed
+25,097 posting rows while computing six IDFs in the materialized CTE; warm
+single-plan execution median changed from 47.81 to 45.51 ms, with no temp
+writes. The long query's load-test p95 increased 15.6% (150.99 to 174.60 ms)
+while its p50 improved 5.9%; this tail result is unresolved. A fixed
+100,000-document/800,000-posting search-memory regression passed independent
+score/rank, spill, timeout, quota and backend-reuse checks. These are cloned,
+warm workload results and mathematical-output checks; they do not establish
+relevance, cold or sustained SLA, fresh raw-WARC ingest, or production
+approval. See [PUBLICATION.md](PUBLICATION.md) and [the development log](docs/development-log.md).
+
+## 0.1.19 BM25 document-frequency index candidate (2026-10-26)
+
+The 0.1.19 candidate adds `bm25_term_frequency_idx` on `bm25_term(term)` to
+accelerate the BM25 query's matching-posting count. In the Common Crawl q6
+plan, the count scanned 25,097 postings; the narrow index reduced its observed
+shared-hit blocks from 16,429 to 61. The total plan's shared hits fell from
+33,113 to 16,745 and it wrote no temporary bytes. The additional index occupied
+82 MB on 8,240,889 postings.
+
+Three alternating warm 8-client rounds had identical BM25 and hybrid result
+fingerprints. Median BM25 p95/backend CPU was 114.32 ms/13.50 ms per request
+without the index and 100.71 ms/12.99 ms with it. Hybrid changed from
+221.15 ms/46.58 ms to 240.26 ms/46.43 ms. Host load varied from 1.95 to 25.02
+on four CPUs, so neither p95 difference establishes a causal latency change.
+Repeated reindex and one-pass insert samples did not control cache and I/O
+conditions sufficiently to establish write/import cost.
+
+The locked/offline PG16 library build completed with Rust 1.96.0; the resulting
+candidate `.so` SHA-256 is
+`6429e334b3ce69235cf2491cfb04fdc52ef99ab4dfb3668a42fc5db8e2490fd0`, and the
+artifact integrity check passed. Fresh installation and all four PG16 SQL
+regressions passed. A populated 0.1.18-to-0.1.19 update took 5.870 seconds and
+preserved 21,873 documents, 8,240,889 postings and 21,873 WARC rows. The new
+82 MB index was valid, ready, non-unique and keyed only by `term`; all BM25 and
+hybrid query fingerprints matched on the same 0.1.18/0.1.19 corpus.
+
+The standard `cargo pgrx package` command could not run because cached
+`cargo-pgrx` requires GLIBC 2.39 and this PG16 builder has GLIBC 2.36. The
+library was built through locked/offline `cargo rustc`; tested install SQL was
+assembled from the previous generated SQL plus the new index DDL. Therefore
+official pgrx package SQL generation remains unverified. This candidate is not
+production approved. Full importer throughput, upgrade lock/disk cost at larger
+corpus size, independently labelled relevance, cold/sustained load, and binary
+license notice review remain open. The 0.1.5-to-0.1.1 historical comparison was
+not repeated. Do not promote the version or use it to set an SLA based on these
+measurements.
+
+## 2026-10-26 bounded PDF/DOCX importer source candidate
+
+The importer now offers opt-in PDF extraction through an operator-supplied
+Poppler `pdftotext` process and bounded DOCX WordprocessingML body extraction.
+The public WARC segment used for the earlier corpus validation contains 218 PDF
+and 3 DOCX responses. A read-only run with Poppler 24.02.0 extracted text from
+178 PDFs; 22 yielded no text and 18 returned extractor errors. The PDF output
+included nine replacement characters. DOCX extraction returned 13,689
+characters across all three records with no replacement characters. Both paths
+apply the 64 MiB per-record limit; PDF processes have a 30-second timeout.
+Extractor failures remain explicit and the default CLI does not enable either
+extractor. The full archive was not imported into PostgreSQL or Lance, and this
+run does not establish semantic text quality, OCR coverage, corpus-wide charset
+correctness, import throughput or retrieval relevance. Legacy Office, RTF,
+EPUB and other unsupported binary records remain unsupported. The Python tests
+exercise SQL generation and failure-before-execution behavior; no extension
+binary, SQL schema, Cargo dependency or release artifact changed. Production
+approval remains open.

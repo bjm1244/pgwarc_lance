@@ -16,6 +16,7 @@ use lance::dataset::{
 use pgrx::check_for_interrupts;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
+use tokio::task::JoinHandle;
 
 /// How often a blocking wait returns control to PostgreSQL so that the backend
 /// can observe a cancel request or `statement_timeout`.
@@ -25,6 +26,27 @@ pub struct SearchResult {
     pub id: i64,
     pub label: Option<String>,
     pub distance: f32,
+}
+
+/// A Lance search started while the PostgreSQL backend runs its BM25 work.
+/// Dropping the handle aborts the worker task, including on PostgreSQL errors.
+pub struct PendingVectorSearch {
+    task: JoinHandle<Result<Vec<SearchResult>, String>>,
+}
+
+impl PendingVectorSearch {
+    pub fn wait(&mut self) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+        let joined = block_on(&mut self.task).map_err(|error| {
+            Box::new(std::io::Error::other(error.to_string())) as Box<dyn std::error::Error>
+        })?;
+        joined.map_err(|error| Box::new(std::io::Error::other(error)) as Box<dyn std::error::Error>)
+    }
+}
+
+impl Drop for PendingVectorSearch {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 pub struct ScanRow {
@@ -379,34 +401,7 @@ pub fn vector_search(
     let mut results = Vec::new();
     for batch in batches {
         check_for_interrupts!();
-        let id_array = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or("id column not Int64")?;
-        let label_array = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("label column not Utf8")?;
-        let dist_array = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .ok_or("_distance column not Float32")?;
-
-        for i in 0..batch.num_rows() {
-            let label = if label_array.is_null(i) {
-                None
-            } else {
-                Some(label_array.value(i).to_string())
-            };
-            results.push(SearchResult {
-                id: id_array.value(i),
-                label,
-                distance: dist_array.value(i),
-            });
-        }
+        append_vector_batch(&batch, &mut results)?;
     }
     results.sort_by(|a, b| {
         let distance_order = a
@@ -416,6 +411,103 @@ pub fn vector_search(
         distance_order.then_with(|| a.id.cmp(&b.id))
     });
     Ok(results)
+}
+
+/// Starts the Lance half of hybrid search on its existing Tokio worker. This
+/// future contains no PostgreSQL API calls; SPI and interrupt checks stay on
+/// the backend thread.
+pub fn spawn_vector_search(uri: &str, query: Vec<f32>, k: usize) -> PendingVectorSearch {
+    let uri = uri.to_string();
+    PendingVectorSearch {
+        task: runtime().spawn(async move { vector_search_async(uri, query, k).await }),
+    }
+}
+
+async fn vector_search_async(
+    uri: String,
+    query: Vec<f32>,
+    k: usize,
+) -> Result<Vec<SearchResult>, String> {
+    if k == 0 {
+        return Ok(Vec::new());
+    }
+
+    let dataset = DatasetBuilder::from_uri(&uri)
+        .load()
+        .await
+        .map_err(|error| error.to_string())?;
+    let vector_dim = dataset_vector_dim(&dataset).map_err(|error| error.to_string())?;
+    if query.len() != vector_dim as usize {
+        return Err(format!(
+            "query dimension mismatch: expected {}, got {}",
+            vector_dim,
+            query.len()
+        ));
+    }
+
+    let query_array = Float32Array::from(query);
+    let query_ref: &dyn arrow::array::Array = &query_array;
+    let mut scanner = dataset.scan();
+    scanner
+        .nearest("vector", query_ref, k)
+        .map_err(|error| error.to_string())?
+        .project(&["id", "label", "_distance"])
+        .map_err(|error| error.to_string())?;
+
+    let mut stream = Box::pin(
+        scanner
+            .try_into_stream()
+            .await
+            .map_err(|error| error.to_string())?,
+    );
+    let mut results = Vec::new();
+    while let Some(batch) = stream.next().await {
+        let batch = batch.map_err(|error| error.to_string())?;
+        append_vector_batch(&batch, &mut results).map_err(|error| error.to_string())?;
+    }
+    results.sort_by(|a, b| {
+        let distance_order = a
+            .distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(Ordering::Equal);
+        distance_order.then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(results)
+}
+
+fn append_vector_batch(
+    batch: &RecordBatch,
+    results: &mut Vec<SearchResult>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let id_array = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or("id column not Int64")?;
+    let label_array = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or("label column not Utf8")?;
+    let dist_array = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .ok_or("_distance column not Float32")?;
+
+    for i in 0..batch.num_rows() {
+        let label = if label_array.is_null(i) {
+            None
+        } else {
+            Some(label_array.value(i).to_string())
+        };
+        results.push(SearchResult {
+            id: id_array.value(i),
+            label,
+            distance: dist_array.value(i),
+        });
+    }
+    Ok(())
 }
 
 pub fn scan_rows(uri: &str, limit: i64) -> Result<Vec<ScanRow>, Box<dyn std::error::Error>> {

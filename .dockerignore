@@ -2,6 +2,5 @@ target/
 .git/
 .gitignore
 *.md
-sql/
 Makefile
 .dockerignore

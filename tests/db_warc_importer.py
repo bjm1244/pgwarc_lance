@@ -51,7 +51,11 @@ def run_sql(sql: str) -> str:
 
 def warc_response(row: int) -> bytes:
     uri = f"https://example.test/importer-db/{row}"
-    html = f"<html><body><h1>Importer DB {row}</h1><p>shared search term {row}</p></body></html>"
+    long_token = "".join(
+        warc_importer.hashlib.sha256(str(index).encode()).hexdigest()
+        for index in range(120)
+    ) if row == 4 else ""
+    html = f"<html><body><h1>Importer DB {row}</h1><p>shared search term {row} {long_token}</p></body></html>"
     http = (
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
@@ -73,7 +77,7 @@ def warc_response(row: int) -> bytes:
 
 def write_warc(path: Path) -> None:
     with gzip.open(path, "wb") as stream:
-        for row in range(1, 4):
+        for row in range(1, 5):
             stream.write(warc_response(row))
 
 
@@ -90,65 +94,70 @@ def main() -> int:
         summary_path = Path(tmp) / "summary.json"
         write_warc(warc_path)
 
-        records = warc_importer.load_import_records(
-            [warc_path], limit=None, min_text_chars=1
+        records = warc_importer.load_import_records([warc_path], limit=None, min_text_chars=1)
+        long_token = "".join(
+            warc_importer.hashlib.sha256(str(index).encode()).hexdigest()
+            for index in range(120)
         )
-        sql = warc_importer.emit_sql(
-            records=records,
-            lance_uri=LANCE_URI,
-            vector_dim=4,
-            overwrite_lance=False,
-            include_hash_vectors=True,
-            batch_size=2,
-            lance_mode="overwrite",
-            bm25_mode="copy",
-        )
-        if "-- pgwarc_lance import batch 1/2: records 1-2" not in sql:
-            raise AssertionError("generated SQL missing batch 1 contract comment")
-        if "-- pgwarc_lance import batch 2/2: records 3-3" not in sql:
-            raise AssertionError("generated SQL missing batch 2 contract comment")
+        expected_mixed_scores: str | None = None
+        for mode in warc_importer.BM25_MODES:
+            run_sql("DROP EXTENSION IF EXISTS pgwarc_lance CASCADE; CREATE EXTENSION pgwarc_lance;")
+            lance_uri = f"{LANCE_URI}-{mode}.lance"
+            sql = warc_importer.emit_sql(
+                records=records,
+                lance_uri=lance_uri,
+                vector_dim=4,
+                overwrite_lance=False,
+                include_hash_vectors=True,
+                batch_size=2,
+                lance_mode="overwrite",
+                bm25_mode=mode,
+            )
+            if "-- pgwarc_lance import batch 1/2: records 1-2" not in sql:
+                raise AssertionError(f"{mode}: generated SQL missing batch 1 contract comment")
+            if "-- pgwarc_lance import batch 2/2: records 3-4" not in sql:
+                raise AssertionError(f"{mode}: generated SQL missing batch 2 contract comment")
 
-        rc = warc_importer.main(
-            [
-                str(warc_path),
-                "--execute",
-                "--psql",
-                PSQL_EXEC,
-                "--lance-uri",
-                LANCE_URI,
-                "--vector-dim",
-                "4",
-                "--lance-mode",
-                "overwrite",
-                "--batch-size",
-                "2",
-                "--bm25-mode",
-                "copy",
-                "--summary-json",
-                str(summary_path),
-            ]
-        )
-        if rc != 0:
-            raise AssertionError(f"importer returned {rc}")
+            rc = warc_importer.main(
+                [
+                    str(warc_path), "--execute", "--psql", PSQL_EXEC,
+                    "--lance-uri", lance_uri, "--vector-dim", "4",
+                    "--lance-mode", "overwrite", "--batch-size", "2",
+                    "--bm25-mode", mode, "--summary-json", str(summary_path),
+                ]
+            )
+            if rc != 0:
+                raise AssertionError(f"{mode}: importer returned {rc}")
 
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        assert_equal(str(summary["records"]), "3", "summary records")
-        assert_equal(summary["lance_mode"], "overwrite", "summary lance_mode")
-        assert_equal(summary["bm25_mode"], "copy", "summary bm25_mode")
-
-    checks = run_sql(
-        f"""
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            assert_equal(str(summary["records"]), "4", f"{mode}: summary records")
+            assert_equal(summary["lance_mode"], "overwrite", f"{mode}: summary lance_mode")
+            assert_equal(summary["bm25_mode"], mode, f"{mode}: summary bm25_mode")
+            assert_equal(summary["oversized_ascii_terms"], 1, f"{mode}: long term count")
+            assert_equal(summary["max_oversized_ascii_term_bytes"], 7680, f"{mode}: long term size")
+            checks = run_sql(
+                f"""
 SELECT count(*) FROM pgwarc_lance.warc_record;
 SELECT bm25_doc_count();
-SELECT lance_count('{LANCE_URI}');
-SELECT count(*) FROM hybrid_warc_search('shared search', ARRAY[0,0,0,0]::float4[], '{LANCE_URI}', 3)
+SELECT lance_count('{lance_uri}');
+SELECT count(*) FROM hybrid_warc_search('shared search', ARRAY[0,0,0,0]::float4[], '{lance_uri}', 3)
 WHERE target_uri LIKE 'https://example.test/importer-db/%';
+SELECT doc_id FROM bm25_search('{long_token}', 10) ORDER BY doc_id;
+SELECT json_agg(t ORDER BY doc_id) FROM bm25_search('shared {long_token}', 10) t;
 """
-    ).splitlines()
-    assert_equal(checks[0], "3", "warc_record count")
-    assert_equal(checks[1], "3", "bm25_doc_count")
-    assert_equal(checks[2], "3", "lance_count")
-    assert_equal(checks[3], "3", "hybrid_warc_search count")
+            ).splitlines()
+            assert_equal(checks[0], "4", f"{mode}: warc_record count")
+            assert_equal(checks[1], "4", f"{mode}: bm25_doc_count")
+            assert_equal(checks[2], "4", f"{mode}: lance_count")
+            assert_equal(checks[3], "3", f"{mode}: hybrid_warc_search count")
+            assert_equal(checks[4], str(records[-1].doc_id), f"{mode}: exact long-token search")
+            if expected_mixed_scores is None:
+                expected_mixed_scores = checks[5]
+            else:
+                assert_equal(
+                    checks[5], expected_mixed_scores,
+                    f"{mode}: mixed short/long BM25 scores match function mode",
+                )
     print("db_warc_importer: ok")
     return 0
 

@@ -65,19 +65,19 @@ def main() -> int:
         sql(f"CREATE EXTENSION pgwarc_lance; SELECT lance_create_table('{uri}',4,false); SELECT lance_insert('{uri}',1,ARRAY[0,0,0,0]::float4[],'one');")
         vector = 'ARRAY[0,0,0,0]::float4[]'
         for label, expression in [
-            ('bm25_query_bytes', "bm25_search(repeat('x',65537),10)"),
-            ('bm25_utf8_bytes', "bm25_search(repeat('한',21846),10)"),
+            ('bm25_query_bytes', "bm25_search(repeat('x',2500001),10)"),
+            ('bm25_utf8_bytes', "bm25_search(repeat('한',833334),10)"),
             ('bm25_result_count', "bm25_search('alpha',10001)"),
             ('vector_result_count', f"lance_vector_search('{uri}',{vector},10001)"),
-            ('hybrid_query_bytes', f"hybrid_search(repeat('x',65537),{vector},'{uri}',10)"),
+            ('hybrid_query_bytes', f"hybrid_search(repeat('x',2500001),{vector},'{uri}',10)"),
             ('hybrid_result_count', f"hybrid_search('alpha',{vector},'{uri}',10001)"),
-            ('warc_query_bytes', f"hybrid_warc_search(repeat('x',65537),{vector},'{uri}',10)"),
+            ('warc_query_bytes', f"hybrid_warc_search(repeat('x',2500001),{vector},'{uri}',10)"),
             ('warc_result_count', f"hybrid_warc_search('alpha',{vector},'{uri}',10001)"),
         ]:
             # A missing expected exception makes the DO block fail.
             sql(f"DO $$ BEGIN BEGIN PERFORM * FROM {expression}; RAISE EXCEPTION 'oversize input accepted'; EXCEPTION WHEN program_limit_exceeded THEN NULL; END; END $$;")
             checks[label + '_rejected_54000'] = True
-        expect(sql("SELECT count(*) FROM bm25_search(repeat('x',65536),10000);"), '0', 'exact_query_and_result_boundaries_accepted')
+        expect(sql("SELECT count(*) FROM bm25_search(repeat('x',2500000),10000);"), '0', 'exact_query_and_result_boundaries_accepted')
         expect(sql(f"SELECT count(*) FROM lance_vector_search('{uri}',{vector},10000);"), '1', 'vector_result_boundary_accepted')
         for label, expression in [
             ('bm25', "bm25_search('alpha',0)"),
@@ -89,13 +89,14 @@ def main() -> int:
 
         # Independent mathematical reference: fixed ASCII token counts, empty
         # document included in n/avgdl, repeated query terms counted once.
-        texts = ['', 'alpha beta alpha', 'alpha gamma gamma gamma', 'beta beta', 'delta alpha beta', 'orphan omega']
+        long_token = 'z' * 2001
+        texts = ['', 'alpha beta alpha', f'{long_token} alpha', 'beta beta', 'delta alpha beta', 'orphan omega']
         counts = {index: Counter(text.split()) for index, text in enumerate(texts, 1)}
         avgdl, n = sum(sum(tf.values()) for tf in counts.values()) / len(texts), len(texts)
         for doc, text in enumerate(texts, 1):
             sql(f'SELECT bm25_index_document({doc},{literal(text)});')
         score_checks = []
-        for query in ['alpha', 'alpha beta', 'alpha alpha', 'gamma beta delta', 'alpha beta gamma delta', 'absent']:
+        for query in ['alpha', 'alpha beta', 'alpha alpha', 'gamma beta delta', 'alpha beta gamma delta', 'absent', f'alpha {long_token}']:
             expected = []
             for doc, frequencies in counts.items():
                 score, matched = 0., False

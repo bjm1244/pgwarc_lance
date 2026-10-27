@@ -22,6 +22,10 @@ import sqlite3
 import tempfile
 import subprocess
 import sys
+import threading
+import xml.etree.ElementTree as ET
+import zipfile
+import zlib
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Iterator
 
@@ -29,8 +33,11 @@ from typing import Any, BinaryIO, Iterable, Iterator
 HEADER_ENCODING = "iso-8859-1"
 MAX_HEADER_BYTES = 64 * 1024
 DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024
-# Conservative preflight for the term/doc_id B-tree on standard 8 KiB PG pages.
-MAX_BM25_ASCII_TERM_BYTES = 2000
+# Tokens above this size use the extension's fixed-size SHA-256 posting key.
+MAX_BM25_TERM_BYTES = 2000
+MAX_SEARCHABLE_TERM_BYTES = 2_500_000
+LONG_TERM_STORAGE_MIN_VERSION = "0.1.16"
+LONG_TERM_KEY_PREFIX = "\u241fpgwarc-long:"
 DEFAULT_PSQL = (
     "psql -h localhost -p 55432 -U pgwarc_lance "
     "-d pgwarc_lance_test -v ON_ERROR_STOP=1"
@@ -61,6 +68,7 @@ class ImportRecord:
     payload_digest: str
     text: str
     source_file: str
+    extraction_status: str = "text"
 
 
 class HtmlTextExtractor(html.parser.HTMLParser):
@@ -310,9 +318,15 @@ HTTP_CHARSET_ALIASES = {"windows-874": "cp874", "windows-31j": "cp932"}
 class CharsetPolicy:
     overrides: dict[str, str]
     used: dict[str, int] = dataclasses.field(default_factory=dict)
+    record_overrides: dict[str, str] = dataclasses.field(default_factory=dict)
+    record_seen: dict[str, int] = dataclasses.field(default_factory=dict)
+    record_used: dict[str, int] = dataclasses.field(default_factory=dict)
+    record_replacement_characters: dict[str, int] = dataclasses.field(default_factory=dict)
 
     @classmethod
-    def from_options(cls, options: list[str]) -> CharsetPolicy:
+    def from_options(
+        cls, options: list[str], record_options: list[str] | None = None
+    ) -> CharsetPolicy:
         overrides: dict[str, str] = {}
         for option in options:
             label, separator, codec = option.partition("=")
@@ -327,10 +341,390 @@ class CharsetPolicy:
             if label in overrides:
                 raise ValueError(f"duplicate charset override label: {label!r}")
             overrides[label] = codec
-        return cls(overrides)
+
+        record_overrides: dict[str, str] = {}
+        for option in record_options or []:
+            record_id, separator, codec = option.rpartition("=")
+            record_id, codec = record_id.strip(), codec.strip()
+            if (
+                not separator
+                or not record_id
+                or not codec
+                or any(char.isspace() for char in record_id)
+            ):
+                raise ValueError(
+                    "--charset-record-override requires WARC-RECORD-ID=CODEC"
+                )
+            try:
+                b"codec validation".decode(codec)
+                codec = codecs.lookup(codec).name
+            except (LookupError, TypeError) as exc:
+                raise ValueError(f"invalid override text codec: {codec!r}") from exc
+            if record_id in record_overrides:
+                raise ValueError(
+                    f"duplicate charset override WARC-Record-ID: {record_id!r}"
+                )
+            record_overrides[record_id] = codec
+        return cls(overrides, record_overrides=record_overrides)
+
+    def observe_record(self, record_id: str | None) -> None:
+        if record_id not in self.record_overrides:
+            return
+        seen = self.record_seen.get(record_id, 0) + 1
+        self.record_seen[record_id] = seen
+        if seen > 1:
+            raise ValueError(
+                "duplicate WARC-Record-ID matched charset record override: "
+                f"{record_id!r}"
+            )
+
+    def validate_record_overrides(self) -> None:
+        unused = sorted(set(self.record_overrides) - set(self.record_used))
+        if unused:
+            raise ValueError(
+                "charset record override did not produce an imported text record: "
+                + ", ".join(repr(record_id) for record_id in unused)
+            )
 
 
-def decode_body(body: bytes, headers: dict[str, str], content_type: str | None, max_decoded_bytes: int = DEFAULT_MAX_RECORD_BYTES, charset_policy: CharsetPolicy | None = None) -> str:
+@dataclasses.dataclass
+class PdfTextExtractor:
+    executable: str
+    version: str
+    timeout_seconds: float
+    max_output_bytes: int = DEFAULT_MAX_RECORD_BYTES
+    attempted: int = 0
+    extracted: int = 0
+    output_bytes: int = 0
+
+    @classmethod
+    def from_command(
+        cls,
+        command: str | None,
+        timeout_seconds: float,
+        max_output_bytes: int = DEFAULT_MAX_RECORD_BYTES,
+    ) -> PdfTextExtractor | None:
+        if command is None:
+            return None
+        if timeout_seconds <= 0 or not math.isfinite(timeout_seconds):
+            raise ValueError("--pdf-timeout-seconds must be finite and positive")
+        if max_output_bytes <= 0:
+            raise ValueError("--max-record-bytes must be positive")
+        executable = shutil.which(command)
+        if executable is None:
+            candidate = Path(command)
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                executable = str(candidate.resolve())
+        if executable is None:
+            raise ValueError("--pdftotext must name an executable Poppler pdftotext")
+        try:
+            result = subprocess.run(
+                [executable, "-v"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=min(timeout_seconds, 10), check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("could not query configured pdftotext version") from exc
+        version_output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+        version_line = next((line.strip() for line in version_output.splitlines() if line.strip()), "")
+        if result.returncode != 0 or not re.match(r"pdftotext version [^\s]+$", version_line, re.IGNORECASE):
+            raise ValueError("--pdftotext must be a Poppler pdftotext executable with a readable version")
+        return cls(executable, version_line, timeout_seconds, max_output_bytes)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "executable": self.executable,
+            "version": self.version,
+            "timeout_seconds": self.timeout_seconds,
+            "max_output_bytes": self.max_output_bytes,
+            "attempted": self.attempted,
+            "extracted": self.extracted,
+            "output_bytes": self.output_bytes,
+        }
+
+    def extract(self, body: bytes, max_output_bytes: int, record_key: int | None = None) -> str:
+        if max_output_bytes <= 0:
+            raise ValueError("max_record_bytes must be positive")
+        if self.timeout_seconds <= 0 or not math.isfinite(self.timeout_seconds):
+            raise ValueError("--pdf-timeout-seconds must be finite and positive")
+        self.attempted += 1
+        identity = f" doc_id={record_key}" if record_key is not None else ""
+        try:
+            process = subprocess.Popen(
+                [self.executable, "-enc", "UTF-8", "-nopgbrk", "-layout", "-", "-"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise ValueError("could not start configured pdftotext") from exc
+
+        output = bytearray()
+        output_limit_exceeded = threading.Event()
+
+        def read_output() -> None:
+            assert process.stdout is not None
+            try:
+                while True:
+                    try:
+                        chunk = process.stdout.read(64 * 1024)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    remaining = max_output_bytes + 1 - len(output)
+                    if remaining > 0:
+                        output.extend(chunk[:remaining])
+                    if len(output) > max_output_bytes and not output_limit_exceeded.is_set():
+                        output_limit_exceeded.set()
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+            finally:
+                process.stdout.close()
+
+        def write_input() -> None:
+            assert process.stdin is not None
+            try:
+                process.stdin.write(body)
+                process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+            finally:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+
+        reader = threading.Thread(target=read_output, daemon=True)
+        writer = threading.Thread(target=write_input, daemon=True)
+        reader.start()
+        writer.start()
+        try:
+            process.wait(timeout=self.timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            writer.join()
+            reader.join()
+            raise ValueError(
+                f"pdftotext timed out after {self.timeout_seconds:g}s{identity}"
+            ) from exc
+        except BaseException:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            writer.join()
+            reader.join()
+            raise
+        writer.join()
+        reader.join()
+
+        output_size = len(output)
+        if output_limit_exceeded.is_set() or output_size > max_output_bytes:
+            raise ValueError(
+                f"pdftotext output exceeds max_record_bytes={max_output_bytes}{identity}"
+            )
+        if process.returncode != 0:
+            raise ValueError(
+                f"pdftotext failed with exit code {process.returncode}{identity}"
+            )
+        try:
+            text = bytes(output).decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"pdftotext returned invalid UTF-8{identity}") from exc
+        text = normalize_text(text)
+        if not text:
+            raise ValueError(f"pdftotext returned no text; OCR or manual review is required{identity}")
+        self.extracted += 1
+        self.output_bytes += output_size
+        return text
+
+
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+DOCX_DOCUMENT_PART = "word/document.xml"
+DOCX_WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+MAX_DOCX_MEMBERS = 4096
+
+
+class _DoctypeRejectingReader:
+    """Scan an XML stream for declarations before ElementTree sees the bytes."""
+
+    def __init__(self, stream: BinaryIO, max_bytes: int) -> None:
+        self.stream = stream
+        self.max_bytes = max_bytes
+        self.bytes_read = 0
+        self.tail = b""
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self.stream.read(size)
+        self.bytes_read += len(chunk)
+        if self.bytes_read > self.max_bytes:
+            raise ValueError("DOCX main XML exceeds the configured record byte limit")
+        if b"\x00" in chunk:
+            raise ValueError("DOCX main XML with NUL bytes is not supported")
+        probe = (self.tail + chunk).upper()
+        if b"<!DOCTYPE" in probe or b"<!ENTITY" in probe:
+            raise ValueError("DOCX XML DTD/entity declarations are not supported")
+        self.tail = probe[-16:]
+        return chunk
+
+
+@dataclasses.dataclass
+class DocxTextExtractor:
+    max_output_bytes: int = DEFAULT_MAX_RECORD_BYTES
+    attempted: int = 0
+    extracted: int = 0
+    output_bytes: int = 0
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "implementation": "bounded-stdlib-wordprocessingml-v1",
+            "max_output_bytes": self.max_output_bytes,
+            "attempted": self.attempted,
+            "extracted": self.extracted,
+            "output_bytes": self.output_bytes,
+        }
+
+    def extract(self, body: bytes, max_output_bytes: int, record_key: int | None = None) -> str:
+        if max_output_bytes <= 0:
+            raise ValueError("max_record_bytes must be positive")
+        self.attempted += 1
+        identity = f" doc_id={record_key}" if record_key is not None else ""
+        if len(body) > max_output_bytes:
+            raise ValueError(f"DOCX input exceeds max_record_bytes={max_output_bytes}{identity}")
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(body)) as archive:
+                members = archive.infolist()
+                if len(members) > MAX_DOCX_MEMBERS:
+                    raise ValueError(f"DOCX contains more than {MAX_DOCX_MEMBERS} ZIP entries{identity}")
+                total_uncompressed = 0
+                main_part = None
+                seen_names: set[str] = set()
+                for member in members:
+                    name = member.filename.replace("\\", "/")
+                    if name.startswith("/") or ".." in name.split("/"):
+                        raise ValueError(f"DOCX contains an unsafe ZIP entry path{identity}")
+                    if name in seen_names:
+                        raise ValueError(f"DOCX contains duplicate ZIP entry names{identity}")
+                    seen_names.add(name)
+                    if member.flag_bits & 0x1:
+                        raise ValueError(f"DOCX contains an encrypted ZIP entry{identity}")
+                    total_uncompressed += member.file_size
+                    if total_uncompressed > max_output_bytes:
+                        raise ValueError(
+                            f"DOCX expanded archive exceeds max_record_bytes={max_output_bytes}{identity}"
+                        )
+                    if name == DOCX_DOCUMENT_PART:
+                        main_part = member
+                if main_part is None or main_part.is_dir():
+                    raise ValueError(f"DOCX is missing {DOCX_DOCUMENT_PART}{identity}")
+                if main_part.file_size == 0:
+                    raise ValueError(f"DOCX main document part is empty{identity}")
+
+                pieces: list[str] = []
+                text_bytes = 0
+
+                def append_piece(value: str) -> None:
+                    nonlocal text_bytes
+                    text_bytes += len(value.encode("utf-8"))
+                    if text_bytes > max_output_bytes:
+                        raise ValueError(
+                            f"DOCX extracted text exceeds max_record_bytes={max_output_bytes}{identity}"
+                        )
+                    pieces.append(value)
+
+                with archive.open(main_part) as xml_stream:
+                    guarded = _DoctypeRejectingReader(xml_stream, max_output_bytes)
+                    for _, element in ET.iterparse(guarded, events=("end",)):
+                        if element.tag == DOCX_WORD_NS + "t":
+                            append_piece(element.text or "")
+                        elif element.tag in {
+                            DOCX_WORD_NS + "tab",
+                            DOCX_WORD_NS + "br",
+                            DOCX_WORD_NS + "cr",
+                            DOCX_WORD_NS + "p",
+                        }:
+                            append_piece(" ")
+                        element.clear()
+        except ValueError:
+            raise
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, ET.ParseError, OSError,
+                RuntimeError, NotImplementedError, zlib.error) as exc:
+            raise ValueError(f"invalid or unreadable DOCX archive{identity}") from exc
+
+        text = normalize_text("".join(pieces))
+        if not text:
+            raise ValueError(f"DOCX contains no extractable text{identity}")
+        output_size = len(text.encode("utf-8"))
+        if output_size > max_output_bytes:
+            raise ValueError(f"DOCX extracted text exceeds max_record_bytes={max_output_bytes}{identity}")
+        self.extracted += 1
+        self.output_bytes += output_size
+        return text
+
+
+TEXT_APPLICATION_MIME_TYPES = {
+    "application/atom+xml",
+    "application/http",
+    "application/javascript",
+    "application/json",
+    "application/ld+json",
+    "application/rss+xml",
+    "application/x-bibtex",
+    "application/x-chess-pgn",
+    "application/x-research-info-systems",
+    "application/xml",
+}
+
+
+class _MetadataOnlyExtraction(ValueError):
+    """Internal signal: an explicitly selected extractor failed for one record."""
+
+
+@dataclasses.dataclass
+class ExtractionRetention:
+    mode: str = "fail"
+    metadata_only: dict[str, int] = dataclasses.field(default_factory=dict)
+    errors: dict[str, int] = dataclasses.field(default_factory=dict)
+    omitted_errors: int = 0
+
+    def failed(self, kind: str, error: ValueError) -> None:
+        if self.mode != "metadata-only":
+            raise error
+        self.metadata_only[kind] = self.metadata_only.get(kind, 0) + 1
+        message = str(error)[:512]
+        if message in self.errors or len(self.errors) < 16:
+            self.errors[message] = self.errors.get(message, 0) + 1
+        else:
+            self.omitted_errors += 1
+        raise _MetadataOnlyExtraction(str(error)) from error
+
+
+def media_type(content_type: str | None) -> str:
+    return (content_type or "").split(";", 1)[0].strip().lower()
+
+
+def decode_body(
+    body: bytes,
+    headers: dict[str, str],
+    content_type: str | None,
+    max_decoded_bytes: int = DEFAULT_MAX_RECORD_BYTES,
+    charset_policy: CharsetPolicy | None = None,
+    pdf_extractor: PdfTextExtractor | None = None,
+    docx_extractor: DocxTextExtractor | None = None,
+    record_key: int | None = None,
+    record_id: str | None = None,
+    retention: ExtractionRetention | None = None,
+) -> str:
     if max_decoded_bytes <= 0:
         raise ValueError("max_decoded_bytes must be positive")
     if headers.get("transfer-encoding", "").lower() == "chunked":
@@ -344,14 +738,64 @@ def decode_body(body: bytes, headers: dict[str, str], content_type: str | None, 
 
     if len(body) > max_decoded_bytes:
         raise ValueError(f"decoded HTTP payload exceeds max_decoded_bytes={max_decoded_bytes}")
+    mime = media_type(content_type)
+    if mime == "application/pdf" or b"%PDF-" in body[:1024]:
+        if pdf_extractor is None:
+            identity = f" doc_id={record_key}" if record_key is not None else ""
+            raise ValueError(
+                "application/pdf requires --pdftotext; refusing to decode binary bytes as text"
+                + identity
+            )
+        try:
+            return pdf_extractor.extract(body, max_decoded_bytes, record_key)
+        except ValueError as exc:
+            if retention is not None:
+                retention.failed("pdf", exc)
+            raise
+    if mime == DOCX_MIME:
+        if docx_extractor is None:
+            identity = f" doc_id={record_key}" if record_key is not None else ""
+            raise ValueError("DOCX requires --extract-docx; refusing to decode binary bytes as text" + identity)
+        try:
+            return docx_extractor.extract(body, max_decoded_bytes, record_key)
+        except ValueError as exc:
+            if retention is not None:
+                retention.failed("docx", exc)
+            raise
+    if mime and not (
+        mime.startswith("text/")
+        or mime in TEXT_APPLICATION_MIME_TYPES
+        or mime.endswith("+xml")
+        or mime.endswith("+json")
+    ):
+        identity = f" doc_id={record_key}" if record_key is not None else ""
+        raise ValueError(f"unsupported MIME type {mime}; no text extractor is configured{identity}")
     label = charset_from_content_type(content_type).strip().lower()
     charset = HTTP_CHARSET_ALIASES.get(label, label)
     overridden = charset_policy is not None and label in charset_policy.overrides
+    record_override = (
+        charset_policy.record_overrides.get(record_id)
+        if charset_policy is not None and record_id is not None
+        else None
+    )
+    if overridden and record_override is not None:
+        raise ValueError(
+            "both charset label and WARC-Record-ID overrides match one record; "
+            "use only one override for that record"
+        )
     if overridden:
         charset = charset_policy.overrides[label]
-    # An operator's explicit correction must decode strictly; do not silently
-    # replace invalid bytes and present a guessed encoding as verified text.
-    text = body.decode(charset, errors="strict" if overridden else "replace")
+    if record_override is not None:
+        # A record-scoped correction is an explicit loss-tolerant choice.
+        # Keep replacement characters visible in the import summary.
+        text = body.decode(record_override, errors="replace")
+        charset_policy.record_replacement_characters[record_id] = text.count(
+            "\ufffd"
+        )
+    else:
+        # Label-wide corrections remain strict so one broad mapping cannot
+        # silently replace malformed bytes across an archive.
+        text = body.decode(charset, errors="strict" if overridden else "replace")
     if overridden:
         charset_policy.used[label] = charset_policy.used.get(label, 0) + 1
     if content_type and "html" in content_type.lower():
@@ -361,7 +805,17 @@ def decode_body(body: bytes, headers: dict[str, str], content_type: str | None, 
     return normalize_text(text)
 
 
-def import_record_from_warc(record: WarcRecord, max_decoded_bytes: int = DEFAULT_MAX_RECORD_BYTES, charset_policy: CharsetPolicy | None = None) -> ImportRecord | None:
+def import_record_from_warc(
+    record: WarcRecord,
+    max_decoded_bytes: int = DEFAULT_MAX_RECORD_BYTES,
+    charset_policy: CharsetPolicy | None = None,
+    pdf_extractor: PdfTextExtractor | None = None,
+    docx_extractor: DocxTextExtractor | None = None,
+    retention: ExtractionRetention | None = None,
+) -> ImportRecord | None:
+    record_id = record.headers.get("warc-record-id")
+    if charset_policy is not None:
+        charset_policy.observe_record(record_id)
     record_type = record.headers.get("warc-type", "").lower()
     if record_type not in {"response", "resource"}:
         return None
@@ -369,13 +823,6 @@ def import_record_from_warc(record: WarcRecord, max_decoded_bytes: int = DEFAULT
     status_line, http_headers, body = parse_http_headers(record.payload)
     http_ct = http_headers.get("content-type")
     content_type = http_ct or record.headers.get("content-type")
-    if status_line:
-        text = decode_body(body, http_headers, content_type, max_decoded_bytes, charset_policy)
-    else:
-        text = decode_body(record.payload, {}, content_type, max_decoded_bytes, charset_policy)
-    if not text:
-        return None
-
     target_uri = record.headers.get("warc-target-uri")
     warc_date = record.headers.get("warc-date")
     payload_digest = (
@@ -383,8 +830,23 @@ def import_record_from_warc(record: WarcRecord, max_decoded_bytes: int = DEFAULT
         or record.headers.get("warc-block-digest")
         or "sha1:" + hashlib.sha1(record.payload).hexdigest()
     )
+    doc_id = stable_doc_id(target_uri, warc_date, payload_digest)
+    extraction_status = "text"
+    try:
+        text = decode_body(
+            body if status_line else record.payload,
+            http_headers if status_line else {}, content_type,
+            max_decoded_bytes, charset_policy, pdf_extractor, docx_extractor,
+            doc_id, record_id, retention,
+        )
+    except _MetadataOnlyExtraction:
+        text = ""
+        extraction_status = "metadata_only"
+    if not text and extraction_status != "metadata_only":
+        return None
+
     return ImportRecord(
-        doc_id=stable_doc_id(target_uri, warc_date, payload_digest),
+        doc_id=doc_id,
         target_uri=target_uri,
         warc_date=warc_date,
         content_type=content_type,
@@ -392,6 +854,7 @@ def import_record_from_warc(record: WarcRecord, max_decoded_bytes: int = DEFAULT
         payload_digest=payload_digest,
         text=text,
         source_file=record.source_file,
+        extraction_status=extraction_status,
     )
 
 
@@ -422,7 +885,7 @@ def hash_embedding(text: str, dim: int) -> list[float]:
 
 
 def record_to_json(record: ImportRecord) -> dict[str, Any]:
-    return {
+    data = {
         "doc_id": record.doc_id,
         "target_uri": record.target_uri,
         "warc_date": record.warc_date,
@@ -433,6 +896,10 @@ def record_to_json(record: ImportRecord) -> dict[str, Any]:
         "source_file": record.source_file,
         "text": record.text,
     }
+
+    if record.extraction_status != "text":
+        data["extraction_status"] = record.extraction_status
+    return data
 
 
 def records_jsonl(records: Iterable[ImportRecord]) -> str:
@@ -507,7 +974,7 @@ def load_embedding_jsonl(
     path: Path, records: Iterable[ImportRecord], vector_dim: int
 ) -> dict[int, list[float]]:
     record_list = list(records)
-    required_doc_ids = {record.doc_id for record in record_list}
+    required_doc_ids = {record.doc_id for record in record_list if record.extraction_status != "metadata_only"}
     content = path.read_text(encoding="utf-8")
     return parse_embedding_jsonl(content, required_doc_ids, vector_dim, str(path))
 
@@ -515,8 +982,8 @@ def load_embedding_jsonl(
 def run_embedding_command(
     records: Iterable[ImportRecord], command: str, vector_dim: int
 ) -> dict[int, list[float]]:
-    record_list = list(records)
-    required_doc_ids = {record.doc_id for record in record_list}
+    record_list = [r for r in records if r.extraction_status != "metadata_only"]
+    required_doc_ids = {record.doc_id for record in record_list if record.extraction_status != "metadata_only"}
     payload = records_jsonl(record_list)
     result = subprocess.run(
         command,
@@ -594,6 +1061,11 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.bm25_term (
     PRIMARY KEY (term, doc_id)
 );
 
+CREATE TABLE IF NOT EXISTS pgwarc_lance.bm25_long_term (
+    term_key text PRIMARY KEY,
+    term     text NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS bm25_term_term_idx ON pgwarc_lance.bm25_term (term);
 CREATE INDEX IF NOT EXISTS bm25_term_doc_id_idx ON pgwarc_lance.bm25_term (doc_id);
 """.strip()
@@ -606,6 +1078,7 @@ def emit_bm25_bulk_sql(records: list[ImportRecord]) -> list[str]:
     lines: list[str] = []
     doc_values: list[str] = []
     term_values: list[str] = []
+    long_terms: dict[str, str] = {}
     for record in records:
         frequencies = bm25_term_frequencies(record.text)
         doc_len = sum(frequencies.values())
@@ -613,8 +1086,13 @@ def emit_bm25_bulk_sql(records: list[ImportRecord]) -> list[str]:
             f"({record.doc_id}, {sql_string(record.text)}, {doc_len})"
         )
         for term in sorted(frequencies):
+            storage_term, original_term = bm25_storage_term(term)
+            if original_term is not None:
+                existing = long_terms.setdefault(storage_term, original_term)
+                if existing != original_term:
+                    raise ValueError("SHA-256 collision between distinct oversized BM25 tokens")
             term_values.append(
-                f"({sql_string(term)}, {record.doc_id}, {frequencies[term]})"
+                f"({sql_string(storage_term)}, {record.doc_id}, {frequencies[term]})"
             )
 
     lines.append(
@@ -627,9 +1105,8 @@ def emit_bm25_bulk_sql(records: list[ImportRecord]) -> list[str]:
     )
     # The document upsert acquires row locks before replacing postings, just
     # like the SQL extension function; concurrent reindexing cannot leave stale terms.
-    lines.append(
-        f"DELETE FROM pgwarc_lance.bm25_term WHERE doc_id = ANY({sql_bigint_array([record.doc_id for record in records])});"
-    )
+    lines.append(delete_bm25_postings_sql([record.doc_id for record in records]))
+    lines.extend(long_term_dictionary_sql(long_terms))
     if term_values:
         lines.append(
             "INSERT INTO pgwarc_lance.bm25_term (term, doc_id, tf) VALUES\n"
@@ -645,18 +1122,26 @@ def emit_bm25_copy_sql(records: list[ImportRecord]) -> list[str]:
 
     doc_ids = [record.doc_id for record in records]
     lines = [
+        delete_bm25_postings_sql(doc_ids),
         f"DELETE FROM pgwarc_lance.bm25_doc WHERE doc_id = ANY({sql_bigint_array(doc_ids)});",
         "COPY pgwarc_lance.bm25_doc (doc_id, content, doc_len) FROM stdin;",
     ]
     term_rows: list[str] = []
+    long_terms: dict[str, str] = {}
     for record in records:
         frequencies = bm25_term_frequencies(record.text)
         doc_len = sum(frequencies.values())
         lines.append(copy_row([record.doc_id, record.text, doc_len]))
         for term in sorted(frequencies):
-            term_rows.append(copy_row([term, record.doc_id, frequencies[term]]))
+            storage_term, original_term = bm25_storage_term(term)
+            if original_term is not None:
+                existing = long_terms.setdefault(storage_term, original_term)
+                if existing != original_term:
+                    raise ValueError("SHA-256 collision between distinct oversized BM25 tokens")
+            term_rows.append(copy_row([storage_term, record.doc_id, frequencies[term]]))
     lines.append(r"\.")
 
+    lines.extend(long_term_dictionary_sql(long_terms))
     if term_rows:
         lines.append("COPY pgwarc_lance.bm25_term (term, doc_id, tf) FROM stdin;")
         lines.extend(term_rows)
@@ -698,6 +1183,7 @@ def iter_sql_chunks(
     max_batch_bytes: int | None = None,
     total_batches: int | None = None,
     skip_schema: bool = False,
+    requires_long_term_storage: bool = False,
 ) -> Iterator[str]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -734,6 +1220,8 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
     ]
     if skip_schema:
         lines = ["SET standard_conforming_strings = on;"]
+    if requires_long_term_storage:
+        lines = ["BEGIN;", long_term_version_guard_sql(), *lines]
     has_lance_vectors = bool(lance_uri) and (include_hash_vectors or vectors_by_doc_id is not None)
     if lance_uri and has_lance_vectors and lance_mode in {"create", "overwrite"}:
         overwrite = "true" if lance_mode == "overwrite" else "false"
@@ -742,6 +1230,9 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
         )
     elif lance_uri and has_lance_vectors and lance_mode == "append":
         lines.append(f"-- WARNING: {APPEND_DUPLICATE_WARNING}.")
+
+    if requires_long_term_storage:
+        lines.append("COMMIT;")
 
     yield "\n".join(lines) + "\n"
     if total_batches is None:
@@ -755,6 +1246,8 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
             f"records {start + 1}-{end}"
         )
         lines.append("BEGIN;")
+        if requires_long_term_storage:
+            lines.append(long_term_version_guard_sql())
         lance_ids: list[int] = []
         lance_flat_vectors: list[float] = []
         lance_labels: list[str] = []
@@ -793,9 +1286,9 @@ INSERT INTO pgwarc_lance.warc_record (
                 )
 
             vector = None
-            if lance_uri and vectors_by_doc_id is not None:
+            if lance_uri and vectors_by_doc_id is not None and record.extraction_status != "metadata_only":
                 vector = vectors_by_doc_id.get(record.doc_id)
-            elif lance_uri and include_hash_vectors:
+            elif lance_uri and include_hash_vectors and record.extraction_status != "metadata_only":
                 vector = hash_embedding(record.text, vector_dim)
 
             if lance_uri and vector is not None:
@@ -829,12 +1322,16 @@ def emit_sql(
     lance_mode: str | None = None,
     bm25_mode: str = "function",
     skip_schema: bool = False,
+    requires_long_term_storage: bool = False,
 ) -> str:
     record_list = list(records)
     return "".join(iter_sql_chunks(
         record_list, lance_uri, vector_dim, overwrite_lance, include_hash_vectors,
         vectors_by_doc_id, batch_size, lance_mode, bm25_mode, len(record_list),
         skip_schema=skip_schema,
+        requires_long_term_storage=(requires_long_term_storage or any(
+            validate_bm25_terms(record)[0] for record in record_list
+        )),
     ))
 
 
@@ -863,6 +1360,10 @@ def summary_data(
 ) -> dict[str, Any]:
     vectors = vector_summary(lance_uri, no_hash_vectors, vectors_by_doc_id)
     append_duplicates = bool(lance_uri and lance_mode == "append" and vectors != 0)
+    oversized = [validate_bm25_terms(record) for record in records]
+    oversized_records = sum(1 for count, _ in oversized if count)
+    oversized_count = sum(count for count, _ in oversized)
+    max_term_bytes = max((size for _, size in oversized), default=0)
     return {
         "records": len(records),
         "sql_bytes": len(sql.encode("utf-8")),
@@ -872,10 +1373,16 @@ def summary_data(
         "bm25_mode": bm25_mode,
         "execute": execute,
         "psql": psql,
+        "oversized_ascii_term_records": oversized_records,
+        "oversized_ascii_terms": oversized_count,
+        "max_oversized_ascii_term_bytes": max_term_bytes,
+        "required_extension_version": LONG_TERM_STORAGE_MIN_VERSION if oversized_count else None,
     }
 
 
 def format_summary(data: dict[str, Any]) -> str:
+    pdf = data.get("pdf_extraction", {})
+    docx = data.get("docx_extraction", {})
     parts = [
         f"records={data['records']}",
         f"sql_bytes={data['sql_bytes']}",
@@ -885,22 +1392,105 @@ def format_summary(data: dict[str, Any]) -> str:
         f"bm25_mode={data['bm25_mode']}",
         f"execute={data['execute']}",
         f"psql={shlex.quote(str(data['psql']))}",
+        f"oversized_ascii_term_records={data.get('oversized_ascii_term_records', 0)}",
+        f"oversized_ascii_terms={data.get('oversized_ascii_terms', 0)}",
+        f"max_oversized_ascii_term_bytes={data.get('max_oversized_ascii_term_bytes', 0)}",
+        f"required_extension_version={data.get('required_extension_version') or 'none'}",
+        f"pdf_extracted={pdf.get('extracted', 0)}",
+        f"docx_extracted={docx.get('extracted', 0)}",
     ]
+    if pdf.get("enabled"):
+        parts.append(f"pdf_tool_version={shlex.quote(str(pdf['version']))}")
     return " ".join(parts)
 
 
-def validate_bm25_terms(record: ImportRecord) -> None:
-    # CJK tokens are at most two characters; the remaining tokenizer branch
-    # produces ASCII alphanumeric runs. Reject rather than silently truncating
-    # terms or dropping postings and changing ranking without an explicit policy.
-    if re.search(r"[A-Za-z0-9]{" + str(MAX_BM25_ASCII_TERM_BYTES + 1) + r"}", record.text):
+def validate_bm25_terms(record: ImportRecord) -> tuple[int, int]:
+    """Report long ASCII tokens that will use fixed-size BM25 posting keys."""
+    sizes = [len(match.group(0)) for match in re.finditer(r"[A-Za-z0-9]+", record.text)
+             if len(match.group(0)) > MAX_BM25_TERM_BYTES]
+    max_size = max(sizes, default=0)
+    if max_size > MAX_SEARCHABLE_TERM_BYTES:
         raise ValueError(
-            f"doc_id={record.doc_id}: BM25 ASCII term exceeds "
-            f"{MAX_BM25_ASCII_TERM_BYTES} bytes; review extraction before import"
+            f"doc_id={record.doc_id}: BM25 token is {max_size} bytes, above the "
+            f"maximum searchable size of {MAX_SEARCHABLE_TERM_BYTES}; no SQL executed"
         )
+    return len(sizes), max_size
 
 
-def iter_import_records(paths: list[Path], limit: int | None, min_text_chars: int, max_record_bytes: int = DEFAULT_MAX_RECORD_BYTES, charset_policy: CharsetPolicy | None = None) -> Iterator[ImportRecord]:
+def bm25_storage_term(term: str) -> tuple[str, str | None]:
+    """Return the posting key and, for a long token, its unindexed source text."""
+    if len(term.encode("utf-8")) <= MAX_BM25_TERM_BYTES:
+        return term, None
+    key = LONG_TERM_KEY_PREFIX + hashlib.sha256(term.encode("utf-8")).hexdigest()
+    return key, term
+
+
+def long_term_dictionary_sql(entries: dict[str, str]) -> list[str]:
+    if not entries:
+        return []
+    values = ",\n".join(
+        f"({sql_string(key)}, {sql_string(term)})" for key, term in sorted(entries.items())
+    )
+    return [
+        "INSERT INTO pgwarc_lance.bm25_long_term (term_key, term) VALUES\n"
+        + values
+        + "\nON CONFLICT (term_key) DO NOTHING;",
+        "DO $pgwarc_lance_long_term_collision$\n"
+        "BEGIN\n"
+        "    IF EXISTS (\n"
+        "        SELECT 1\n"
+        "        FROM pgwarc_lance.bm25_long_term stored\n"
+        "        JOIN (VALUES\n"
+        + values
+        + "\n        ) AS incoming(term_key, term) USING (term_key)\n"
+        "        WHERE stored.term <> incoming.term\n"
+        "    ) THEN\n"
+        "        RAISE EXCEPTION 'SHA-256 collision between distinct oversized BM25 tokens; batch rolled back'\n"
+        "            USING ERRCODE = '22000';\n"
+        "    END IF;\n"
+        "END\n"
+        "$pgwarc_lance_long_term_collision$;",
+    ]
+
+
+def delete_bm25_postings_sql(doc_ids: list[int]) -> str:
+    # Keep the long-term dictionary append-only. Deleting dictionary entries
+    # in the same statement as posting deletion cannot observe the deleted
+    # rows under PostgreSQL's data-modifying CTE snapshot rules; a later
+    # maintenance command can prune orphans while writes are quiesced.
+    return f"DELETE FROM pgwarc_lance.bm25_term WHERE doc_id = ANY({sql_bigint_array(doc_ids)});"
+
+
+def long_term_version_guard_sql() -> str:
+    return """DO $pgwarc_lance_long_term_version_guard$
+DECLARE
+    installed_version text;
+BEGIN
+    SELECT extversion INTO installed_version
+    FROM pg_catalog.pg_extension
+    WHERE extname = 'pgwarc_lance';
+
+    IF installed_version IS NULL
+       OR string_to_array(installed_version, '.')::integer[] < ARRAY[0, 1, 16] THEN
+        RAISE EXCEPTION
+            'oversized BM25 tokens require pgwarc_lance 0.1.16 or newer (found %)',
+            COALESCE(installed_version, 'not installed')
+            USING ERRCODE = '0A000';
+    END IF;
+END
+$pgwarc_lance_long_term_version_guard$;"""
+
+
+def iter_import_records(
+    paths: list[Path],
+    limit: int | None,
+    min_text_chars: int,
+    max_record_bytes: int = DEFAULT_MAX_RECORD_BYTES,
+    charset_policy: CharsetPolicy | None = None,
+    pdf_extractor: PdfTextExtractor | None = None,
+    docx_extractor: DocxTextExtractor | None = None,
+    retention: ExtractionRetention | None = None,
+) -> Iterator[ImportRecord]:
     if max_record_bytes <= 0:
         raise ValueError("max_record_bytes must be positive")
     if limit is not None and limit < 0:
@@ -913,20 +1503,34 @@ def iter_import_records(paths: list[Path], limit: int | None, min_text_chars: in
     count = 0
     for path in paths:
         for warc_record in iter_warc_records(path, max_record_bytes):
-            record = import_record_from_warc(warc_record, max_record_bytes, charset_policy)
-            if record is None or len(record.text) < min_text_chars:
+            record = import_record_from_warc(
+                warc_record, max_record_bytes, charset_policy, pdf_extractor, docx_extractor, retention
+            )
+            if record is None or (record.extraction_status != "metadata_only" and len(record.text) < min_text_chars):
                 continue
-            validate_bm25_terms(record)
+            record_id = warc_record.headers.get("warc-record-id")
+            if charset_policy is not None and record_id in charset_policy.record_overrides:
+                charset_policy.record_used[record_id] = charset_policy.record_used.get(record_id, 0) + 1
             yield record
             count += 1
             if limit is not None and count >= limit:
                 return
 
 
-def load_import_records(paths: list[Path], limit: int | None, min_text_chars: int, max_record_bytes: int = DEFAULT_MAX_RECORD_BYTES) -> list[ImportRecord]:
+def load_import_records(
+    paths: list[Path],
+    limit: int | None,
+    min_text_chars: int,
+    max_record_bytes: int = DEFAULT_MAX_RECORD_BYTES,
+    pdf_extractor: PdfTextExtractor | None = None,
+    docx_extractor: DocxTextExtractor | None = None,
+) -> list[ImportRecord]:
     records: list[ImportRecord] = []
     sources: dict[int, str] = {}
-    for record in iter_import_records(paths, limit, min_text_chars, max_record_bytes):
+    for record in iter_import_records(
+        paths, limit, min_text_chars, max_record_bytes,
+        pdf_extractor=pdf_extractor, docx_extractor=docx_extractor,
+    ):
         if record.doc_id in sources:
             raise ValueError(f"duplicate imported doc_id={record.doc_id}: {sources[record.doc_id]} and {record.source_file}")
         sources[record.doc_id] = record.source_file
@@ -944,6 +1548,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("warc", nargs="+", type=Path, help="WARC or WARC.GZ file")
     parser.add_argument("--charset-override", action="append", default=[], metavar="LABEL=CODEC", help="explicitly correct a declared charset; strict decoding, recorded in summary; repeatable")
+    parser.add_argument(
+        "--charset-record-override", action="append", default=[],
+        metavar="WARC-RECORD-ID=CODEC",
+        help="decode one reviewed WARC record with replacement; U+FFFD is counted in the summary; repeatable",
+    )
+    parser.add_argument("--pdftotext", help="Poppler pdftotext executable required to import application/pdf records")
+    parser.add_argument("--pdf-timeout-seconds", type=float, default=30, help="maximum time per PDF extraction (default: 30 seconds)")
+    parser.add_argument("--document-error-policy", choices=["fail", "metadata-only"], default="fail", help="on configured PDF/DOCX extraction failure: fail before SQL (default), or preserve metadata without a vector")
+    parser.add_argument("--extract-docx", action="store_true", help="extract bounded WordprocessingML text from DOCX records")
     parser.add_argument("--output", "-o", type=Path, help="write generated SQL to this file")
     parser.add_argument("--execute", action="store_true", help="execute generated SQL with psql")
     parser.add_argument("--skip-schema", action="store_true", help="omit schema/table/index DDL after administrator installation; use for least-privilege writers")
@@ -1018,19 +1631,29 @@ class ImportSpool:
         # Keep the cache small regardless of corpus size. All spool files are
         # disposable and are removed by TemporaryDirectory after the import.
         self.db.execute("PRAGMA cache_size=-2048")
-        self.db.execute("CREATE TABLE records (doc_id INTEGER PRIMARY KEY, ordinal INTEGER, source TEXT, data TEXT)")
+        self.db.execute("CREATE TABLE records (doc_id INTEGER PRIMARY KEY, ordinal INTEGER, source TEXT, data TEXT, text_available INTEGER NOT NULL)")
         self.db.execute("CREATE TABLE vectors (doc_id INTEGER PRIMARY KEY, data TEXT)")
         self.count = 0
+        self.oversized_ascii_term_records = 0
+        self.oversized_ascii_terms = 0
+        self.max_oversized_ascii_term_bytes = 0
 
     def close(self) -> None:
         self.db.close()
 
     def add_records(self, records: Iterable[ImportRecord]) -> None:
         for record in records:
+            oversized_count, max_term_bytes = validate_bm25_terms(record)
+            self.oversized_ascii_term_records += int(oversized_count > 0)
+            self.oversized_ascii_terms += oversized_count
+            self.max_oversized_ascii_term_bytes = max(
+                self.max_oversized_ascii_term_bytes, max_term_bytes
+            )
             try:
-                self.db.execute("INSERT INTO records VALUES (?,?,?,?)", (
+                self.db.execute("INSERT INTO records VALUES (?,?,?,?,?)", (
                     record.doc_id, self.count, record.source_file,
                     json.dumps(dataclasses.asdict(record), ensure_ascii=False),
+                    int(record.extraction_status != "metadata_only"),
                 ))
             except sqlite3.IntegrityError as exc:
                 previous = self.db.execute("SELECT source FROM records WHERE doc_id=?", (record.doc_id,)).fetchone()[0]
@@ -1039,13 +1662,14 @@ class ImportSpool:
         self.db.execute("CREATE INDEX records_ordinal ON records (ordinal)")
         self.db.commit()
 
-    def records(self) -> Iterator[ImportRecord]:
-        for (data,) in self.db.execute("SELECT data FROM records ORDER BY ordinal"):
+    def records(self, embedding_only: bool = False) -> Iterator[ImportRecord]:
+        sql = "SELECT data FROM records" + (" WHERE text_available=1" if embedding_only else "") + " ORDER BY ordinal"
+        for (data,) in self.db.execute(sql):
             yield ImportRecord(**json.loads(data))
 
-    def write_records(self, path: Path) -> None:
+    def write_records(self, path: Path, embedding_only: bool = False) -> None:
         with path.open("w", encoding="utf-8") as output:
-            for record in self.records():
+            for record in self.records(embedding_only):
                 output.write(json.dumps(record_to_json(record), ensure_ascii=False, sort_keys=True) + "\n")
 
     def add_vectors(self, path: Path, vector_dim: int) -> None:
@@ -1071,14 +1695,14 @@ class ImportSpool:
                 if raw_id is None:
                     raise ValueError(f"{path}:{line_no}: missing doc_id")
                 doc_id = int(raw_id)
-                if not self.db.execute("SELECT 1 FROM records WHERE doc_id=?", (doc_id,)).fetchone():
+                if not self.db.execute("SELECT 1 FROM records WHERE doc_id=? AND text_available=1", (doc_id,)).fetchone():
                     continue
                 vector = parse_vector(row.get("vector"), doc_id, vector_dim, str(path))
                 try:
                     self.db.execute("INSERT INTO vectors VALUES (?,?)", (doc_id, json.dumps(vector)))
                 except sqlite3.IntegrityError as exc:
                     raise ValueError(f"{path}:{line_no}: duplicate vector for doc_id={doc_id}") from exc
-        missing = self.db.execute("SELECT doc_id FROM records WHERE doc_id NOT IN (SELECT doc_id FROM vectors) LIMIT 5").fetchall()
+        missing = self.db.execute("SELECT doc_id FROM records WHERE text_available=1 AND doc_id NOT IN (SELECT doc_id FROM vectors) LIMIT 5").fetchall()
         if missing:
             raise ValueError(f"{path}: missing vectors for doc_id(s): " + ", ".join(str(row[0]) for row in missing))
         self.db.commit()
@@ -1092,18 +1716,32 @@ class ImportSpool:
 
 
 def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
-    charset_policy = CharsetPolicy.from_options(getattr(args, "charset_override", []))
+    charset_policy = CharsetPolicy.from_options(
+        getattr(args, "charset_override", []),
+        getattr(args, "charset_record_override", []),
+    )
+    pdf_extractor = PdfTextExtractor.from_command(
+        getattr(args, "pdftotext", None),
+        getattr(args, "pdf_timeout_seconds", 30),
+        args.max_record_bytes,
+    )
+    docx_extractor = DocxTextExtractor(max_output_bytes=args.max_record_bytes) if args.extract_docx else None
+    retention = ExtractionRetention(getattr(args, "document_error_policy", "fail"))
     with tempfile.TemporaryDirectory(prefix="pgwarc-import-", dir=args.temp_dir) as directory:
         root = Path(directory)
         spool = ImportSpool(root)
         try:
-            spool.add_records(iter_import_records(args.warc, args.limit, args.min_text_chars, args.max_record_bytes, charset_policy))
+            spool.add_records(iter_import_records(
+                args.warc, args.limit, args.min_text_chars, args.max_record_bytes,
+                charset_policy, pdf_extractor, docx_extractor, retention,
+            ))
+            charset_policy.validate_record_overrides()
             if args.records_jsonl:
                 spool.write_records(args.records_jsonl)
             vectors = None
             if args.embedding_command:
                 records_path, vectors_path = root / "records.jsonl", root / "vectors.jsonl"
-                spool.write_records(records_path)
+                spool.write_records(records_path, embedding_only=True)
                 with records_path.open("rb") as source, vectors_path.open("wb") as output:
                     process = subprocess.Popen(args.embedding_command, shell=True, stdin=source, stdout=output, start_new_session=True)
                     try:
@@ -1136,6 +1774,7 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                     args.overwrite_lance, not args.no_hash_vectors and vectors is None,
                     vectors, args.batch_size, lance_mode, args.bm25_mode, spool.count,
                     args.batch_max_bytes, batch_count, args.skip_schema,
+                    requires_long_term_storage=spool.oversized_ascii_terms > 0,
                 ):
                     output.write(chunk)
             if args.output:
@@ -1153,10 +1792,24 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                 "charset_overrides": charset_policy.overrides,
                 "charset_override_records": charset_policy.used,
                 "charset_override_errors": "strict",
+                "charset_record_overrides": charset_policy.record_overrides,
+                "charset_record_override_records": charset_policy.record_used,
+                "charset_record_override_errors": "replace",
+                "charset_record_override_replacement_characters": charset_policy.record_replacement_characters,
+                "pdf_extraction": pdf_extractor.summary() if pdf_extractor else {"enabled": False, "attempted": 0, "extracted": 0, "output_bytes": 0},
+                "docx_extraction": docx_extractor.summary() if docx_extractor else {"enabled": False, "attempted": 0, "extracted": 0, "output_bytes": 0},
+                "extraction_retention": {"mode": retention.mode, "metadata_only": retention.metadata_only, "errors": retention.errors, "omitted_errors": retention.omitted_errors},
+                "vector_rows_expected": (len(vectors) if vectors is not None else spool.db.execute("SELECT count(*) FROM records WHERE text_available=1").fetchone()[0] if args.lance_uri and not args.no_hash_vectors else 0),
                 "records": spool.count, "sql_bytes": sql_path.stat().st_size,
                 "vectors": vector_count, "lance_mode": lance_mode if args.lance_uri else "none",
                 "lance_append_duplicates": "possible" if args.lance_uri and lance_mode == "append" and vector_count != 0 else "none",
                 "bm25_mode": args.bm25_mode, "execute": args.execute, "psql": args.psql,
+                "oversized_ascii_term_records": spool.oversized_ascii_term_records,
+                "oversized_ascii_terms": spool.oversized_ascii_terms,
+                "max_oversized_ascii_term_bytes": spool.max_oversized_ascii_term_bytes,
+                "required_extension_version": (
+                    LONG_TERM_STORAGE_MIN_VERSION if spool.oversized_ascii_terms else None
+                ),
             }
             if args.summary_json:
                 args.summary_json.write_text(json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8")
@@ -1173,6 +1826,8 @@ def main(argv: list[str]) -> int:
         raise SystemExit("--embedding-timeout must be finite and positive")
     if args.max_record_bytes <= 0:
         raise SystemExit("--max-record-bytes must be positive")
+    if args.pdf_timeout_seconds <= 0 or not math.isfinite(args.pdf_timeout_seconds):
+        raise SystemExit("--pdf-timeout-seconds must be finite and positive")
     if args.vector_dim <= 0:
         raise SystemExit("--vector-dim must be positive")
     if args.batch_max_bytes <= 0:

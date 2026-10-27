@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::ffi::CString;
 
 use pgrx::datum::DatumWithOid;
@@ -26,6 +27,10 @@ static MAX_SCAN_ROWS: GucSetting<i32> = GucSetting::<i32>::new(0);
 /// Kill switch for operations that destroy or rewrite existing Lance data
 /// (`lance_create_table(overwrite => true)`, `lance_restore_version`).
 static ALLOW_DESTRUCTIVE_OPS: GucSetting<bool> = GucSetting::<bool>::new(true);
+
+/// Keep individual search inputs bounded while allowing the longest observed
+/// Common Crawl token (2,298,914 characters) to be searched exactly.
+const MAX_QUERY_BYTES: usize = 2_500_000;
 
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
@@ -100,10 +105,10 @@ fn bounded_search_k(value: i32, name: &str) -> usize {
 }
 
 fn require_query_text(query: &str) {
-    if query.len() > 65_536 {
+    if query.len() > MAX_QUERY_BYTES {
         fail(
             PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-            "search query exceeds the maximum of 65536 UTF-8 bytes",
+            "search query exceeds the maximum of 2500000 UTF-8 bytes",
         );
     }
 }
@@ -222,8 +227,14 @@ struct WarcMetadata {
     source_file: Option<String>,
 }
 
-fn warc_metadata_for_doc(doc_id: i64) -> WarcMetadata {
+fn warc_metadata_for_docs(doc_ids: Vec<i64>) -> HashMap<i64, WarcMetadata> {
+    let mut metadata_by_doc = HashMap::with_capacity(doc_ids.len());
+    if doc_ids.is_empty() {
+        return metadata_by_doc;
+    }
+
     let sql = "SELECT
+                   doc_id,
                    target_uri,
                    to_char(warc_date AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS warc_date,
                    content_type,
@@ -232,61 +243,85 @@ fn warc_metadata_for_doc(doc_id: i64) -> WarcMetadata {
                    text_len,
                    source_file
                FROM pgwarc_lance.warc_record
-               WHERE doc_id = $1";
+               WHERE doc_id = ANY($1::bigint[])";
 
-    let mut metadata = WarcMetadata::default();
     Spi::connect(|client| {
-        let row = client
-            .select(sql, Some(1), &[DatumWithOid::from(doc_id)])
-            .unwrap_or_report()
-            .first();
-        if !row.is_empty() {
-            metadata.target_uri = row
-                .get_by_name::<String, _>("target_uri")
-                .unwrap_or_report();
-            metadata.warc_date = row.get_by_name::<String, _>("warc_date").unwrap_or_report();
-            metadata.content_type = row
-                .get_by_name::<String, _>("content_type")
-                .unwrap_or_report();
-            metadata.http_status = row.get_by_name::<i32, _>("http_status").unwrap_or_report();
-            metadata.payload_digest = row
-                .get_by_name::<String, _>("payload_digest")
-                .unwrap_or_report();
-            metadata.text_len = row
-                .get_by_name::<i32, _>("text_len")
+        let rows = client
+            .select(sql, None, &[DatumWithOid::from(doc_ids)])
+            .unwrap_or_report();
+        for row in rows {
+            let doc_id = row
+                .get_by_name::<i64, _>("doc_id")
                 .unwrap_or_report()
-                .unwrap_or(0);
-            metadata.source_file = row
-                .get_by_name::<String, _>("source_file")
-                .unwrap_or_report();
+                .unwrap();
+            let metadata = WarcMetadata {
+                target_uri: row
+                    .get_by_name::<String, _>("target_uri")
+                    .unwrap_or_report(),
+                warc_date: row.get_by_name::<String, _>("warc_date").unwrap_or_report(),
+                content_type: row
+                    .get_by_name::<String, _>("content_type")
+                    .unwrap_or_report(),
+                http_status: row.get_by_name::<i32, _>("http_status").unwrap_or_report(),
+                payload_digest: row
+                    .get_by_name::<String, _>("payload_digest")
+                    .unwrap_or_report(),
+                text_len: row
+                    .get_by_name::<i32, _>("text_len")
+                    .unwrap_or_report()
+                    .unwrap_or(0),
+                source_file: row
+                    .get_by_name::<String, _>("source_file")
+                    .unwrap_or_report(),
+            };
+            metadata_by_doc.insert(doc_id, metadata);
         }
         Ok::<(), pgrx::spi::SpiError>(())
     })
     .unwrap_or_report();
 
-    metadata
+    metadata_by_doc
 }
 
 pgrx::extension_sql!(
     r#"
     CREATE SCHEMA IF NOT EXISTS pgwarc_lance;
 
+    -- Cover both document lookups and BM25 statistics when visibility permits.
     CREATE TABLE IF NOT EXISTS pgwarc_lance.bm25_doc (
-        doc_id     bigint PRIMARY KEY,
+        doc_id     bigint NOT NULL,
         content    text,
         doc_len    integer NOT NULL DEFAULT 0,
-        indexed_at timestamptz NOT NULL DEFAULT now()
+        indexed_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (doc_id) INCLUDE (doc_len)
     );
+
+    -- Keep corpus-wide BM25 count/average scans narrow and index-only after
+    -- vacuum has marked the imported corpus pages all-visible.
+    CREATE INDEX IF NOT EXISTS bm25_doc_doc_len_idx
+        ON pgwarc_lance.bm25_doc (doc_len);
 
     CREATE TABLE IF NOT EXISTS pgwarc_lance.bm25_term (
         term    text NOT NULL,
         doc_id  bigint NOT NULL REFERENCES pgwarc_lance.bm25_doc(doc_id) ON DELETE CASCADE,
         tf      integer NOT NULL,
-        PRIMARY KEY (term, doc_id)
+        PRIMARY KEY (term, doc_id) INCLUDE (tf)
     );
 
-    CREATE INDEX IF NOT EXISTS bm25_term_term_idx ON pgwarc_lance.bm25_term (term);
     CREATE INDEX IF NOT EXISTS bm25_term_doc_id_idx ON pgwarc_lance.bm25_term (doc_id);
+
+    -- BM25 query setup counts matching postings by term before scoring them.
+    -- Keep that document-frequency scan narrow instead of walking the
+    -- (term, doc_id) primary key, whose INCLUDE(tf) payload is unnecessary.
+    CREATE INDEX IF NOT EXISTS bm25_term_frequency_idx
+        ON pgwarc_lance.bm25_term (term);
+
+    -- Full oversized tokens stay in unindexed TOAST storage. Their short
+    -- SHA-256 keys can safely participate in the existing posting B-tree.
+    CREATE TABLE IF NOT EXISTS pgwarc_lance.bm25_long_term (
+        term_key text PRIMARY KEY,
+        term     text NOT NULL
+    );
 
     CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
         doc_id         bigint PRIMARY KEY,
@@ -317,6 +352,7 @@ pgrx::extension_sql!(
     -- documents, postings, archive metadata and write history are user data.
     SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.bm25_doc', '');
     SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.bm25_term', '');
+    SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.bm25_long_term', '');
     SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.warc_record', '');
     SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.lance_write_log', '');
     SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.lance_write_log_id_seq', '');
@@ -730,8 +766,11 @@ fn hybrid_warc_search(
 
     let hits = hybrid::search(query, vector_query, lance_uri, k)
         .unwrap_or_else(|e| fail_operation("hybrid_warc_search", e));
-    let rows = hits.into_iter().map(|h| {
-        let metadata = warc_metadata_for_doc(h.doc_id);
+    // Resolve metadata in one SPI query instead of one query per returned hit.
+    let doc_ids = hits.iter().map(|hit| hit.doc_id).collect::<Vec<_>>();
+    let mut metadata_by_doc = warc_metadata_for_docs(doc_ids);
+    let rows = hits.into_iter().map(move |h| {
+        let metadata = metadata_by_doc.remove(&h.doc_id).unwrap_or_default();
         (
             h.doc_id,
             h.score,

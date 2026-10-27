@@ -48,13 +48,14 @@ CREATE ROLE pgwarc_writer NOLOGIN;
 GRANT USAGE ON SCHEMA public, pgwarc_lance TO pgwarc_reader, pgwarc_writer;
 
 GRANT SELECT ON pgwarc_lance.bm25_doc, pgwarc_lance.bm25_term,
-    pgwarc_lance.warc_record TO pgwarc_reader;
+    pgwarc_lance.bm25_long_term, pgwarc_lance.warc_record TO pgwarc_reader;
 GRANT EXECUTE ON FUNCTION public.hybrid_warc_search(text,real[],text,integer)
     TO pgwarc_reader;
 
 GRANT SELECT, INSERT, UPDATE ON pgwarc_lance.bm25_doc,
     pgwarc_lance.warc_record TO pgwarc_writer;
-GRANT SELECT, INSERT, DELETE ON pgwarc_lance.bm25_term TO pgwarc_writer;
+GRANT SELECT, INSERT, DELETE ON pgwarc_lance.bm25_term,
+    pgwarc_lance.bm25_long_term TO pgwarc_writer;
 GRANT INSERT ON pgwarc_lance.lance_write_log TO pgwarc_writer;
 GRANT USAGE ON SEQUENCE pgwarc_lance.lance_write_log_id_seq TO pgwarc_writer;
 GRANT EXECUTE ON FUNCTION public.bm25_index_document(bigint,text),
@@ -81,11 +82,40 @@ are not a per-document or per-tenant isolation mechanism. The writer can modify
 its granted SQL data and write permitted datasets, so use a separate database
 and OS root when corpus isolation is required. Readers need no write-log grant.
 
-From 0.1.4, BM25 and hybrid query text is limited to 65,536 UTF-8 bytes; search
-`k` is limited to 10,000 across BM25/vector/hybrid entry points. Oversized
-requests fail with SQLSTATE 54000. Use smaller search requests; `k=0` still
-returns no results. These limits do not replace authentication or admission
-control for concurrent requests.
+From 0.1.4, BM25 and hybrid query text is limited to 65,536 UTF-8 bytes; the
+0.1.16 candidate raises that bound to 2,500,000 bytes so the longest token in the
+audited Common Crawl slice can be searched exactly. Search `k` remains limited
+to 10,000 across BM25/vector/hybrid entry points. Oversized requests fail with
+SQLSTATE 54000. `k=0` still returns no results. These limits do not replace
+authentication or admission control for concurrent requests.
+
+The 0.1.16 candidate stores the full oversized token in
+`pgwarc_lance.bm25_long_term` and uses a fixed-size SHA-256 key in BM25 postings;
+the table is included in extension configuration dumps. Grant readers SELECT
+and writers SELECT/INSERT/DELETE on this table as shown above. The dictionary
+keeps entries after a document is reindexed or removed so concurrent indexing
+cannot race orphan cleanup. To remove orphaned token text, pause all BM25
+writers first, then run:
+
+```sql
+DELETE FROM pgwarc_lance.bm25_long_term AS long_term
+WHERE NOT EXISTS (
+    SELECT 1 FROM pgwarc_lance.bm25_term AS posting
+    WHERE posting.term = long_term.term_key
+);
+```
+
+The importer reports oversized token counts and requires extension 0.1.16 or
+newer before it executes a batch containing such a token. Tokens above the
+2,500,000-byte searchable limit fail the complete import before any SQL runs;
+the extension rejects the same input from direct indexing calls with SQLSTATE
+54000.
+
+The 0.1.15-to-0.1.16 upgrade scans existing postings for raw terms over 2,000
+bytes and reindexes only the affected documents from `bm25_doc.content`. Stop
+BM25 writers and reconnect sessions after installing the new shared library
+before running `ALTER EXTENSION ... UPDATE`; the data rewrite is part of the
+upgrade transaction and rolls back on any indexing error.
 
 BM25 aggregation and ranking now execute inside PostgreSQL and only the top
 `k` rows cross into Rust. Sorting/hashing can spill to temporary files.
@@ -114,6 +144,25 @@ python3 tools/warc_importer.py input.warc.gz --skip-schema --lance-uri /srv/pgwa
 grants cause an error. The default hash vectors are development placeholders,
 so always provide real embeddings for operational retrieval.
 
+PDF and DOCX body extraction are opt-in. Supply `--pdftotext /path/to/pdftotext`
+to enable Poppler PDF extraction and `--extract-docx` for WordprocessingML text
+from DOCX files. The importer checks the configured Poppler executable, limits
+each PDF process to 30 seconds by default, and bounds both input and output by
+`--max-record-bytes` (64 MiB by default). DOCX parsing limits ZIP entries and
+expanded/output bytes and rejects encrypted or unsafe entries, DTD/entity
+declarations, NUL XML and empty bodies. Text extraction failures stop the import
+before SQL execution; inspect the summary and resolve every failed record.
+Scanned PDFs with no text need OCR or manual review. Legacy Office, RTF, EPUB,
+and other unsupported binary formats remain unsupported and fail explicitly.
+
+Review HTTP charset declarations before importing known problem records.
+`--charset-override LABEL=CODEC` applies a corpus-level mapping with strict
+decoding. `--charset-record-override '<WARC-Record-ID>=CODEC'` applies a
+loss-tolerant correction to one reviewed record and records observed U+FFFD
+characters in the summary. Missing, duplicate or filtered targets stop before
+SQL generation. The importer does not guess a replacement codec for other
+records.
+
 After a major load, use an administrative maintenance connection to collect
 planner statistics before checking latency or admitting the new corpus:
 
@@ -130,6 +179,21 @@ PostgreSQL explains [ANALYZE permissions and statistics](https://www.postgresql.
 and [vacuuming and visibility maps](https://www.postgresql.org/docs/16/routine-vacuuming.html).
 Validate autovacuum settings for the actual ingestion rate and monitor its
 progress; a fresh corpus can otherwise wait for its first automatic analysis.
+The `bm25_doc(doc_len)` index introduced in 0.1.10 only supported an index-only
+corpus-statistics scan after VACUUM marked the table pages all-visible in the
+measured corpus. Before that maintenance, PostgreSQL kept the sequential scan.
+Check the query plan after the maintenance step before attributing a latency
+change to this index.
+
+The 0.1.11 candidate also includes `doc_len` in `bm25_doc_pkey`, so document
+lookups and the full document statistics scan can use index-only plans. Heap
+fetches still depend on visibility-map coverage; check `Heap Fetches` after a
+load or update and refresh visibility in the administrator's maintenance
+window. The 0.1.10→0.1.11 extension update rebuilds the primary key and validates
+the extension-owned foreign key in the same transaction. Its populated clone
+check completed in 1.23 seconds, but production lock duration and larger-corpus
+behavior remain unmeasured. This is a development candidate, not an approved
+production upgrade procedure.
 
 ## Monitor and respond
 

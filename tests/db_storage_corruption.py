@@ -129,7 +129,7 @@ def main() -> int:
             SELECT setval('pgwarc_lance.lance_write_log_id_seq',12345,true);
             CREATE ROLE {reader} NOLOGIN;
             GRANT USAGE ON SCHEMA public,pgwarc_lance TO {reader};
-            GRANT SELECT ON pgwarc_lance.bm25_doc,pgwarc_lance.bm25_term,pgwarc_lance.warc_record TO {reader};
+            GRANT SELECT ON pgwarc_lance.bm25_doc,pgwarc_lance.bm25_term,pgwarc_lance.bm25_long_term,pgwarc_lance.warc_record TO {reader};
             GRANT EXECUTE ON FUNCTION bm25_search(text,integer),lance_count(text),
                 lance_scan(text,integer),lance_vector_search(text,real[],integer),
                 hybrid_warc_search(text,real[],text,integer) TO {reader};""")
@@ -147,7 +147,7 @@ def main() -> int:
         # No writers exist during this fixture. Snapshot SQL and all Lance files
         # together before inducing any damage; record independent byte hashes.
         dump = run(['docker', 'exec', container, 'pg_dump', '-U', 'postgres', '--no-owner', source_db])
-        for table in ['bm25_doc', 'bm25_term', 'warc_record', 'lance_write_log']:
+        for table in ['bm25_doc', 'bm25_term', 'bm25_long_term', 'warc_record', 'lance_write_log']:
             if f'COPY pgwarc_lance.{table} ' not in dump:
                 raise AssertionError('backup omitted ' + table)
         checks['coordinated_backup_contains_all_sql_tables'] = True

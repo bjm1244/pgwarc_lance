@@ -1,6 +1,6 @@
 [package]
 name = "pgwarc_lance"
-version = "0.1.5"
+version = "0.1.20"
 edition = "2021"
 publish = false
 license = "Apache-2.0"
@@ -28,6 +28,7 @@ arrow = "58"
 arrow-array = "58"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 futures = "0.3"
+sha2 = "=0.10.9"
 
 [dev-dependencies.pgrx-tests]
 version = "=0.19.1"
@@ -40,3 +41,9 @@ panic = "unwind"
 opt-level = 3
 lto = "thin"
 codegen-units = 16
+
+# Arrow 58 constrains zstd to 0.13; this source patch changes only that
+# requirement to the security-fixed 0.14 line. See vendor/README.md.
+[patch.crates-io]
+arrow-ipc = { path = "vendor/arrow-ipc-58.3.0" }
+lance-encoding = { path = "vendor/lance-encoding-7.0.0" }

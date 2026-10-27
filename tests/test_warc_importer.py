@@ -1,12 +1,15 @@
 import importlib.util
 import gzip
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +41,240 @@ def warc_response(uri: str, date: str, html: str) -> bytes:
     return headers + http + b"\r\n\r\n"
 
 
+def warc_response_bytes(uri: str, content_type: str, body: bytes) -> bytes:
+    http = (
+        b"HTTP/1.1 200 OK\r\n"
+        + b"Content-Type: " + content_type.encode("ascii") + b"\r\n\r\n"
+        + body
+    )
+    headers = (
+        "WARC/1.1\r\n"
+        "WARC-Type: response\r\n"
+        f"WARC-Target-URI: {uri}\r\n"
+        "WARC-Date: 2026-10-01T00:00:00Z\r\n"
+        "WARC-Record-ID: <urn:uuid:00000000-0000-0000-0000-000000000002>\r\n"
+        f"Content-Length: {len(http)}\r\n"
+        "\r\n"
+    ).encode("ascii")
+    return headers + http + b"\r\n\r\n"
+
+
+def make_docx(text: str, document_xml: bytes | None = None) -> bytes:
+    if document_xml is None:
+        document_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:body><w:p><w:r><w:t>' + escape(text) + '</w:t></w:r></w:p></w:body></w:document>'
+        ).encode("utf-8")
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", document_xml)
+    return output.getvalue()
+
+
+def fake_pdftotext(path: Path) -> Path:
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "if sys.argv[1:] == ['-v']:\n"
+        " print('pdftotext version 99.1', file=sys.stderr); raise SystemExit(0)\n"
+        "data = sys.stdin.buffer.read()\n"
+        "if data == b'slow': time.sleep(1)\n"
+        "if data == b'fail': raise SystemExit(9)\n"
+        "if data == b'oversize': sys.stdout.buffer.write(b'x' * 128)\n"
+        "else: sys.stdout.buffer.write(b' Extracted\\n PDF text\\n')\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
 class WarcImporterTests(unittest.TestCase):
+    def test_retention_diagnostics_remain_bounded_across_many_failed_documents(self):
+        retention = warc_importer.ExtractionRetention("metadata-only")
+        for number in range(1000):
+            with self.assertRaises(ValueError):
+                retention.failed("pdf", ValueError(f"failed doc_id={number}: " + "x" * 1000))
+        self.assertEqual(retention.metadata_only, {"pdf": 1000})
+        self.assertEqual(len(retention.errors), 16)
+        self.assertEqual(retention.omitted_errors, 984)
+        self.assertTrue(all(len(message) <= 512 for message in retention.errors))
+
+    def test_pdf_retention_preserves_metadata_without_placeholder_vectors_in_all_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            command = fake_pdftotext(root / "pdftotext")
+            source = root / "mixed.warc"
+            source.write_bytes(warc_response_bytes("https://example.test/bad.pdf", "application/pdf", b"fail")
+                + warc_response("https://example.test/text", "2026-10-01", "searchable words"))
+            for mode in warc_importer.BM25_MODES:
+                with self.subTest(mode=mode):
+                    sql, summary = root / (mode + ".sql"), root / (mode + ".json")
+                    warc_importer.main([str(source), "--pdftotext", str(command),
+                        "--document-error-policy", "metadata-only", "--lance-uri", "/tmp/retention.lance",
+                        "--bm25-mode", mode, "--output", str(sql), "--summary-json", str(summary)])
+                    data = json.loads(summary.read_text())
+                    self.assertEqual(data["records"], 2)
+                    self.assertEqual(data["vector_rows_expected"], 1)
+                    self.assertEqual(data["extraction_retention"]["metadata_only"], {"pdf": 1})
+                    self.assertIn("https://example.test/bad.pdf", sql.read_text())
+                    self.assertEqual(sql.read_text().count("SELECT lance_insert_many("), 1)
+
+    def test_direct_sql_api_does_not_vectorize_metadata_only_records(self):
+        record = warc_importer.ImportRecord(1, None, None, "application/pdf", 200, "digest", "", "input.warc", "metadata_only")
+        sql = warc_importer.emit_sql([record], "/tmp/metadata-only.lance", 3, False, False, vectors_by_doc_id={1: [1.0, 0.0, 0.0]})
+        self.assertIn("warc_record", sql)
+        self.assertNotIn("lance_insert_many(", sql)
+        self.assertNotIn("lance_upsert_many(", sql)
+
+    def test_metadata_only_records_do_not_require_precomputed_embeddings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            command = fake_pdftotext(root / "pdftotext")
+            source, vectors, output = root / "mixed.warc", root / "vectors.jsonl", root / "import.sql"
+            text = warc_response("https://example.test/text", "2026-10-01", "searchable words")
+            source.write_bytes(warc_response_bytes("https://example.test/bad.pdf", "application/pdf", b"fail") + text)
+            clean = root / "text.warc"; clean.write_bytes(text)
+            record = warc_importer.load_import_records([clean], None, 1)[0]
+            vectors.write_text(json.dumps({"doc_id": record.doc_id, "vector": [1, 2, 3]}) + "\n")
+            warc_importer.main([str(source), "--pdftotext", str(command), "--document-error-policy", "metadata-only",
+                "--embedding-jsonl", str(vectors), "--lance-uri", "/tmp/retention.lance", "--output", str(output)])
+            self.assertEqual(output.read_text().count("SELECT lance_insert_many("), 1)
+
+    def test_embedding_command_receives_only_searchable_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); command = fake_pdftotext(root / "pdftotext")
+            source, embed, output = root / "mixed.warc", root / "embed.py", root / "import.sql"
+            source.write_bytes(warc_response_bytes("https://example.test/bad.pdf", "application/pdf", b"fail")
+                + warc_response("https://example.test/text", "2026-10-01", "searchable words"))
+            embed.write_text("import json,sys\nfor line in sys.stdin:\n r=json.loads(line); assert r['text']; print(json.dumps({'doc_id':r['doc_id'],'vector':[1,2,3]}))\n")
+            warc_importer.main([str(source), "--pdftotext", str(command), "--document-error-policy", "metadata-only",
+                "--embedding-command", f"{sys.executable} {embed}", "--lance-uri", "/tmp/retention.lance", "--output", str(output)])
+            self.assertEqual(output.read_text().count("SELECT lance_insert_many("), 1)
+
+    def test_retention_does_not_mask_resource_limits_or_missing_extractor(self):
+        policy = warc_importer.ExtractionRetention("metadata-only")
+        with self.assertRaisesRegex(ValueError, "requires --pdftotext"):
+            warc_importer.decode_body(b"%PDF-1.7", {}, "application/pdf", retention=policy)
+        extractor = mock.Mock()
+        with self.assertRaisesRegex(ValueError, "decoded HTTP payload exceeds"):
+            warc_importer.decode_body(b"x" * 17, {}, "application/pdf", max_decoded_bytes=16,
+                pdf_extractor=extractor, retention=policy)
+        extractor.extract.assert_not_called()
+        self.assertEqual(policy.metadata_only, {})
+
+    def test_pdf_signature_detection_after_http_gzip(self):
+        extractor = mock.Mock(); extractor.extract.return_value = "PDF text"
+        body = b"%PDF-1.7 example"
+        self.assertEqual(warc_importer.decode_body(gzip.compress(body), {"content-encoding":"gzip"},
+            "application/octet-stream", pdf_extractor=extractor), "PDF text")
+        extractor.extract.assert_called_once_with(body, warc_importer.DEFAULT_MAX_RECORD_BYTES, None)
+
+    def test_docx_failure_retention_is_explicit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.warc"
+            path.write_bytes(warc_response_bytes("https://example.test/bad.docx", warc_importer.DOCX_MIME, b"invalid zip"))
+            record = next(warc_importer.iter_warc_records(path))
+            with self.assertRaises(ValueError):
+                warc_importer.import_record_from_warc(record, docx_extractor=warc_importer.DocxTextExtractor())
+            policy = warc_importer.ExtractionRetention("metadata-only")
+            result = warc_importer.import_record_from_warc(record,
+                docx_extractor=warc_importer.DocxTextExtractor(), retention=policy)
+            self.assertEqual(result.extraction_status, "metadata_only")
+            self.assertEqual(result.text, "")
+            self.assertEqual(policy.metadata_only, {"docx":1})
+
+    def test_docx_requires_explicit_extractor(self):
+        with self.assertRaisesRegex(ValueError, "requires --extract-docx"):
+            warc_importer.decode_body(make_docx("Office text"), {}, warc_importer.DOCX_MIME)
+
+    def test_docx_extracts_word_text_and_tracks_bytes(self):
+        extractor = warc_importer.DocxTextExtractor(max_output_bytes=4096)
+        text = extractor.extract(make_docx("Office body text"), 4096, record_key=77)
+        self.assertEqual(text, "Office body text")
+        self.assertEqual(extractor.summary()["attempted"], 1)
+        self.assertEqual(extractor.summary()["extracted"], 1)
+        self.assertGreater(extractor.summary()["output_bytes"], 0)
+
+    def test_docx_cli_generates_sql_from_extracted_text_and_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, output, summary = root / "input.warc", root / "import.sql", root / "summary.json"
+            source.write_bytes(warc_response_bytes(
+                "https://example.test/report.docx", warc_importer.DOCX_MIME,
+                make_docx("Office body text"),
+            ))
+            self.assertEqual(warc_importer.main([
+                str(source), "--extract-docx", "--no-hash-vectors",
+                "--output", str(output), "--summary-json", str(summary), "--temp-dir", tmp,
+            ]), 0)
+            self.assertIn("Office body text", output.read_text(encoding="utf-8"))
+            data = json.loads(summary.read_text(encoding="utf-8"))
+            self.assertEqual(data["records"], 1)
+            self.assertTrue(data["docx_extraction"]["enabled"])
+            self.assertEqual(data["docx_extraction"]["attempted"], 1)
+            self.assertEqual(data["docx_extraction"]["extracted"], 1)
+
+    def test_docx_option_is_required_before_sql_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, output = root / "input.warc", root / "import.sql"
+            source.write_bytes(warc_response_bytes(
+                "https://example.test/report.docx", warc_importer.DOCX_MIME,
+                make_docx("Office body text"),
+            ))
+            with self.assertRaisesRegex(ValueError, "requires --extract-docx"):
+                warc_importer.main([str(source), "--output", str(output), "--temp-dir", tmp])
+            self.assertFalse(output.exists())
+
+    def test_docx_dtd_and_entity_declarations_are_rejected(self):
+        xml = (
+            b'<!DOCTYPE w:document [<!ENTITY x "expanded">]>'
+            b'<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            b'<w:body><w:p><w:r><w:t>&x;</w:t></w:r></w:p></w:body></w:document>'
+        )
+        with self.assertRaisesRegex(ValueError, "DTD/entity declarations"):
+            warc_importer.DocxTextExtractor().extract(make_docx("", xml), 4096)
+
+    def test_docx_utf16_xml_is_rejected_before_entity_parsing(self):
+        xml = (
+            '<?xml version="1.0" encoding="UTF-16"?>'
+            '<!DOCTYPE w:document [<!ENTITY x "expanded">]>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:body><w:p><w:r><w:t>&x;</w:t></w:r></w:p></w:body></w:document>'
+        ).encode("utf-16")
+        with self.assertRaisesRegex(ValueError, "with NUL bytes is not supported"):
+            warc_importer.DocxTextExtractor().extract(make_docx("", xml), 4096)
+
+    def test_docx_expanded_archive_and_empty_text_fail_explicitly(self):
+        with self.assertRaisesRegex(ValueError, "expanded archive exceeds"):
+            warc_importer.DocxTextExtractor().extract(make_docx("x" * 10000), 1024)
+        with self.assertRaisesRegex(ValueError, "no extractable text"):
+            warc_importer.DocxTextExtractor().extract(make_docx(""), 4096)
+
+    def test_unhandled_binary_mime_is_rejected_instead_of_decoded(self):
+        with self.assertRaisesRegex(ValueError, "unsupported MIME type application/octet-stream"):
+            warc_importer.decode_body(b"binary bytes", {}, "application/octet-stream")
+
+    def test_pdf_requires_explicit_extractor(self):
+        with self.assertRaisesRegex(ValueError, "requires --pdftotext"):
+            warc_importer.decode_body(b"%PDF-1.7", {}, "application/pdf")
+
+    def test_pdf_extractor_tracks_output_and_enforces_timeout_and_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            command = fake_pdftotext(Path(tmp) / "pdftotext")
+            extractor = warc_importer.PdfTextExtractor.from_command(str(command), 2)
+            self.assertIsNotNone(extractor)
+            self.assertEqual(extractor.extract(b"test pdf bytes", 1024), "Extracted PDF text")
+            self.assertEqual(extractor.summary()["version"], "pdftotext version 99.1")
+            self.assertEqual(extractor.summary()["extracted"], 1)
+            with self.assertRaisesRegex(ValueError, "output exceeds max_record_bytes=32"):
+                extractor.extract(b"oversize", 32)
+            extractor.timeout_seconds = 0.05
+            with self.assertRaisesRegex(ValueError, "timed out after 0.05s"):
+                extractor.extract(b"slow", 1024)
+
     def test_spooled_cli_matches_legacy_sql_in_every_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -246,6 +482,20 @@ class WarcImporterTests(unittest.TestCase):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 warc_importer.CharsetPolicy.from_options(options)
 
+    def test_charset_record_override_validation(self):
+        for options in [[""], ["=utf-8"], ["record-id="],
+                        ["record id=utf-8"], ["record-id=made-up-codec"],
+                        ["record-id=base64_codec"],
+                        ["record-id=utf-8", "record-id=latin1"]]:
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                warc_importer.CharsetPolicy.from_options([], options)
+
+        record_id = "<urn:example:record?key=value>"
+        policy = warc_importer.CharsetPolicy.from_options(
+            [], [f"{record_id}=utf-8"]
+        )
+        self.assertEqual(policy.record_overrides, {record_id: "utf-8"})
+
     def test_charset_override_cli_summary_and_preexecution_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -267,19 +517,161 @@ class WarcImporterTests(unittest.TestCase):
                 run.assert_not_called()
             self.assertFalse(output.exists())
 
-    def test_late_oversized_term_rejected_before_sql_execution(self):
+    def test_record_charset_override_is_scoped_and_audits_replacements(self):
         with tempfile.TemporaryDirectory() as tmp:
-            source, output = Path(tmp) / "test.warc", Path(tmp) / "test.sql"
+            root = Path(tmp)
+            source, output, summary = root / "input.warc", root / "import.sql", root / "summary.json"
+            record_id = "<urn:uuid:00000000-0000-0000-0000-000000000001>"
+            malformed = warc_response(
+                "https://example.test/malformed-charset", "2026-06-30",
+                "<p>normal words</p>",
+            ).replace(b"charset=utf-8", b"charset=uft-8")
+            malformed = malformed.replace(b"normal", b"norma\xec")
+            valid = warc_response(
+                "https://example.test/valid-charset", "2026-06-30",
+                "<p>other text</p>",
+            ).replace(b"000000000001", b"000000000002")
+            source.write_bytes(malformed + valid)
+
+            # Label-wide corrections remain strict for malformed bytes.
+            with self.assertRaises(UnicodeDecodeError):
+                warc_importer.main([
+                    str(source), "--charset-override", "uft-8=utf-8",
+                    "--output", str(output),
+                ])
+            self.assertFalse(output.exists())
+
+            with mock.patch.object(warc_importer.subprocess, "run") as run:
+                with self.assertRaisesRegex(ValueError, "both charset label"):
+                    warc_importer.main([
+                        str(source), "--charset-override", "uft-8=utf-8",
+                        "--charset-record-override", f"{record_id}=utf-8",
+                        "--execute", "--output", str(output),
+                    ])
+                run.assert_not_called()
+            self.assertFalse(output.exists())
+
+            self.assertEqual(warc_importer.main([
+                str(source), "--charset-record-override", f"{record_id}=utf-8",
+                "--output", str(output), "--summary-json", str(summary),
+            ]), 0)
+            data = json.loads(summary.read_text())
+            self.assertEqual(data["records"], 2)
+            self.assertEqual(data["charset_record_overrides"], {record_id: "utf-8"})
+            self.assertEqual(data["charset_record_override_records"], {record_id: 1})
+            self.assertEqual(data["charset_record_override_errors"], "replace")
+            self.assertEqual(
+                data["charset_record_override_replacement_characters"],
+                {record_id: 1},
+            )
+            sql = output.read_text(encoding="utf-8")
+            self.assertIn("norma\ufffd", sql)
+            self.assertIn("other text", sql)
+
+    def test_unused_or_duplicate_record_charset_override_fails_before_sql(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, output = root / "input.warc", root / "import.sql"
+            record_id = "<urn:uuid:00000000-0000-0000-0000-000000000001>"
+            missing_id = "<urn:uuid:00000000-0000-0000-0000-000000000099>"
+            source.write_bytes(warc_response(
+                "https://example.test/charset", "2026-06-30", "<p>words</p>"
+            ))
+            with mock.patch.object(warc_importer.subprocess, "run") as run:
+                with self.assertRaisesRegex(ValueError, "did not produce an imported text record"):
+                    warc_importer.main([
+                        str(source), "--charset-record-override", f"{missing_id}=utf-8",
+                        "--execute", "--output", str(output), "--temp-dir", tmp,
+                    ])
+                run.assert_not_called()
+            self.assertFalse(output.exists())
+
+            with mock.patch.object(warc_importer.subprocess, "run") as run:
+                with self.assertRaisesRegex(ValueError, "did not produce an imported text record"):
+                    warc_importer.main([
+                        str(source), "--charset-record-override", f"{record_id}=utf-8",
+                        "--min-text-chars", "100", "--execute", "--output", str(output),
+                        "--temp-dir", tmp,
+                    ])
+                run.assert_not_called()
+            self.assertFalse(output.exists())
+
+            source.write_bytes(source.read_bytes() * 2)
+            with mock.patch.object(warc_importer.subprocess, "run") as run:
+                with self.assertRaisesRegex(ValueError, "duplicate WARC-Record-ID"):
+                    warc_importer.main([
+                        str(source), "--charset-record-override", f"{record_id}=utf-8",
+                        "--execute", "--output", str(output), "--temp-dir", tmp,
+                    ])
+                run.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_late_oversized_term_is_preserved_in_every_bm25_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, output, summary = root / "test.warc", root / "test.sql", root / "summary.json"
+            long_token = "".join(
+                warc_importer.hashlib.sha256(str(index).encode()).hexdigest()
+                for index in range(120)
+            )
             source.write_bytes(warc_response("https://example.test/good", "2026-06-30",
                 "<p>valid words</p>") + warc_response("https://example.test/large", "2026-06-30",
-                "<p>" + "a" * 2001 + "</p>"))
+                "<p>" + long_token + "</p>"))
             for mode in warc_importer.BM25_MODES:
-                with self.subTest(mode=mode), mock.patch.object(warc_importer.subprocess, "run") as run:
-                    with self.assertRaisesRegex(ValueError, "BM25 ASCII term exceeds 2000"):
-                        warc_importer.main([str(source), "--execute", "--batch-size", "1",
-                            "--bm25-mode", mode, "--output", str(output)])
-                    run.assert_not_called()
-                self.assertFalse(output.exists())
+                with self.subTest(mode=mode), mock.patch.object(
+                    warc_importer.subprocess, "run",
+                    return_value=subprocess.CompletedProcess(args=[], returncode=0),
+                ) as run:
+                    self.assertEqual(warc_importer.main([
+                        str(source), "--execute", "--batch-size", "1",
+                        "--bm25-mode", mode, "--output", str(output),
+                        "--summary-json", str(summary),
+                    ]), 0)
+                    run.assert_called_once()
+                sql = output.read_text()
+                key, original = warc_importer.bm25_storage_term(long_token)
+                self.assertEqual(original, long_token)
+                self.assertIn(long_token, sql)
+                self.assertIn("oversized BM25 tokens require pgwarc_lance 0.1.16 or newer", sql)
+                if mode in {"bulk", "copy"}:
+                    self.assertIn(key, sql)
+                    self.assertIn("bm25_long_term (term_key, term)", sql)
+                else:
+                    self.assertIn("bm25_index_document(", sql)
+                data = json.loads(summary.read_text())
+                self.assertEqual(data["oversized_ascii_term_records"], 1)
+                self.assertEqual(data["oversized_ascii_terms"], 1)
+                self.assertEqual(data["max_oversized_ascii_term_bytes"], 7680)
+                self.assertEqual(data["required_extension_version"], "0.1.16")
+
+    def test_materialized_sql_infers_long_token_version_guard(self):
+        record = warc_importer.ImportRecord(
+            doc_id=123,
+            target_uri="https://example.test/long",
+            warc_date=None,
+            content_type="text/plain",
+            http_status=200,
+            payload_digest="sha1:abc",
+            text="x" * 2001,
+            source_file="sample.warc",
+        )
+        sql = warc_importer.emit_sql([record], None, 4, False, False, bm25_mode="bulk")
+        self.assertIn("oversized BM25 tokens require pgwarc_lance 0.1.16 or newer", sql)
+        self.assertIn(warc_importer.bm25_storage_term("x" * 2001)[0], sql)
+
+    def test_token_larger_than_search_limit_fails_before_sql_execution(self):
+        record = warc_importer.ImportRecord(
+            doc_id=123,
+            target_uri="https://example.test/unsearchable",
+            warc_date=None,
+            content_type="text/plain",
+            http_status=200,
+            payload_digest="sha1:abc",
+            text="x" * 2_500_001,
+            source_file="sample.warc",
+        )
+        with self.assertRaisesRegex(ValueError, "above the maximum searchable size.*no SQL executed"):
+            warc_importer.validate_bm25_terms(record)
 
     def test_import_limit_zero_returns_no_records(self):
         with tempfile.TemporaryDirectory() as tmp:

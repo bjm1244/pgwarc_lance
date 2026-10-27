@@ -1,0 +1,1 @@
+-- Runtime BM25 implementation change; extension SQL catalog is unchanged.

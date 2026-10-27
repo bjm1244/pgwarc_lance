@@ -19,6 +19,7 @@ SELECT greeting('pgwarc_lance', 42)    AS greeting_age;
 
 BEGIN;
 DELETE FROM pgwarc_lance.bm25_term;
+DELETE FROM pgwarc_lance.bm25_long_term;
 DELETE FROM pgwarc_lance.bm25_doc;
 SELECT bm25_index_document(1, 'PostgreSQL 검색 엔진');
 SELECT bm25_index_document(2, 'Lance vector search');
@@ -47,6 +48,7 @@ FROM lance_vector_search('/tmp/pgwarc_lance_smoke.lance', ARRAY[0,0,0,0]::float4
 
 BEGIN;
 DELETE FROM pgwarc_lance.bm25_term;
+DELETE FROM pgwarc_lance.bm25_long_term;
 DELETE FROM pgwarc_lance.bm25_doc;
 DELETE FROM pgwarc_lance.warc_record;
 SELECT bm25_index_document(1, 'PostgreSQL 검색 엔진');
@@ -71,6 +73,7 @@ SELECT lance_insert_many(
     4,
     ARRAY['doc1','doc2']::text[]
 );
+SELECT lance_insert('/tmp/pgwarc_lance_hybrid_smoke.lance', 4, ARRAY[1000,0,0,0]::float4[], 'no-metadata');
 SELECT doc_id, round(score::numeric, 6) AS score, source
 FROM hybrid_search('검색', ARRAY[0,0,0,0]::float4[], '/tmp/pgwarc_lance_hybrid_smoke.lance', 2);
 SELECT doc_id, source, target_uri, warc_date, http_status
@@ -83,6 +86,9 @@ WHERE http_status = 200
   AND warc_date::timestamptz >= '2026-06-30T00:00:00Z'::timestamptz
   AND source_file = 'sample.warc'
 ORDER BY doc_id;
+SELECT doc_id, target_uri IS NULL AS missing_metadata, text_len
+FROM hybrid_warc_search('검색', ARRAY[0,0,0,0]::float4[], '/tmp/pgwarc_lance_hybrid_smoke.lance', 10)
+WHERE doc_id = 4;
 ROLLBACK;
 
 \echo '=== lance write log ==='
