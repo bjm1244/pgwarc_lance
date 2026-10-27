@@ -79,6 +79,7 @@ pgwarc_lance/
 │   ├── smoke_public_warc.py    # public WARC parser/import smoke 하네스
 │   ├── check_docs.py           # 문서 링크와 하네스 drift 검증
 │   ├── preflight_quality_inputs.py # WARC/query/qrels와 real-corpus manifest read-only preflight
+│   ├── audit_bm25_index.py    # 저장 본문과 BM25 posting read-only 일관성 검사
 │   └── warc_importer.py       # WARC/WARC.GZ -> metadata/BM25/Lance SQL importer
 ├── src/
 │   ├── lib.rs                 # SQL 함수 진입점 + extension SQL
@@ -88,6 +89,7 @@ pgwarc_lance/
 │   └── hybrid.rs              # BM25 + vector RRF fusion
 └── tests/
     ├── test.sql               # smoke 테스트 (라이브 컨테이너 대상)
+    ├── test_audit_bm25_index.py # BM25 content/posting audit 단위 테스트
     ├── test_warc_importer.py  # Python WARC importer 단위 테스트
     ├── test_eval_quality.py   # quality fixture 단위 테스트
     ├── test_execution_budget.py # 분석 실행 예산 gate 단위 테스트
@@ -584,6 +586,26 @@ Importer-generated SQL은 PostgreSQL metadata/BM25 변경을 chunk 단위 `BEGIN
 - `append` mode에서 실패하거나 같은 WARC를 반복 실행하면 Lance에는 같은 `doc_id` vector row가 중복될 수 있다. PostgreSQL metadata/BM25는 `doc_id` 기준으로 갱신되지만, vector search rank는 중복 row의 영향을 받을 수 있으므로 append 재시도는 dataset 상태가 명확할 때만 사용한다.
 - 대형 import에서는 `--summary-json`을 항상 남기고 `IMPORT_SUMMARY=import.summary.json make doctor-import-summary` 또는 `IMPORT_SUMMARY=import.summary.json BENCH_OUT_DIR=benchmarks/local make finalize-import-run`으로 schema, `execute=false`, zero records, Lance append duplicate risk와 run directory completeness를 확인한다. 실패 분석이 필요할 때만 `--output import.sql`로 SQL artifact를 보관한다. 정상 실행 기본 경로는 disk에 큰 SQL 파일을 만들지 않는 `--execute` streaming이다.
 - chunk 단위 수동 복구가 필요하면 generated SQL의 `-- pgwarc_lance import batch start-end` comment를 기준으로 실패 batch를 찾는다. 이 경우에도 Lance 상태가 불확실하면 batch만 재실행하지 말고 `overwrite` 전체 재실행을 우선한다.
+
+### BM25 content/posting audit
+
+`tools/audit_bm25_index.py`는 한 `REPEATABLE READ READ ONLY` snapshot에서
+`bm25_doc.content`를 현재 importer tokenizer로 다시 세고 저장된 `bm25_term`와
+비교한다. `--warc-only`는 WARC metadata가 있는 문서로 범위를 제한한다. 이 도구는
+수정이나 자동 재색인을 하지 않는다. 전체 본문과 posting을 읽고 Python tokenizer를
+실행하므로 큰 corpus에서는 I/O와 실행 시간이 들며, 검사 중 긴 snapshot이 유지된다.
+`--output-json` 보고서는 새 파일을 mode `0600`, 새 상위 디렉터리를 mode `0700`으로
+만들어 저장한다. 이 보고서에는 mismatch/unverifiable 문서 ID가 포함되지만 본문과
+term 문자열은 포함하지 않으며, 해당 파일은 계속 private evidence로 취급한다. 이 옵션을
+주면 stdout에는 ID 없는 집계만 출력되고, 옵션을 생략하면 전체 JSON이 stdout에 출력된다.
+Exit code `0`은 일치, `2`는 불일치
+또는 null content로 인한 검증 불가, `1`은 검사 실행 실패다. 불일치는 자동 repair의
+근거가 아니며 입력·snapshot·버전을 보존하고 문서를 검토한 뒤 별도로 조치한다.
+
+```bash
+PGWARC_PSQL="$READ_ONLY_PSQL" python3 tools/audit_bm25_index.py --warc-only \
+    --output-json "$PRIVATE_EVIDENCE_DIR/bm25-index-audit.json"
+```
 
 WARC 검색 결과를 바로 소비해야 하면 `hybrid_warc_search()`를 사용한다. 기존 `hybrid_search()`와 같은 ranking을 사용하되 `target_uri`, UTC 문자열 `warc_date`, `content_type`, `http_status`, `payload_digest`, `text_len`, `source_file`을 함께 반환한다. 해당 doc_id의 metadata가 없으면 ranking row는 유지하고 metadata 컬럼은 null/0 기본값으로 반환한다.
 

@@ -1,5 +1,58 @@
 # Development log
 
+## 2026-10-27 — audit BM25 postings against stored WARC content
+
+- 선택 이유: 직전 `.18`/`.19` write 비교에서 보존된 `.18` database clone이 현재 importer
+  재계산보다 posting과 `sum(tf)`가 각각 18 작았다. `.19` index 비용과 무관하다고
+  단정하지 않고, 실제 PostgreSQL snapshot에서 본문·term frequencies·posting을 비교할
+  재현 가능한 read-only 검사가 필요했다. mismatch 때 자동 repair하지 않는 경계를 함께
+  구현했다.
+- 실제 입력은 이전 검증과 같은 Common Crawl WARC SHA-256
+  `4b6b55dc25afdb8ef9bb0e48213faa73cf07756f195b0863ba2693638bf784f8`이며, WARC-backed
+  21,873개 문서의 doc/content fingerprint는
+  `59f5ce9b52f02c24838363364f5412ea9504317afa1953915f72d0a4d4159be9`다. 기존 `.18`
+  복제본에서 감사기는 posting 8,240,889개 / `sum(tf)` 23,342,041과 본문에서 다시
+  계산한 8,240,907개 / 23,342,059를 비교해 정확히 7개 문서 불일치를 보고했다. 기존
+  `doc_len`은 posting `sum(tf)`와 일치했지만, 그 7건의 본문 기반 기대 `doc_len`과는
+  달랐다.
+- 불일치 문서 7건만 동일 `.18` native artifact로 전용 복제본에서 재색인한 뒤 감사기를
+  다시 실행했다. PostgreSQL 16.15의 `REPEATABLE READ READ ONLY` 검사에서
+  21,873개 모두 일치했고, posting 8,240,907개, `sum(tf)`와 `sum(doc_len)` 모두
+  23,342,059, 문서 길이/본문 또는 posting mismatch 0, unverifiable 0이었다. 이는
+  보존된 원본 DB가 아니라 disposable clone의 결과다. 불일치가 생긴 역사적 원인은
+  확인되지 않았고 특정 migration/index 변경으로 귀속하지 않는다.
+- `tools/audit_bm25_index.py`는 현재 `warc_importer` tokenizer와 긴 term storage key를
+  사용해 한 read-only snapshot의 저장 본문/posting을 비교하고 JSON summary만 남긴다.
+  본문과 term 값은 출력하지 않으며 mismatch/unverifiable document ID는 제한된 수만
+  보고한다. 전체 범위 또는 `--warc-only`, `PGWARC_PSQL`, exit status 0/1/2를 지원하고
+  어떤 수정·재색인도 하지 않는다. full scan과 Python tokenization은 I/O 및 CPU를 쓰고
+  긴 snapshot을 유지하므로 운영 문서에 실행 시점·비공개 보고서 취급을 적었다.
+  `--output-json`은 report를 mode 0600, 새 디렉터리는 0700으로 저장하고 stdout에는 ID
+  없는 집계만 출력한다. 감사는
+  tokenizer/posting 일치만 검사하며 charset 정확성, 추출 품질, Lance/vector 상태,
+  qrels 기반 relevance를 입증하지 않는다.
+- 검증: `python3 -B -m unittest tests.test_audit_bm25_index tests.test_warc_importer`
+  89개, `python3 -B -m unittest discover -s tests -p 'test_*.py'` 466개,
+  `make check-docs`, `py_compile`, `git diff --check`가 통과했다. 실 DB에서 최종 코드의
+  전량 재색인 전 clone 감사는 exit 2와 7개 mismatch였고, 같은 `.18` 바이너리로
+  불일치 문서를 재색인한 별도 clone은 exit 0이었다. 보고서 저장 mode 0600 및 stdout
+  ID redaction은 실 DB 명령과 단위 검증에서 확인했다. 상세 명령, PG16.15 환경, private
+  container/report, 실패 로그는 비공개 run evidence에 남겼다.
+- 조사 실패/한계: 첫 private CSV reader는 기본 131,072-byte field 제한에 걸렸고,
+  준비 helper의 token descriptor 버그는 private helper에서 수정했다. 첫 native
+  reindex 시도는 base image의 다른 바이너리로 B-tree index row 크기 오류가 났으며
+  transaction rollback을 확인했다. 그 뒤 보존된 `.18` 바이너리를 clone에 넣고 재시도해
+  통과했다. PostgreSQL ARE는 `{2001,}` 반복 횟수를 거부해 그 탐색식은 버렸다. 감사
+  코드의 실제 smoke 첫 시도도 사용하지 않는 CSV NULL 상수 참조로 시작 전에 실패했으며,
+  field-present flag 처리로 고친 최종 코드의 전량 PG16 검사를 완료했다. 원인분석의
+  중간 텍스트/문서 ID는 공개하지 않는다.
+- native 입력(src/SQL/Cargo/vendor/control/Dockerfile)은 바꾸지 않았고 기존 native
+  receipt는 수정하지 않았다. WARC, 검증 원본 DB, versioned artifacts는 읽기 전용으로
+  두고 전용 clone만 사용했다. 이 도구는 수동 검토를 돕는 개발 기능이지 repair 절차나
+  production 승인 근거가 아니다. 다음 과제는 mismatch 7건의 과거 색인 경위를 좁히고,
+  실제 WARC import에서 잘못된 charset 및 unsupported Office 본문을 하나씩 안전하게
+  처리하는 것이다.
+
 ## 2026-10-27 — measure 0.1.19 term-frequency index write cost
 
 - 시작점은 clean `development` commit

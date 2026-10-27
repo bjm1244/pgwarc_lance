@@ -195,6 +195,33 @@ check completed in 1.23 seconds, but production lock duration and larger-corpus
 behavior remain unmeasured. This is a development candidate, not an approved
 production upgrade procedure.
 
+## Verify BM25 content/posting consistency
+
+`tools/audit_bm25_index.py` recalculates term frequencies from stored document
+content with the importer tokenizer, then compares them with stored postings in
+one `REPEATABLE READ READ ONLY` snapshot. Run it with a read-only identity that
+can SELECT `pgwarc_lance.bm25_doc`, `bm25_term`, and, for `--warc-only`,
+`warc_record`:
+
+```bash
+PGWARC_PSQL="$READ_ONLY_PSQL" python3 tools/audit_bm25_index.py --warc-only \
+    --output-json "$PRIVATE_EVIDENCE_DIR/bm25-index-audit.json"
+```
+
+The audit reads all selected content and postings and runs the Python tokenizer;
+it can take substantial I/O and keeps a long snapshot, so schedule it during a
+low-activity maintenance window. It is read-only and never repairs or reindexes.
+Exit code `0` means the current importer tokenizer agrees with the selected
+snapshot, `2` means posting mismatches or documents with null content could not
+be verified, and `1` means the audit could not complete. Its report contains
+document IDs for affected rows. `--output-json` creates the report file with
+mode `0600` and any new parent directories with mode `0700`; stdout then contains
+only aggregate counts. Keep the report in protected private evidence storage.
+Without `--output-json`, stdout contains the full report and IDs. Consistency
+does not validate extraction quality, Lance/vector state, or search relevance.
+Review mismatched documents and preserve the input/version evidence before
+deciding on a separate repair.
+
 ## Monitor and respond
 
 Record import start/end, input identity, embedding identity, batch limits,
