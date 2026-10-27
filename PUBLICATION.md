@@ -1,6 +1,6 @@
-# Source publication review — updated 2026-10-27
+# Source publication review — updated 2026-10-28
 
-## Current source review: 0.1.20 consolidation (2026-10-27)
+## Current source review: 0.1.20 consolidation (2026-10-28)
 
 The completed BM25, bounded PDF/DOCX and record-scoped charset branches are
 consolidated on one development line. The importer adds explicit
@@ -21,8 +21,10 @@ three unmaintained warnings retained. No security ignore list is added.
 
 Validation performed on Linux x86_64 / PostgreSQL 16.15 / Rust 1.96.0:
 
-- Locked, offline release build passed in 28m 08s. The private .20 shared-library
-  SHA-256 is `c28e0225aee314ebce24801482bb27b1a889190f66f1947598628268dc50df30`.
+- An earlier locked, offline rustc-only release build passed in 28m 08s. Its
+  private .20 shared-library SHA-256 is
+  `c28e0225aee314ebce24801482bb27b1a889190f66f1947598628268dc50df30`; it reused
+  install SQL and is distinct from the official package artifact below.
 - Fresh installation, SQL smoke and all four SQL regressions passed. The importer
   DB suite, 18 runtime-safety checks and 15 populated-upgrade/backup-restore
   checks passed. An actual .19 binary was used for the Common Crawl baseline,
@@ -49,14 +51,29 @@ suite attempt in the source-only build directory lacked Git metadata and failed
 its Git-environment test; the source suite is run in an actual Git checkout.
 These setup failures are retained in the private evidence rather than hidden.
 
-The .20 update has no SQL declarations or DDL changes. Standard cargo-pgrx
-packaging remains unavailable in this builder because of its CLI GLIBC mismatch;
-the unchanged .19 generated install SQL and a no-DDL .19→.20 migration were
-used for the actual DB tests. Official package SQL generation remains open.
-Strict notice collection still flags primary-text gaps for random_word and
-seahash, so no binary release is approved. Independent operational qrels,
-cold/sustained SLA, full fresh raw-WARC ingestion and host power-loss recovery
-also remain open.
+The 2026-10-28 PG16 package run resolves the official-generation gap for this
+.20 source candidate. On the pinned PostgreSQL 16.15 Bookworm image, Rust
+1.96.0 and cargo-pgrx 0.19.1 ran with GLIBC 2.36. The official `cargo pgrx
+package` command wrote the 0.1.20 install SQL from the extension schema, and
+the build confirmed the lockfile was unchanged. The generated package passed
+artifact checks, a fresh install, four SQL regressions, importer DB, runtime
+safety, backup/restore, and populated 0.1.19→0.1.20 upgrade checks.
+
+The official package artifact SHA-256 is
+`701e7050ca694d68d2f828fcc61928640828db49d5139e800620a5b40e896d29`; generated
+0.1.20 install SQL SHA-256 is
+`8f0768851836f72b5536a4ffea4eecf174b5d58b1baf838b7992933cad51863b`, and
+Cargo.lock SHA-256 remains
+`3869b04a56336e1de2880b5b04a18b22110aa588525ff40d656ad0073cda4550`. See
+[PACKAGING.md](PACKAGING.md) for the Linux x86_64/PG16 reproduction commands,
+CI path and verified scope. GitHub Actions itself was not run in this local
+validation. Package verification does not approve binary redistribution or
+production deployment. Independent operational qrels, cold/sustained SLA,
+full fresh raw-WARC ingestion and host power-loss recovery remain open.
+
+The earlier lock-level notice review reported that package texts were collected
+after the source remediation; compiler/native component review and an
+artifact-bound SBOM remain separate binary-redistribution gates.
 
 The source-only snapshot review covers 275 tracked files and preserves the
 existing public GitHub history; controller Git history and execution

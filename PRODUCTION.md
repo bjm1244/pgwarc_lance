@@ -3,6 +3,10 @@
 This is still a source preview. Passing unit tests is not a production approval.
 The current source candidate is 0.1.20. Its security-only native update follows
 0.1.19 with a no-DDL migration; earlier versioned examples below are historical.
+Official PG16 package generation, generated install SQL, fresh install, four SQL
+regressions, and a populated 0.1.19-to-0.1.20 upgrade were verified on
+2026-10-28. See [PACKAGING.md](PACKAGING.md) for the exact scope and checksums;
+this closes the package-generation gap only.
 Install the complete consecutive upgrade chain and reconnect existing backends.
 See [PUBLICATION.md](PUBLICATION.md) for current evidence and limitations.
 The initial validation profile is PostgreSQL 16, a single instance, local Lance
@@ -895,12 +899,13 @@ preserved 21,873 documents, 8,240,889 postings and 21,873 WARC rows. The new
 index was valid, ready, non-unique and keyed only by `term`; all BM25 and hybrid
 query fingerprints matched on the same 0.1.18/0.1.19 corpus.
 
-The standard `cargo pgrx package` command could not run because cached
-`cargo-pgrx` requires GLIBC 2.39 and this PG16 builder has GLIBC 2.36. The
-library was built through locked/offline `cargo rustc`; tested install SQL was
-assembled from the previous generated SQL plus the new index DDL. Therefore
-official pgrx package SQL generation remains unverified. This candidate is not
-production approved. Full raw-WARC parsing/ingestion throughput, upgrade
+At that historical 0.1.19 run, the standard `cargo pgrx package` command could
+not run because cached `cargo-pgrx` required GLIBC 2.39 while the PG16 builder
+had GLIBC 2.36. The library was built through locked/offline `cargo rustc` and
+the tested install SQL was assembled from the previous generated SQL plus the
+new index DDL. The 2026-10-28 0.1.20 verification in [PACKAGING.md](PACKAGING.md)
+now covers the official package path. This candidate is not production
+approved. Full raw-WARC parsing/ingestion throughput, upgrade
 lock/disk cost at larger corpus size, independently labelled relevance,
 cold/sustained load, and binary license notice review remain open. The
 0.1.5-to-0.1.1 historical comparison was

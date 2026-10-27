@@ -23,10 +23,12 @@ texts, deduplicates texts by SHA-256 and supplements REUSE per-file copyright
 statements in Rust, C, C++ headers and assembly sources. Reviewed upstream texts absent from crate archives are preserved
 in `third_party/upstream-licenses/`, with immutable Git revisions, source URLs
 and checksums in its manifest. The collector performs no network access and
-rejects modified overrides or paths escaping that directory. Schema version 2
+rejects modified overrides or paths escaping that directory. Schema version 3
 records each upstream override's coverage: `package` supplies a package-level
-text; `bundled-data` applies only to its named asset and cannot clear a missing
-package license. Unknown coverage is rejected.
+text; `bundled-data` applies only to its named asset, verifies that asset's
+SHA-256, and cannot clear a missing package license. Unknown coverage is
+rejected. Path-patched crates are identified as local sources instead of being
+reported as nonexistent crates.io downloads.
 
 In the release build environment, with the same Rust toolchain and Cargo.lock:
 
@@ -42,7 +44,7 @@ not declare redistribution cleared. `needs_review` names unresolved packages;
 `--strict` exits non-zero when those primary texts are missing. An abbreviated
 Apache header does not count as a full package license.
 
-The 2026-10-01 PG16 review remains incomplete for:
+The 2026-10-01 PG16 review originally recorded these evidence gaps:
 
 - `random_word` 0.5.2: manifest declares MIT, but the recorded upstream revision
   has no primary license text. Word-list provenance also needs review if its
@@ -55,11 +57,11 @@ The 2026-10-01 PG16 review remains incomplete for:
   identifies the word-list data as public domain; this does not supply a license
   text for the crate's Rust implementation. Conservative graph inclusion does
   not prove that this asset survives the extension's final link.
-- `seahash` 4.1.0: manifest declares MIT; the recorded upstream license URL could
-  not be retrieved.
+- `seahash` 4.1.0: manifest declares MIT; the package archive omitted its license
+  text and the first source lookup did not retrieve it.
 
-These are unresolved evidence gaps, not assertions that the packages cannot
-be used. Do not fabricate copyright notices or claim the binary license gate
+These are historical findings, not assertions that the packages cannot be
+used. Do not fabricate copyright notices or claim the binary license gate
 complete based only on SPDX expressions. Public model/corpus assets used for
 optional quality evaluation have separate licenses and attribution described
 in [PRODUCTION.md](PRODUCTION.md); they are not included in the extension artifact.
@@ -177,14 +179,68 @@ Two upstream Apache-2.0 crates are vendored with only zstd version requirements
 changed in their Cargo manifests. Their license/NOTICE texts and original
 archive checksums are recorded in [vendor/README.md](vendor/README.md).
 Lance's omitted root LICENSE is supplied from the exact upstream VCS commit.
-The fixed zstd crates remain checksummed crates.io dependencies. This source
-patch does not clear binary redistribution: the existing package-level primary
-license gaps and native/compiler runtime review still require resolution.
+The fixed zstd crates remain checksummed crates.io dependencies. Issue #4
+resolves the two package-level license gaps recorded in the earlier inventory.
+Native/compiler notices and a matching artifact-bound SBOM still require actual
+PG16 distribution evidence.
 
 The refreshed target-filtered 0.1.20 inventory covers 440 normal/build package
 records; Cargo.lock SHA-256 is
 `5107326283ea0b6d0d535a5e500516c445fcd39f4a159568901f8656437bd45e`.
-Strict notice collection still returns `needs_review` (exit 2), specifically
-`random_word@0.5.2` and `seahash@4.1.0`. The vendored crates' root license texts
-were found. Binary publication remains blocked; source snapshot publication
-and binary redistribution are separate decisions.
+At that point in the source history, strict notice collection returned
+`needs_review` (exit 2) for `random_word@0.5.2` and `seahash@4.1.0`. The
+following issue #4 work records how both gaps were addressed. Binary
+publication and source snapshot publication are separate decisions.
+
+## Issue #4 package-level license review (2026-10-27)
+
+The exact `random_word` 0.5.2 release source declares MIT but has no
+package-level license text in either its crate archive or pinned upstream tree.
+The PG16 graph only needs `all(Lang::En)` through Lance 7.0.0 data generation.
+The dependency is replaced by project-authored `random_word` 0.5.3, licensed
+under this project's Apache-2.0 terms. It contains no upstream Rust code and
+uses only the exact English word-list asset; the upstream source declares that
+data public domain and its notice and checksum are retained. The original
+0.5.2 implementation is not included in the PG16 target graph.
+
+The exact `seahash` 4.1.0 source declares MIT but its crate archive omitted the
+license text. The official upstream repository added the project's missing
+MIT `LICENSE` in commit
+[`3088c5c912b70b586d27bf553fbe964e025a2c89`](https://gitlab.redox-os.org/redox-os/seahash/-/commit/3088c5c912b70b586d27bf553fbe964e025a2c89).
+That exact upstream text is preserved and checksum-verified in the notice
+manifest; it is not a generic license substitution.
+
+The refreshed PG16 Linux x86_64 graph has 436 reachable normal/build package
+records. Strict notice collection now returns `texts_collected`, with no
+missing package-level primary texts. Its JSON records the active lock hash,
+package sources, upstream revisions and notice hashes; bundled-data overrides
+also verify and record the exact covered asset hash. Path dependencies are
+shown as local sources, never as crates.io download URLs.
+
+`tools/build_distribution_sbom.py` combines that strict report with a real
+nonempty `.so`, the exact Cargo.lock, and a separate inventory of native/runtime
+and compiler components and their checksum-verified license texts. It emits a
+CycloneDX 1.6 SBOM and `NATIVE_AND_CARGO_NOTICES.txt`, binding the artifact hash,
+lock hash, source commit, PG16 target, native fingerprint and notice bundle
+hash. It refuses mismatched inputs or missing/changed texts. The actual PG16
+binary and its builder/runtime license inventory still need to pass this tool;
+the source-level notice pass alone is not C2 completion or binary clearance.
+
+## Current RustSec review (2026-10-27)
+
+`cargo-audit` 0.22.2 refreshed the RustSec database to revision
+`99670cfc0bc574433034b75876a4b791ccaa2efb` (1,380 advisories) and scanned 557
+Cargo.lock packages. On Linux x86_64, the default vulnerability check plus
+`--deny unsound --deny yanked` found zero vulnerabilities, unsound packages or
+yanked packages; no ignore exceptions are configured. Three informational
+unmaintained warnings remain: `paste` 1.0.15, `proc-macro-error2` 2.0.1 and
+`serde_cbor` 0.11.2. They remain visible for dependency-owner follow-up and are
+not suppressed by the clean deny checks. Re-run audit against the current
+RustSec database whenever the lockfile or distribution candidate changes.
+
+The vendored Arrow IPC and Lance encoding zstd requirement patches preserve the
+upstream archives, licenses and archive hashes and alter only the compatible
+zstd requirement; their provenance, advisories addressed and removal conditions
+are in [vendor/README.md](vendor/README.md). The `random_word` replacement's
+source/data provenance and removal condition are recorded there as well. None
+of these patches exempts the crate from RustSec scanning.

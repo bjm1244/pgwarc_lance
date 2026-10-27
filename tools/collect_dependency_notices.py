@@ -74,12 +74,24 @@ def collect(metadata: dict, lock_path: Path, overrides_path: Path, output: Path,
             coverage = item.get("coverage", "package")
             if coverage not in {"package", "bundled-data"}:
                 raise ValueError(f"unknown override coverage: {key}: {coverage}")
-            if coverage == "bundled-data" and not item.get("covered_path"):
-                raise ValueError(f"bundled-data override needs covered_path: {key}")
+            if coverage == "bundled-data":
+                covered_path = item.get("covered_path")
+                if not covered_path:
+                    raise ValueError(f"bundled-data override needs covered_path: {key}")
+                covered = (root / covered_path).resolve()
+                if not covered.is_relative_to(root.resolve()):
+                    raise ValueError(f"bundled-data path escapes package: {key}")
+                if not covered.is_file():
+                    raise ValueError(f"bundled-data asset is missing: {key}: {covered_path}")
+                covered_sha256 = digest(covered.read_bytes())
+                if item.get("covered_sha256") != covered_sha256:
+                    raise ValueError(f"bundled-data checksum differs: {key}: {covered_path}")
             saved = save(data, item["url"])
             saved["coverage"] = coverage
             if item.get("covered_path"):
                 saved["covered_path"] = item["covered_path"]
+                if coverage == "bundled-data":
+                    saved["covered_sha256"] = covered_sha256
             texts.append(saved)
             if coverage == "package":
                 has_primary = True
@@ -95,14 +107,26 @@ def collect(metadata: dict, lock_path: Path, overrides_path: Path, output: Path,
             texts.append(save(("\n".join(sorted(copyright_lines)) + "\n").encode(), "SPDX-FileCopyrightText in crate sources"))
         if not has_primary or not package.get("license"):
             missing.append(key)
+        source = package.get("source")
+        if source and source.startswith("registry+"):
+            crate_source = f"https://crates.io/api/v1/crates/{package['name']}/{package['version']}/download"
+        elif source:
+            crate_source = source
+        else:
+            package_path = Path(package["manifest_path"]).resolve().parent
+            try:
+                local_path = package_path.relative_to(ROOT).as_posix()
+            except ValueError:
+                local_path = "external path dependency"
+            crate_source = "path:" + local_path
         rows.append({"package": key, "declared_license": package.get("license"),
                      "repository": package.get("repository") or override.get("repository"),
-                     "crate_source": f"https://crates.io/api/v1/crates/{package['name']}/{package['version']}/download",
+                     "crate_source": crate_source,
                      "cargo_lock_checksum": checksums.get((package["name"], package["version"])),
                      "reviewed_upstream_revision": override.get("git_revision"),
                      "upstream_verification": override.get("verification"),
                      "has_primary_license_text": has_primary, "texts": texts})
-    report = {"schema_version": 2, "status": "needs_review" if missing else "texts_collected",
+    report = {"schema_version": 3, "status": "needs_review" if missing else "texts_collected",
               "scope": "target-filtered Cargo normal/build graph; compiler/native and distribution review required",
               "target": target, "cargo_lock_sha256": digest(lock_bytes), "package_count": len(rows),
               "missing_primary_texts": missing, "packages": rows}
@@ -120,6 +144,8 @@ def collect(metadata: dict, lock_path: Path, overrides_path: Path, output: Path,
             if "coverage" in item:
                 lines += ["Coverage: " + item["coverage"] +
                           (" (" + item["covered_path"] + ")" if item.get("covered_path") else "")]
+            if item.get("covered_sha256"):
+                lines += ["Covered asset SHA-256: " + item["covered_sha256"]]
         if not row["has_primary_license_text"]:
             lines += ["REVIEW REQUIRED: primary license text missing"]
         lines += [""]

@@ -5,6 +5,8 @@
 PG_MAJOR ?= 16
 PG_FEATURE = pg$(PG_MAJOR)
 PG_IMAGE ?= pgwarc_lance:$(PG_FEATURE)
+PG16_BOOKWORM_BASE_IMAGE ?= docker.io/library/postgres:16-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0
+POSTGRES_BASE_IMAGE ?= $(if $(filter 16,$(PG_MAJOR)),$(PG16_BOOKWORM_BASE_IMAGE),postgres:$(PG_MAJOR))
 PG_MATRIX ?= 13 14 15 16 17
 PG_MATRIX_CONTAINER ?= pgwarc_lance_$(PG_FEATURE)_smoke
 PG_MATRIX_USER ?= pgwarc_lance
@@ -12,7 +14,8 @@ PG_MATRIX_PASSWORD ?= pgwarc_lance
 PG_MATRIX_DB ?= pgwarc_lance_test
 DEV_PERMISSIONS ?= 1
 PG_DEV_PERMISSIONS ?= 0
-ARTIFACT_SMOKE_IMAGE ?= postgres:$(PG_MAJOR)
+export PG_MAJOR PG_IMAGE POSTGRES_BASE_IMAGE DEV_PERMISSIONS
+ARTIFACT_SMOKE_IMAGE ?= $(POSTGRES_BASE_IMAGE)
 ARTIFACT_SMOKE_CONTAINER ?= pgwarc_lance_artifact_install_$(PG_FEATURE)
 ARTIFACT_SMOKE_TIMEOUT ?= 90
 ARTIFACT_UPGRADE_CONTAINER ?= pgwarc_lance_artifact_upgrade_$(PG_FEATURE)
@@ -219,13 +222,13 @@ DIST_DIR ?= dist/pgwarc_lance-$(EXT_VERSION)-$(PG_FEATURE)
 ARTIFACT_CONTAINER ?= pgwarc_lance_artifacts_$(PG_FEATURE)
 
 build:
-	PG_MAJOR=$(PG_MAJOR) DEV_PERMISSIONS=$(DEV_PERMISSIONS) docker compose build
+	PG_MAJOR=$(PG_MAJOR) PG_IMAGE=$(PG_IMAGE) POSTGRES_BASE_IMAGE=$(POSTGRES_BASE_IMAGE) DEV_PERMISSIONS=$(DEV_PERMISSIONS) docker compose build
 
 rebuild:
-	PG_MAJOR=$(PG_MAJOR) DEV_PERMISSIONS=$(DEV_PERMISSIONS) docker compose build --no-cache
+	PG_MAJOR=$(PG_MAJOR) PG_IMAGE=$(PG_IMAGE) POSTGRES_BASE_IMAGE=$(POSTGRES_BASE_IMAGE) DEV_PERMISSIONS=$(DEV_PERMISSIONS) docker compose build --no-cache
 
 up:
-	docker compose up -d
+	PG_MAJOR=$(PG_MAJOR) PG_IMAGE=$(PG_IMAGE) POSTGRES_BASE_IMAGE=$(POSTGRES_BASE_IMAGE) DEV_PERMISSIONS=$(DEV_PERMISSIONS) docker compose up -d
 	@echo "waiting for postgres to be healthy..."
 	@timeout 60 bash -c 'until docker compose ps postgres | grep -q healthy; do sleep 2; done' || true
 	@docker compose ps
@@ -428,7 +431,7 @@ smoke-public-warc:
 	python3 tools/smoke_public_warc.py
 
 build-pg-version:
-	docker build --build-arg PG_MAJOR=$(PG_MAJOR) --build-arg DEV_PERMISSIONS=$(PG_DEV_PERMISSIONS) --tag $(PG_IMAGE) .
+	docker build --platform linux/amd64 --build-arg PG_MAJOR=$(PG_MAJOR) --build-arg POSTGRES_BASE_IMAGE=$(POSTGRES_BASE_IMAGE) --build-arg DEV_PERMISSIONS=$(PG_DEV_PERMISSIONS) --tag $(PG_IMAGE) .
 
 smoke-pg-version: build-pg-version
 	@set -e; \

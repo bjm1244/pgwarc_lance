@@ -50,9 +50,19 @@ class DependencyNoticesTests(unittest.TestCase):
         report = self.collect()
         self.assertEqual(report['package_count'], 1)
         self.assertEqual(report['missing_primary_texts'], [])
+        self.assertEqual(report['schema_version'], 3)
         self.assertEqual(report['cargo_lock_sha256'], hashlib.sha256(self.lock.read_bytes()).hexdigest())
         saved = [(self.root / 'output' / row['file']).read_text() for row in report['packages'][0]['texts']]
         self.assertCountEqual(saved, ['License copyright text\n', 'Native attribution\n'])
+
+    def test_path_dependency_is_not_reported_as_a_crates_io_download(self):
+        (self.crate / 'LICENSE').write_text('License copyright text\n')
+        self.metadata['packages'][1]['source'] = None
+        report = self.collect()
+        source = report['packages'][0]['crate_source']
+        self.assertTrue(source.startswith('path:'))
+        self.assertNotIn('crates.io', source)
+        self.assertNotIn(str(self.root), source)
 
     def test_modified_upstream_override_is_rejected(self):
         path = self.root / 'upstream-license.txt'
@@ -77,15 +87,20 @@ class DependencyNoticesTests(unittest.TestCase):
         self.overrides.write_text(json.dumps({'dep@1.0.0': {'files': [item]}}))
 
     def test_bundled_data_notice_cannot_clear_package_license_gap(self):
-        self.add_override(coverage='bundled-data', covered_path='src/br/en.br')
+        asset = b'alpha\nbeta\n'
+        (self.crate / 'words.txt').write_bytes(asset)
+        asset_sha = hashlib.sha256(asset).hexdigest()
+        self.add_override(coverage='bundled-data', covered_path='words.txt', covered_sha256=asset_sha)
         report = self.collect()
         self.assertEqual(report['status'], 'needs_review')
         self.assertEqual(report['missing_primary_texts'], ['dep@1.0.0'])
         item = report['packages'][0]['texts'][0]
         self.assertEqual(item['coverage'], 'bundled-data')
-        self.assertEqual(item['covered_path'], 'src/br/en.br')
+        self.assertEqual(item['covered_path'], 'words.txt')
+        self.assertEqual(item['covered_sha256'], asset_sha)
         self.assertEqual((self.root/'output'/item['file']).read_bytes(), b'Original word-list attribution\n')
-        self.assertIn('Coverage: bundled-data (src/br/en.br)', (self.root/'output/DEPENDENCY_NOTICES.txt').read_text())
+        self.assertIn('Coverage: bundled-data (words.txt)', (self.root/'output/DEPENDENCY_NOTICES.txt').read_text())
+        self.assertIn('Covered asset SHA-256: ' + asset_sha, (self.root/'output/DEPENDENCY_NOTICES.txt').read_text())
         self.assertIn('REVIEW REQUIRED: primary license text missing', (self.root/'output/DEPENDENCY_NOTICES.txt').read_text())
 
     def test_legacy_package_override_still_supplies_primary_text(self):
@@ -102,6 +117,18 @@ class DependencyNoticesTests(unittest.TestCase):
     def test_data_coverage_requires_exact_asset_path(self):
         self.add_override(coverage='bundled-data')
         with self.assertRaisesRegex(ValueError, 'needs covered_path'):
+            self.collect()
+
+    def test_bundled_data_must_exist_inside_the_crate(self):
+        self.add_override(coverage='bundled-data', covered_path='../outside.txt', covered_sha256='0' * 64)
+        with self.assertRaisesRegex(ValueError, 'escapes package'):
+            self.collect()
+
+    def test_bundled_data_requires_and_checks_its_checksum(self):
+        asset = b'alpha\nbeta\n'
+        (self.crate / 'words.txt').write_bytes(asset)
+        self.add_override(coverage='bundled-data', covered_path='words.txt', covered_sha256='0' * 64)
+        with self.assertRaisesRegex(ValueError, 'checksum differs'):
             self.collect()
 
     def test_native_spdx_copyrights_are_preserved_and_deduplicated(self):

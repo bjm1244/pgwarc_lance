@@ -1,0 +1,10 @@
+The Enhanced North American Benchmark Lexicon (ENABLE) is the most
+thoroughly researched, and therefore the most authoritative word list
+and reference available for Scrabble players.
+
+This work is in the public domain.
+
+You can copy, modify, distribute and perform the work, even for commercial purposes,
+all without asking permission.
+
+Source: https://github.com/BartMassey/wordlists/blob/main/enable2k.txt.gz

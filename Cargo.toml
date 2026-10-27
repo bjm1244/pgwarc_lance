@@ -47,3 +47,4 @@ codegen-units = 16
 [patch.crates-io]
 arrow-ipc = { path = "vendor/arrow-ipc-58.3.0" }
 lance-encoding = { path = "vendor/lance-encoding-7.0.0" }
+random_word = { path = "vendor/random-word-compat-0.5.3" }

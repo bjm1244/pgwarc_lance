@@ -4,14 +4,58 @@
 
 이 문서는 로컬 Docker 기반으로 `pgwarc_lance` extension artifact를 만들고 설치하는 절차와 version upgrade 정책을 정리한다.
 
+## PG16 Official Package Recovery (verified 2026-10-28)
+
+The verified package target is Linux x86_64, PostgreSQL 16.15 on Debian
+Bookworm, using the pinned image
+`docker.io/library/postgres:16-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0`, Rust 1.96.0, and cargo-pgrx 0.19.1. cargo-pgrx is compiled and run inside the PG16 image, whose GLIBC is 2.36. The Dockerfile runs `cargo fetch --locked`, then `cargo pgrx package` with `PGRX_BUILD_FLAGS="--locked --offline"` and `CARGO_NET_OFFLINE=true`. cargo-pgrx writes the versioned install SQL from the extension schema; the Dockerfile installs that generated SQL and does not copy a prior version's install SQL. The build checks that Cargo.lock is unchanged.
+
+On a clean Linux x86_64 Docker runner, reproduce the PG16 0.1.20 artifact with:
+
+```bash
+PG_MAJOR=16 \
+POSTGRES_BASE_IMAGE=docker.io/library/postgres:16-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0 \
+EXT_VERSION=0.1.20 \
+DIST_DIR=dist/pgwarc_lance-0.1.20-pg16 \
+make release-artifacts
+
+PG_MAJOR=16 \
+EXT_VERSION=0.1.20 \
+DIST_DIR=dist/pgwarc_lance-0.1.20-pg16 \
+ARTIFACT_SMOKE_IMAGE=docker.io/library/postgres:16-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0 \
+make smoke-release-artifacts
+```
+
+The PG16 artifact checks, extracted-artifact fresh install, and SQL smoke passed.
+The generated package's four pg_regress cases (`setup`, `functions`, `search`,
+`security`), importer DB test, 18 runtime-safety checks, and 11 backup/restore
+checks passed. A populated upgrade from the preserved 0.1.19 PG16 artifact to
+0.1.20 also passed.
+
+| Input or artifact | SHA-256 |
+| --- | --- |
+| Cargo.lock | `3869b04a56336e1de2880b5b04a18b22110aa588525ff40d656ad0073cda4550` |
+| 0.1.20 pgwarc_lance.so | `701e7050ca694d68d2f828fcc61928640828db49d5139e800620a5b40e896d29` |
+| Generated 0.1.20 install SQL | `8f0768851836f72b5536a4ffea4eecf174b5d58b1baf838b7992933cad51863b` |
+
+The manual `Native validation` workflow is started with `workflow_dispatch`.
+Its PG16 matrix leg builds and extracts the package, then runs the fresh-install
+smoke; the separate PG16 `regress` job runs the four pg_regress cases. The
+verified packaging scope is PostgreSQL 16.15 on Linux x86_64/Bookworm. The
+PG13–17 feature gates remain separate compatibility targets; this verification
+does not claim support for other majors. GitHub Actions itself was not run in
+this local validation. Package validation does not grant binary redistribution
+or production approval; dependency and native-component notices remain a
+separate gate.
+
 ## Version Coordinates
 
-- Current extension/crate version: `0.1.18` development candidate (`Cargo.toml`)
+- Current extension/crate version: `0.1.20` development candidate (`Cargo.toml`)
 - Control file version: `default_version = '@CARGO_VERSION@'`
 - PostgreSQL build target: PostgreSQL 16 by default; optional Docker build arg `PG_MAJOR=13..17`
 - Rust toolchain: `1.96.0`
 - cargo-pgrx: `0.19.1`
-- This candidate: PG16.15 locked package, artifact checks, four SQL regressions and populated 0.1.17→0.1.18 upgrade smoke; other majors were not tested in this run. Binary redistribution remains uncleared because two primary license texts are missing.
+- This candidate: PG16.15 locked official package, artifact checks, fresh install, four SQL regressions, importer/runtime/backup tests, and populated 0.1.19→0.1.20 upgrade passed. Other majors were not verified for this packaging path. Binary redistribution and production approval remain open.
 
 `Cargo.toml`에는 `pg13`부터 `pg17` feature gate가 남아 있다. Dockerfile은 `PG_MAJOR` build arg로 `postgres:${PG_MAJOR}`, 해당 server dev package, `cargo pgrx init --pg${PG_MAJOR}`, matching `pg${PG_MAJOR}` Cargo feature를 함께 선택한다. 기본 local verification은 PostgreSQL 16 기준이며, 다른 major는 `make smoke-pg-version` 또는 `make pg-version-matrix`로 fresh install smoke를 확인한다.
 

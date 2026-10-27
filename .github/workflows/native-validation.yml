@@ -51,7 +51,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: ["13", "14", "15", "16", "17"]
+        include:
+          - pg: "13"
+            postgres_base_image: postgres:13
+          - pg: "14"
+            postgres_base_image: postgres:14
+          - pg: "15"
+            postgres_base_image: postgres:15
+          - pg: "16"
+            postgres_base_image: docker.io/library/postgres:16-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0
+          - pg: "17"
+            postgres_base_image: postgres:17
+    env:
+      PG_MAJOR: ${{ matrix.pg }}
+      PG_IMAGE: pgwarc_lance:pg${{ matrix.pg }}
+      POSTGRES_BASE_IMAGE: ${{ matrix.postgres_base_image }}
     steps:
       - uses: actions/checkout@v4
       - name: Build extension image (compiles cdylib for this PostgreSQL major)
@@ -68,6 +82,17 @@ jobs:
         env:
           PG_MAJOR: ${{ matrix.pg }}
         run: make test
+      - name: Extract and fresh-install official PG16 package
+        if: matrix.pg == '16'
+        env:
+          PG_MAJOR: "16"
+          DIST_DIR: ${{ runner.temp }}/pgwarc_lance-pg16
+          ARTIFACT_CONTAINER: pgwarc_artifact_extract_${{ github.run_id }}
+          ARTIFACT_SMOKE_CONTAINER: pgwarc_artifact_smoke_${{ github.run_id }}
+          ARTIFACT_SMOKE_IMAGE: ${{ matrix.postgres_base_image }}
+        run: |
+          make release-artifacts
+          make smoke-release-artifacts
       - name: Tokenizer unit harness
         env:
           PG_MAJOR: ${{ matrix.pg }}
@@ -81,6 +106,10 @@ jobs:
   regress:
     name: pg_regress (pg16)
     runs-on: ubuntu-latest
+    env:
+      PG_MAJOR: "16"
+      PG_IMAGE: pgwarc_lance:pg16
+      POSTGRES_BASE_IMAGE: docker.io/library/postgres:16-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0
     steps:
       - uses: actions/checkout@v4
       - env:
@@ -101,6 +130,10 @@ jobs:
   python-db-integration:
     name: WARC importer database test
     runs-on: ubuntu-latest
+    env:
+      PG_MAJOR: "16"
+      PG_IMAGE: pgwarc_lance:pg16
+      POSTGRES_BASE_IMAGE: docker.io/library/postgres:16-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

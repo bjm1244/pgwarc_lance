@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-27T05:58:55.131988+00:00",
+  "updated_at": "2026-10-27T17:25:21.198291+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -12,6 +12,7 @@
       "depends_on": [],
       "status": "done",
       "summary": "과거 전체 적재의 UTF-8 1,000-byte term 제한이 posting/tf +18 차이의 원인임을 실제 원본으로 재현했다. 원인별 전량 accounting과 실패 시 SQL을 막는 preflight를 추가했으며, 기본 추출 설정의 실패 record 251건도 manifest에 명시했다.",
+      "public_commit": "9717412880a8b3c8562faa1bc95d44ce932aa076",
       "criteria_passed": [
         "C1",
         "C2",
@@ -24,8 +25,13 @@
       "order": 2,
       "priority": "P0",
       "depends_on": [],
-      "status": "queued",
-      "criteria_passed": []
+      "status": "done",
+      "summary": "Linux x86_64·PG16.15 패키징 경로에서 고정 lockfile/toolchain으로 0.1.20 설치 SQL을 공식 생성했다. 생성 artifact는 fresh install, 네 SQL 회귀, 실제 0.1.19 데이터에서의 populated upgrade 및 관련 DB 검증을 통과했다. 재현 명령·checksum·CI 경로와 검증된 PG16 범위를 문서화했다. binary 배포와 프로덕션 승인은 별도 미승인 상태다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
     },
     {
       "number": 4,
@@ -33,8 +39,12 @@
       "order": 3,
       "priority": "P0",
       "depends_on": [],
-      "status": "queued",
-      "criteria_passed": []
+      "status": "blocked",
+      "summary": "로컬 development에서 random_word의 package-level 고지 공백을 프로젝트 Apache-2.0 호환 패키지로 교체하고, Seahash의 정확한 upstream MIT 원문을 보존했습니다. strict Cargo notices와 최신 RustSec 검사는 통과했고 CycloneDX 1.6 생성기와 회귀를 추가했습니다. C2는 이 native fingerprint에 맞는 실제 PG16 artifact·compiler/native 고지·SBOM이 없어 미완료입니다. 전체 Python 482개가 통과했으며 공개 반영은 native gate 때문에 pending입니다.",
+      "criteria_passed": [
+        "C1",
+        "C3"
+      ]
     },
     {
       "number": 5,

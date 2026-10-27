@@ -5,8 +5,9 @@ services:
       dockerfile: Dockerfile
       args:
         PG_MAJOR: ${PG_MAJOR:-16}
+        POSTGRES_BASE_IMAGE: ${POSTGRES_BASE_IMAGE:-docker.io/library/postgres:16-bookworm}
         DEV_PERMISSIONS: ${DEV_PERMISSIONS:-1}
-    image: pgwarc_lance:latest
+    image: ${PG_IMAGE:-pgwarc_lance:latest}
     environment:
       POSTGRES_USER: pgwarc_lance
       POSTGRES_PASSWORD: ${PGWARC_DEV_PASSWORD:?Set PGWARC_DEV_PASSWORD for the disposable development database}

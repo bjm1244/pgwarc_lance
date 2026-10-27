@@ -344,18 +344,33 @@
     "git_revision": "16a7463a76c030f6417bee1ccc7e8e91fad07527",
     "repository": "https://github.com/pgcentralfoundation/pgrx"
   },
-  "random_word@0.5.2": {
+  "random_word@0.5.3": {
     "files": [
       {
         "coverage": "bundled-data",
-        "covered_path": "src/br/en.br",
+        "covered_path": "words.txt",
+        "covered_sha256": "21be8d95167f1e0b7c8f6cc954d0ead534e21eaa95a5a3576d5b49f629df534c",
         "path": "random_word-dc1cab8d7951-English-word-list-NOTICE",
         "sha256": "a1cc597b684928c8c936eeb98a4fbdb002af48063d6585abc4a27a1f675407a6",
         "url": "https://raw.githubusercontent.com/MitchellRhysHall/random_word/dc1cab8d7951ff4285ea9158c8954d663fdd6fbf/src/license/en.txt"
       }
     ],
     "git_revision": "dc1cab8d7951ff4285ea9158c8954d663fdd6fbf",
-    "repository": "https://github.com/MitchellRhysHall/random_word",
-    "verification": "Supplementary upstream declaration for the English ENABLE word list only; does not supply a package-level license for random_word code. English compressed bytes match the crate-recorded revision."
+    "repository": "https://github.com/bjm1244/pgwarc_lance",
+    "verification": "The project-authored Apache-2.0 compatibility crate replaces the MIT-declared random_word 0.5.2 implementation, whose exact package source has no primary license text. It implements only all(Lang::En), the API used by lance-datagen 7.0.0. words.txt is the exact Brotli expansion of the crate-recorded upstream English asset at this revision; only the ENABLE word-list data is reused, under its recorded public-domain notice."
+  },
+  "seahash@4.1.0": {
+    "files": [
+      {
+        "coverage": "package",
+        "path": "seahash-3088c5c912b7-LICENSE",
+        "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+        "url": "https://gitlab.redox-os.org/redox-os/seahash/-/blob/3088c5c912b70b586d27bf553fbe964e025a2c89/LICENSE"
+      }
+    ],
+    "git_revision": "3088c5c912b70b586d27bf553fbe964e025a2c89",
+    "package_source_revision": "94b632aeac099031c373599313d5b5f0acbbaec0",
+    "repository": "https://gitlab.redox-os.org/redox-os/seahash",
+    "verification": "The exact 4.1.0 package source declares MIT at 94b632aeac099031c373599313d5b5f0acbbaec0 but omits the text. Upstream commit 3088c5c912b70b586d27bf553fbe964e025a2c89 added the project's missing MIT LICENSE; its full text is preserved here and checksum-verified."
   }
 }
