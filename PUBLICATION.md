@@ -65,7 +65,7 @@ older publication-pending and clean-security statements apply to their dates.
 
 The 2026-10-27 Python importer change adds an explicit `--charset-record-override WARC-RECORD-ID=CODEC` for a single reviewed WARC response. On the read-only Common Crawl segment (SHA-256 `4b6b55dc25afdb8ef9bb0e48213faa73cf07756f195b0863ba2693638bf784f8`), record 16,350 declares `uft-8` in HTTP headers and `utf-8` in HTML metadata; its 59,582-byte body fails strict UTF-8 decoding and replacement decoding observes 65 U+FFFD characters. A two-record source-derived smoke used the existing strict `None=utf-8` label correction for record 675 and the new ID-scoped correction for record 16,350. On a disposable PostgreSQL 16.6 database with the existing 0.1.19 artifact, both records entered BM25 and both had a BM25 search hit; no Lance writes occurred. No source body, extracted text or SQL was saved. This verifies a narrow import path, not semantic recovery, full archive ingestion or relevance. Wider charset correctness remains open.
 
-The local 0.1.19 development candidate adds a narrow `bm25_term(term)` index for document-frequency counts. On the PG16.15 Common Crawl clone, the q6 count scan processed 25,097 postings and fell from 16,429 to 61 shared-hit blocks; the total plan's shared hits fell from 33,113 to 16,745. Three alternating eight-client warm rounds produced matching result fingerprints, but p95 is not attributable: host load varied from 1.95 to 25.02 on four CPUs, BM25 p95 medians were 114.32/100.71 ms, and hybrid medians were 221.15/240.26 ms. The 82 MB index's write/import cost is unresolved. A locked/offline PG16 library build, artifact check, fresh install, populated 0.1.18-to-0.1.19 upgrade and all four SQL regressions passed. The standard `cargo pgrx package` path was blocked by GLIBC 2.39 being unavailable in the builder; the tested install SQL was assembled from the prior generated script and the new DDL, so official package SQL generation remains unverified. This is a source candidate only, not production or binary-distribution approval. At that historical run, source publication was pending; the 2026-10-27 consolidation review below supersedes its publication status. See [SECURITY.md](SECURITY.md) and [THIRD_PARTY.md](THIRD_PARTY.md) for review limitations.
+The local 0.1.19 development candidate adds a narrow `bm25_term(term)` index for document-frequency counts. On the PG16.15 Common Crawl clone, the q6 count scan processed 25,097 postings and fell from 16,429 to 61 shared-hit blocks; the total plan's shared hits fell from 33,113 to 16,745. Three alternating eight-client warm rounds produced matching result fingerprints, but p95 is not attributable: host load varied from 1.95 to 25.02 on four CPUs, BM25 p95 medians were 114.32/100.71 ms, and hybrid medians were 221.15/240.26 ms. A 2026-10-27 four-arm fresh-load comparison measured the write cost: cgroup CPU increased 21.0% for BULK and 45.6% for COPY, WAL increased 23.3% and 33.3%, and the index occupied 116,023,296 bytes. The index remains a development candidate because of the count-scan improvement; these write costs do not establish production suitability. See the detailed comparison below. A locked/offline PG16 library build, artifact check, fresh install, populated 0.1.18-to-0.1.19 upgrade and all four SQL regressions passed. The standard `cargo pgrx package` path was blocked by GLIBC 2.39 being unavailable in the builder; the tested install SQL was assembled from the prior generated script and the new DDL, so official package SQL generation remains unverified. This is a source candidate only, not production or binary-distribution approval. At that historical run, source publication was pending; the 2026-10-27 consolidation review below supersedes its publication status. See [SECURITY.md](SECURITY.md) and [THIRD_PARTY.md](THIRD_PARTY.md) for review limitations.
 
 The 2026-10-26 importer source candidate adds opt-in, bounded PDF and DOCX text extraction. On the read-only Common Crawl segment (SHA-256 `4b6b55dc25afdb8ef9bb0e48213faa73cf07756f195b0863ba2693638bf784f8`), 3/3 DOCX bodies yielded 13,689 characters with no replacement characters. Poppler 24.02.0 extracted text from 178/218 PDFs; 22 returned no text and 18 ended with extractor errors. The successful PDF output included nine U+FFFD characters, so text quality is not established. Each extraction was capped at 64 MiB and PDF execution at 30 seconds per record. The read-only scan saved no source body or extracted text and did not generate SQL, create vectors, or run a database import. This is a Python source change; the 0.1.19 extension binary and schema are unchanged. Full fresh raw-WARC ingestion, OCR, corpus-wide charset correctness, unsupported office/binary records, independent qrels and production acceptance remain open.
 
@@ -121,6 +121,62 @@ install SQL plus the new index DDL, so pgrx package SQL generation remains
 unverified. No qrels, fresh full raw-WARC importer throughput, cold/sustained
 SLA, full production migration lock/disk assessment, or binary notice approval
 was established. At the 2026-10-26 run, GitHub publication was pending.
+
+## 2026-10-27 — 0.1.19 actual import write-cost comparison
+
+The prior 0.1.19 evaluation had not isolated the new index's full-load cost. This
+comparison replayed real content from the preserved Common Crawl clone into
+separate fresh PostgreSQL 16.15 databases using the immutable 0.1.18 and 0.1.19
+artifacts. The source WARC SHA-256 was
+`4b6b55dc25afdb8ef9bb0e48213faa73cf07756f195b0863ba2693638bf784f8`; 21,873
+documents and WARC records supplied 186,924,823 bytes of content, with a
+doc-ID/length/content fingerprint of
+`59f5ce9b52f02c24838363364f5412ea9504317afa1953915f72d0a4d4159be9`. The bulk
+and COPY inputs were each generated once by the tracked importer and had
+identical SQL hashes across both extension versions. The immutable `.18` and
+`.19` library SHA-256 values were
+`b674e20f0789c52982098d4bf00581644552ed7d8da4c4fdb94d58d922e3a045` and
+`6429e334b3ce69235cf2491cfb04fdc52ef99ab4dfb3668a42fc5db8e2490fd0`.
+
+Each arm ran in a network-isolated container limited to four CPUs and 16 GB,
+with PostgreSQL fsync, full-page writes and synchronous commit enabled. The
+server was PostgreSQL 16.15. Each import and final explicit checkpoint was timed
+separately; CPU is container cgroup time through the checkpoint, while WAL is
+captured after import. Results were:
+
+| Input mode | Import time `.18` → `.19` | Cgroup CPU `.18` → `.19` | CPU change | WAL `.18` → `.19` | WAL change | `.19` frequency index |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| BULK | 735.953 → 719.881 s | 233.352 → 282.426 s | +21.0% | 2.605 → 3.213 GB | +23.3% | 116,023,296 bytes |
+| COPY | 342.855 → 498.602 s | 138.688 → 201.898 s | +45.6% | 1.824 → 2.432 GB | +33.3% | 116,023,296 bytes |
+
+The explicit final checkpoint took 23.118/34.227 seconds for `.18`/`.19` BULK
+and 59.440/38.776 seconds for COPY. The COPY import elapsed time increased
+45.4%; BULK elapsed time decreased 2.2% despite higher measured CPU. The
+one-minute host load average varied across sequential arms from 3.10 to 16.23,
+so wall time is not a stable performance conclusion. PostgreSQL's
+default autovacuum was enabled and ran during the loads. The index added 110.6
+MiB to the fresh-load relation.
+
+All four results contained 21,873 documents, 8,240,907 postings, total tf
+23,342,059 and 21,873 WARC rows. The posting-stream SHA-256 and all eight fixed
+BM25 query fingerprints matched across versions and modes. This establishes
+mathematical output equality, not independent relevance. The preserved `.18`
+source database contained 8,240,889 postings and total tf 23,342,041; current
+importer output therefore differs by 18 postings and 18 total tf. The cause is
+unresolved and was not attributed to the frequency index. Exact input SQL
+hashes were `a49c8ec8411f2952936830df60787c0d0c91129b16c02c5caa50a8cfa0f73f2ef`
+for BULK and `2ce8bdc9324420d4acbfd669500ef2c6ede8357fd08501156d83acf376d2fc4c`
+for COPY.
+
+The index remains in the development candidate: the earlier q6 plan showed a
+large count-scan block reduction, while this run quantifies a material CPU,
+WAL and storage penalty. No workload mix or write SLA is available to balance
+those costs, so this decision is not production approval. This test replays
+prepared actual corpus text through the database importer path; it does not
+measure a fresh full raw-WARC parse, Lance/vector writes, relevance, cold or
+sustained SLA, or recovery. All result capture and explicit checkpoints
+completed before container stop; the disposable containers then exited with
+code 137 (not OOM), so graceful database shutdown was not verified.
 
 ## 2026-10-25 — BM25 IDF amortization candidate
 

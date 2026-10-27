@@ -868,15 +868,23 @@ accelerate the BM25 query's matching-posting count. In the Common Crawl q6
 plan, the count scanned 25,097 postings; the narrow index reduced its observed
 shared-hit blocks from 16,429 to 61. The total plan's shared hits fell from
 33,113 to 16,745 and it wrote no temporary bytes. The additional index occupied
-82 MB on 8,240,889 postings.
+82 MB in that prior, already-populated 8,240,889-posting database.
 
 Three alternating warm 8-client rounds had identical BM25 and hybrid result
 fingerprints. Median BM25 p95/backend CPU was 114.32 ms/13.50 ms per request
 without the index and 100.71 ms/12.99 ms with it. Hybrid changed from
 221.15 ms/46.58 ms to 240.26 ms/46.43 ms. Host load varied from 1.95 to 25.02
 on four CPUs, so neither p95 difference establishes a causal latency change.
-Repeated reindex and one-pass insert samples did not control cache and I/O
-conditions sufficiently to establish write/import cost.
+The 2026-10-27 real-content fresh-load comparison replayed identical importer
+SQL into separate `.18` and `.19` PG16.15 databases. Relative to `.18`, `.19`
+used 21.0% more container CPU for BULK and 45.6% more for COPY; WAL grew 23.3%
+and 33.3%. The newly maintained index occupied 116,023,296 bytes (110.6 MiB).
+BULK elapsed time was 2.2% lower despite the CPU increase; COPY elapsed time
+increased 45.4%. Host load and default autovacuum varied, so wall time is
+inconclusive. The q6 count-scan read benefit is clear, but no workload mix or
+write SLA is available to accept these costs. The index remains a development
+candidate only; see [PUBLICATION.md](PUBLICATION.md) for input checksums and
+limitations.
 
 The locked/offline PG16 library build completed with Rust 1.96.0; the resulting
 candidate `.so` SHA-256 is
@@ -884,17 +892,18 @@ candidate `.so` SHA-256 is
 artifact integrity check passed. Fresh installation and all four PG16 SQL
 regressions passed. A populated 0.1.18-to-0.1.19 update took 5.870 seconds and
 preserved 21,873 documents, 8,240,889 postings and 21,873 WARC rows. The new
-82 MB index was valid, ready, non-unique and keyed only by `term`; all BM25 and
-hybrid query fingerprints matched on the same 0.1.18/0.1.19 corpus.
+index was valid, ready, non-unique and keyed only by `term`; all BM25 and hybrid
+query fingerprints matched on the same 0.1.18/0.1.19 corpus.
 
 The standard `cargo pgrx package` command could not run because cached
 `cargo-pgrx` requires GLIBC 2.39 and this PG16 builder has GLIBC 2.36. The
 library was built through locked/offline `cargo rustc`; tested install SQL was
 assembled from the previous generated SQL plus the new index DDL. Therefore
 official pgrx package SQL generation remains unverified. This candidate is not
-production approved. Full importer throughput, upgrade lock/disk cost at larger
-corpus size, independently labelled relevance, cold/sustained load, and binary
-license notice review remain open. The 0.1.5-to-0.1.1 historical comparison was
+production approved. Full raw-WARC parsing/ingestion throughput, upgrade
+lock/disk cost at larger corpus size, independently labelled relevance,
+cold/sustained load, and binary license notice review remain open. The
+0.1.5-to-0.1.1 historical comparison was
 not repeated. Do not promote the version or use it to set an SLA based on these
 measurements.
 

@@ -1,5 +1,66 @@
 # Development log
 
+## 2026-10-27 — measure 0.1.19 term-frequency index write cost
+
+- 시작점은 clean `development` commit
+  `aa6b5d4690017a130287296290955b7281aea660`이다. 이 직렬 실행 중 같은
+  checkout의 다른 pglance writer는 확인되지 않았다. `.codex/config.toml`의
+  `gpt-6-luna` / `max`를 유지했다. 선택 이유는 직전 로그의 다음 과제였던
+  0.1.19 인덱스 실제 적재 비용을 0.1.18과 분리된 fresh PG16 clone에서 비교하고
+  유지 여부를 결정하기 위해서다. 이번 단위에서는 native 코드를 변경하지 않았다.
+- 입력은 read-only Common Crawl WARC SHA-256
+  `4b6b55dc25afdb8ef9bb0e48213faa73cf07756f195b0863ba2693638bf784f8`의 실제 데이터다.
+  WARC row가 있는 21,873개 문서를 사용했고 입력 본문은 186,924,823 bytes,
+  doc-ID/length/content fingerprint는
+  `59f5ce9b52f02c24838363364f5412ea9504317afa1953915f72d0a4d4159be9`이다.
+  이전 write probe 64행은 WARC record가 없어 제외했다. `tools.warc_importer.iter_sql_chunks`
+  로 BULK와 COPY SQL을 한 번씩 생성해 버전 쌍에 재사용했다. BULK SQL SHA-256은
+  `a49c8ec8411f2952936830df60787c0d0c91129b16c02c5caa50a8cfa0f73f2ef`, COPY는
+  `2ce8bdc9324420d4acbfd669500ef2c6ede8357fd08501156d83acf376d2fc4c`다.
+- `python3 -B run_import_arm.py VERSION MODE` private runner로 `.18 bulk`, `.19 bulk`,
+  `.19 copy`, `.18 copy` 순서의 네 arm을 실행했다. 각기 새 PostgreSQL 16.15 DB와
+  network-none container를 사용했고 제한은 4 CPU/16 GB였다. `fsync`,
+  `full_page_writes`, `synchronous_commit`은 켰다. `shared_buffers=128MB`,
+  `work_mem=4MB`, `effective_cache_size=4GB`, parallel workers 0, checkpoint timeout
+  1h, max WAL 16GB, `track_io_timing=on`으로 맞췄다. 각 arm에서 import와 명시적
+  `CHECKPOINT`를 따로 재고, cgroup CPU/WAL/relation size/posting hash/고정 8개
+  BM25 질의 fingerprint를 기록했다. PostgreSQL 기본 autovacuum은 실행 중이었다.
+- 결과:
+
+  | 입력 | import 초 `.18` → `.19` | cgroup CPU 초 `.18` → `.19` | CPU 증감 | WAL GB `.18` → `.19` | WAL 증감 |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | BULK | 735.953 → 719.881 | 233.352 → 282.426 | +21.0% | 2.605 → 3.213 | +23.3% |
+  | COPY | 342.855 → 498.602 | 138.688 → 201.898 | +45.6% | 1.824 → 2.432 | +33.3% |
+
+  `.19` frequency index는 116,023,296 bytes(110.6 MiB)였다. BULK final checkpoint는
+  `.18/.19` 23.118/34.227초, COPY는 59.440/38.776초였다. `.19` COPY elapsed는
+  45.4% 길었지만 BULK elapsed는 CPU 증가에도 2.2% 짧았다. 1분 host load average가
+  arm 사이 3.10–16.23으로 변해 wall time 차이는 확정적이지 않다.
+- 네 arm 모두 21,873 docs, 8,240,907 postings, sum(tf)=23,342,059, 21,873 WARC
+  rows를 만들었다. posting-stream SHA-256
+  `f63f163c5b3d735e4a241a6f4abe4896ed8d2ea8ea5185a589ec60dd1999efea`와 여덟 query
+  fingerprints가 전부 일치했다. 이는 계산 결과 일치이지 relevance 검증은 아니다.
+  보존된 원본 `.18` DB는 8,240,889 postings / sum(tf)=23,342,041이므로 현재
+  importer 출력이 posting 18개, tf 18만큼 다르다. 원인은 이 회차에서 규명하지
+  않았고 인덱스 영향으로 단정하지 않는다.
+- 결정: .19는 development candidate로 유지한다. q6 count scan의 shared hit 16,429→61
+  감소는 직접 관측됐고 결과 fingerprints는 같지만, 실제 write CPU/WAL/space 비용도
+  높다. workload mix와 ingest SLA가 없으므로 production 승인 근거는 아니다. 새 raw-WARC
+  parsing 전체, Lance/vector write, independent qrels, cold/sustained SLA는 미검증이다.
+- 준비 실패와 한계: 첫 SQL 생성은 실제 큰 필드가 csv 기본 131,072-byte cap을 넘어
+  멈췄다. 비공개 generator cap을 2,147,483,647로 올려 full SQL을 다시 생성했다.
+  첫 posting hash는 COPY delimiter를 잘못 줘 실패해 기본 tab으로 다시 계산했다.
+  없는 frequency index의 relation size 조회도 regclass 오류 후 `to_regclass`로
+  재실행했다. 네 arm 결과/명시적 checkpoint/검증 완료 후 container stop은 모두
+  exit 137, OOM=false였다. 지표 캡처는 stop 이전에 끝났으나 graceful shutdown은
+  검증하지 않았다. WARC, 원본 DB, versioned artifact는 수정하지 않았다.
+- 문서 변경은 이 비교의 실측값·checksum·제한을 `PUBLICATION.md`와 `PRODUCTION.md`에
+  반영한다. Python/SQL/native 코드는 변경하지 않아 native receipt는 수정하지 않았다.
+  다음은 +18 posting 차이의 source/tokenizer 원인을 실제 import 경로에서 확인하고,
+  이어서 charset/PDF-office/긴 토큰 실패를 하나씩 해결한다. 로컬 검증 후 development에
+  docs-only commit하며 직접 push하지 않는다. 공개 동기화는 회차 후 authorized publisher
+  결과를 확인한다.
+
 ## 2026-10-27 — consolidate, repair publication and remediate current zstd advisories
 
 - 완료된 0.1.19 계보와 별도 PDF 작업을 통합했다. 기본 fail 정책을 유지하면서 명시적
