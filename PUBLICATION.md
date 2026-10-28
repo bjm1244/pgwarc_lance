@@ -1,5 +1,24 @@
 # Source publication review — updated 2026-10-28
 
+## Current source and distribution review: 0.1.21 (2026-10-28)
+
+Issue #4's package notice and RustSec criteria were rechecked against the
+corrected 0.1.21 Linux x86_64 / PostgreSQL 16.15 artifact. Strict collection
+found primary texts for all 436 reachable Cargo packages. The CycloneDX 1.6
+SBOM binds the 0.1.21 `.so`, Cargo.lock, native fingerprint and full notice
+bundle. The current audit found zero vulnerabilities, unsound or yanked
+packages and retained three unmaintained warnings. Artifact fresh install,
+four SQL regressions, importer DB, runtime safety, populated 0.1.20-to-0.1.21
+upgrade and backup/restore passed. Hashes and the limited target are in
+[THIRD_PARTY.md](THIRD_PARTY.md) and [PACKAGING.md](PACKAGING.md).
+
+An extra outbox harness run stopped on a test query for a view column named
+`applied_version`; the generated status view uses `latest_applied_version`.
+This supplemental harness failure is retained as a follow-up and was not
+counted as a passing result or changed outside the selected issue scope.
+Packaging evidence does not approve binary redistribution or production use.
+Public source publication remains subject to the separate reviewed publisher.
+
 ## Current source review: 0.1.20 consolidation (2026-10-28)
 
 The completed BM25, bounded PDF/DOCX and record-scoped charset branches are
@@ -71,9 +90,22 @@ validation. Package verification does not approve binary redistribution or
 production deployment. Independent operational qrels, cold/sustained SLA,
 full fresh raw-WARC ingestion and host power-loss recovery remain open.
 
-The earlier lock-level notice review reported that package texts were collected
-after the source remediation; compiler/native component review and an
-artifact-bound SBOM remain separate binary-redistribution gates.
+Issue #4 C1–C3 were verified for the Linux x86_64 PostgreSQL 16.15 package
+candidate. Strict collection covered 436 Cargo packages with zero missing
+package-level primary texts. Its CycloneDX 1.6 SBOM has 441 components (436
+Cargo and five native/compiler environment components) and is bound to the
+artifact SHA-256 `701e7050ca694d68d2f828fcc61928640828db49d5139e800620a5b40e896d29`,
+Cargo.lock SHA-256
+`3869b04a56336e1de2880b5b04a18b22110aa588525ff40d656ad0073cda4550`, native
+fingerprint `ccab4bc97d2c04590a86e380ddb232488e1dff8aaac139cc7dcbfee9092c87ab`,
+and notice-bundle SHA-256
+`df3ca0236e1a296a490cd11d02df900d7f0a50c42515d410f0112b10f78a1fa7`.
+The SBOM SHA-256 is
+`58ef2bbb4313f0db1f17c6bbfb0fb22a081e72f6cec9cd93139ca9793dee7080`.
+This closes the issue's notice collection and artifact-bound inventory checks
+for this target. It is not legal clearance for binary redistribution or
+production approval; other PostgreSQL majors and distribution profiles were
+not covered. See [THIRD_PARTY.md](THIRD_PARTY.md).
 
 The source-only snapshot review covers 275 tracked files and preserves the
 existing public GitHub history; controller Git history and execution
@@ -236,9 +268,10 @@ Warm load runs recorded zero physical block reads and zero temporary bytes. That
 - Corpus files, database dumps, vectors, model weights, credentials and validation
   infrastructure are excluded from the source snapshot. Two Apache-2.0 upstream source crates are
   vendored with manifest-only zstd compatibility patches; see [vendor/README.md](vendor/README.md).
-- The binary redistribution notice review still has package-level evidence gaps
-  for `random_word` 0.5.2 and `seahash` 4.1.0. Cargo, native build and standard-library
-  notices must accompany any eventual binary distribution. See [THIRD_PARTY.md](THIRD_PARTY.md).
+- The PG16 candidate's Cargo, native/compiler and standard-library notices are
+  collected in a checksum-bound SBOM bundle. This evidence does not approve
+  binary redistribution; review applicable distribution terms before any
+  binary publication. See [THIRD_PARTY.md](THIRD_PARTY.md).
 - Common Crawl provides crawled content that can remain subject to its owners'
   separate terms and rights. This project does not relabel that content Apache-2.0
   or redistribute the validation corpus. See the [Common Crawl terms](https://commoncrawl.org/terms-of-use).
@@ -477,3 +510,18 @@ reimported. No independent qrels, fresh ingestion, write overhead, cold I/O,
 autovacuum coverage or sustained production workload was validated. Binary
 notice review remains open; this source-preview candidate is not production
 approved, and GitHub `main` remains unchanged.
+
+## 2026-10-28 — 0.1.21 outbox validation remains open
+
+The current source candidate adds a PostgreSQL transactional vector outbox and
+a supervised delivery worker. A PG16.15 package built before the final SPI
+correction passed artifact inspection, fresh installation, four SQL regressions,
+the importer DB and runtime-safety fixtures, and a populated 0.1.20-to-0.1.21
+upgrade. Its outbox worker could not claim a committed event because a locking
+query went through pgrx's read-only SPI path; the backup-restore worker check
+failed at the same point. The source has been corrected to use writable SPI,
+but the pre-correction binary is not evidence for that source. The corrected
+package, delivery/crash/replay/concurrency tests, backup-restore and populated
+upgrade still need to pass before the 0.1.21 native validation gate can pass.
+The 0.1.20 notice and SBOM evidence does not cover 0.1.21. This candidate is
+not production approved, and public GitHub `main` remains unchanged.

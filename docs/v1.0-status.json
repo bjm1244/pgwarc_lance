@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-27T17:25:21.198291+00:00",
+  "updated_at": "2026-10-28T11:19:41.444146+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -27,6 +27,7 @@
       "depends_on": [],
       "status": "done",
       "summary": "Linux x86_64·PG16.15 패키징 경로에서 고정 lockfile/toolchain으로 0.1.20 설치 SQL을 공식 생성했다. 생성 artifact는 fresh install, 네 SQL 회귀, 실제 0.1.19 데이터에서의 populated upgrade 및 관련 DB 검증을 통과했다. 재현 명령·checksum·CI 경로와 검증된 PG16 범위를 문서화했다. binary 배포와 프로덕션 승인은 별도 미승인 상태다.",
+      "public_commit": "1bdfabd751af5412ce996423c4f7164ec5fc6840",
       "criteria_passed": [
         "C1",
         "C2",
@@ -39,10 +40,11 @@
       "order": 3,
       "priority": "P0",
       "depends_on": [],
-      "status": "blocked",
-      "summary": "로컬 development에서 random_word의 package-level 고지 공백을 프로젝트 Apache-2.0 호환 패키지로 교체하고, Seahash의 정확한 upstream MIT 원문을 보존했습니다. strict Cargo notices와 최신 RustSec 검사는 통과했고 CycloneDX 1.6 생성기와 회귀를 추가했습니다. C2는 이 native fingerprint에 맞는 실제 PG16 artifact·compiler/native 고지·SBOM이 없어 미완료입니다. 전체 Python 482개가 통과했으며 공개 반영은 native gate 때문에 pending입니다.",
+      "status": "done",
+      "summary": "0.1.21 Linux x86_64/PG16.15 artifact의 436개 Cargo 고지와 native/compiler 고지·CycloneDX SBOM을 lock/artifact checksum에 결합하고 strict notice 수집, RustSec 점검, 실제 PG16 패키지 검증을 마쳤다. 바이너리 재배포와 프로덕션 승인은 포함하지 않는다.",
       "criteria_passed": [
         "C1",
+        "C2",
         "C3"
       ]
     },
@@ -55,7 +57,8 @@
         2,
         3
       ],
-      "status": "queued",
+      "status": "blocked",
+      "summary": "0.1.21 transactional vector outbox and worker were implemented. PG16 install, SQL regressions, importer/runtime checks, and a populated 0.1.20 to 0.1.21 upgrade passed on the initial package. The actual worker test exposed a read-only SPI locking-query failure; the source was corrected and a locked PG16 compile check passed, while full package and database validation remain.",
       "criteria_passed": []
     },
     {

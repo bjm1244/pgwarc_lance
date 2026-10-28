@@ -2,7 +2,7 @@
 
 PostgreSQL extension (built with [pgrx](https://github.com/pgcentralfoundation/pgrx)) that adds table-backed BM25 search, Lance-based vector search, and RRF hybrid search for WARC / web-archive records — all callable from SQL. Korean documentation is in [README.md](README.md).
 
-> **Status: research prototype — not production-ready.** The current source candidate is **0.1.20**. It consolidates the completed BM25 index, bounded PDF/DOCX extraction and record-scoped charset work, and fixes the zstd dependencies flagged by current RustSec advisories. See [PUBLICATION.md](PUBLICATION.md) for actual PostgreSQL 16 install/upgrade/search evidence and its limits. Independent relevance evaluation, operational SLA, full raw-WARC ingestion and binary license notices remain open. Read [SECURITY.md](SECURITY.md) for security and transaction boundaries.
+> **Status: research prototype — not production-ready.** The current source candidate is **0.1.20**. It consolidates the completed BM25 index, bounded PDF/DOCX extraction and record-scoped charset work, and fixes the zstd dependencies flagged by current RustSec advisories. See [PUBLICATION.md](PUBLICATION.md) for actual PostgreSQL 16 install/upgrade/search evidence and its limits. Strict notices and a checksum-bound SBOM are verified for the PG16 package candidate; binary redistribution and production approval remain open. Independent relevance evaluation, operational SLA and full raw-WARC ingestion also remain open. Read [SECURITY.md](SECURITY.md) for security and transaction boundaries.
 
 Production acceptance gates are recorded in [PRODUCTION.md](PRODUCTION.md).
 Earlier 0.1.18 posting-window and IDF trials are recorded separately in the development log. The 0.1.19 term-frequency-index candidate reduces work in the q6 document-frequency scan, while its end-to-end latency and write costs remain inconclusive. Result fingerprints matched, but no independent qrels were available. See the [development log](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), and [THIRD_PARTY.md](THIRD_PARTY.md) for scope and limitations.
@@ -26,8 +26,9 @@ scan remained at 30 shared hits; the multi-term document scan changed from a
 1,598-hit sequential scan to an 86-hit index-only scan, and rare-term lookups
 fell from 17,289 to 11,527 shared hits with zero heap fetches. The host was under
 substantial shared load; raw WARC was not reimported and cold I/O was not
-measured. These are not SLA results. Binary notice review and production approval remain open
-because two package license texts are missing; see [the development
+measured. These are not SLA results. The package-level notice gaps described in this
+historical baseline were resolved for the 0.1.20 PG16 package candidate; binary
+redistribution and production approval remain open. See [the development
 log](docs/development-log.md), [SECURITY.md](SECURITY.md) and [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Contents

@@ -1,5 +1,40 @@
 # Dependency notice review
 
+## Current 0.1.21 PG16 package notices and SBOM (2026-10-28)
+
+The Linux x86_64 / PostgreSQL 16.15 Bookworm candidate has strict target-filtered
+package-level notices for all 436 reachable Cargo dependencies, with no
+missing primary texts. `random_word` 0.5.2 is absent from this target graph and
+is replaced by the project-owned Apache-2.0-compatible 0.5.3 English-word
+compatibility package. The English word-list data has its own verified source
+and checksum. For `seahash` 4.1.0, the bundle preserves the exact MIT text from
+the reviewed upstream revision; it does not substitute a generic license.
+
+The CycloneDX 1.6 SBOM contains 441 components: 436 Cargo packages and five
+native/compiler environment components. It binds the PG16 artifact SHA-256
+`f326f9b649c177e196768c91e08f819d8a65dc5d1bd92025c17a2d1ad20efb60`,
+Cargo.lock SHA-256
+`2c9fed1e80c4f7a1bf7acbbdf54e645632df53b991d4615c3f24e3abc158c36c`, native
+fingerprint
+`b017d3cfb809584f4a1bd2ad2cd4b6fea2407d8537750fa35839d751f68e6c02`, and
+notice-bundle SHA-256
+`8dd80c8147e61adc7809872ac7346598ec15168f49603026a787306ea31b43cd`.
+The SBOM SHA-256 is
+`b550be5747223dd147c55a40c972786ced7006d9de3e34f346269110bec9daa1`.
+The matching package and database checks are documented in
+[PACKAGING.md](PACKAGING.md).
+
+`cargo-audit` 0.22.2 scanned 557 lockfile packages against RustSec database
+revision `40f5be6fb12ed93fc591bf4ab23b7d793b3f2239` (1,381 advisories).
+Vulnerabilities, unsound packages and yanked packages were all zero, with an
+empty exception list. Three unmaintained warnings remain visible:
+`paste` 1.0.15, `proc-macro-error2` 2.0.1 and `serde_cbor` 0.11.2.
+
+This evidence covers Linux x86_64 / PostgreSQL 16.15 and the recorded
+Bookworm build/runtime only. It is a technical notice and inventory result, not
+legal clearance for binary redistribution or production approval. Regenerate
+it whenever the lockfile, native fingerprint, artifact or target changes.
+
 The project source is Apache-2.0. Dependency licenses remain their own terms.
 `NOTICE` is a short project attribution, not a complete binary license bundle.
 For redistribution, preserve dependency copyright/license texts and applicable
@@ -8,14 +43,16 @@ and [Mozilla MPL FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/) describe the
 relevant upstream requirements. In particular, recipients of MPL-covered code
 must be informed how to obtain its corresponding source.
 
-The tested Linux PG16 Cargo graph contains 437 normal/build dependencies
-excluding the extension itself. This is a conservative graph, not proof that
-every crate's code survives linking. It includes an MPL-2.0 package,
+The 2026-10-01 Linux PG16 Cargo graph contained 437 normal/build dependencies,
+excluding the extension itself. This historical conservative graph is not proof
+that every crate's code survives linking. The current 0.1.20 target-specific
+review is recorded below. It includes an MPL-2.0 package,
 `option-ext` 0.2.0; the collector records its exact crate source download URL and
 Cargo.lock checksum. That historical inventory predates the manifest-only compatibility patches
-described in [vendor/README.md](vendor/README.md). Compiler runtime,
-bundled native source licensing and the actual distribution contents still
-require review.
+described in [vendor/README.md](vendor/README.md). The 2026-10-01 inventory did
+not cover the compiler runtime, bundled native source or a bound distribution
+artifact; the 0.1.20 PG16 follow-up below adds those checks without granting
+legal redistribution clearance.
 
 `tools/collect_dependency_notices.py` reads target-filtered Cargo metadata and
 installed crate source files, collects original root and nested license/NOTICE
@@ -244,3 +281,44 @@ zstd requirement; their provenance, advisories addressed and removal conditions
 are in [vendor/README.md](vendor/README.md). The `random_word` replacement's
 source/data provenance and removal condition are recorded there as well. None
 of these patches exempts the crate from RustSec scanning.
+
+## 0.1.20 PG16 package notice and SBOM verification (2026-10-28)
+
+The issue #4 C1–C3 checks are complete for the Linux x86_64 PostgreSQL 16.15
+package candidate. C1 replaces `random_word` 0.5.2, whose package archive and
+pinned source lacked its declared MIT text, with the project-owned Apache-2.0
+0.5.3 compatibility package required by the target graph. The English word-list
+asset's exact bytes and public-domain source declaration are tracked separately.
+For `seahash` 4.1.0, the notice bundle uses the exact MIT text from its upstream
+repository, not a guessed substitute. Provenance and removal conditions are in
+[vendor/README.md](vendor/README.md).
+
+Strict target-filtered notice collection passed for 436 reachable Cargo
+packages with zero missing primary texts. The notice bundle is 5,137,808 bytes
+and has SHA-256
+`df3ca0236e1a296a490cd11d02df900d7f0a50c42515d410f0112b10f78a1fa7`. The
+CycloneDX 1.6 SBOM contains 441 components: those 436 Cargo packages and five
+compiler, runtime and PostgreSQL environment components. It binds artifact
+SHA-256 `701e7050ca694d68d2f828fcc61928640828db49d5139e800620a5b40e896d29`,
+Cargo.lock SHA-256
+`3869b04a56336e1de2880b5b04a18b22110aa588525ff40d656ad0073cda4550`, PG16
+native fingerprint `ccab4bc97d2c04590a86e380ddb232488e1dff8aaac139cc7dcbfee9092c87ab`,
+and the verified artifact source commit `39f7e13e75bfbe63b384be78a5341f3dd6bdf95a`.
+The SBOM SHA-256 is
+`58ef2bbb4313f0db1f17c6bbfb0fb22a081e72f6cec9cd93139ca9793dee7080`.
+The prior PG16 native validation was reused only after its fingerprint, lock,
+artifact and test receipts matched; scope is Linux x86_64 / PG16.15 Bookworm.
+Other PostgreSQL majors and distribution profiles were not covered.
+
+`cargo-audit` 0.22.2 checked 557 packages against RustSec database revision
+`99670cfc0bc574433034b75876a4b791ccaa2efb` (1,380 advisories), matching the
+database's upstream `main` at verification. Vulnerabilities, unsound packages
+and yanked packages were all zero, with no exceptions. Three unmaintained
+warnings remain visible: `paste` 1.0.15, `proc-macro-error2` 2.0.1 and
+`serde_cbor` 0.11.2. See the [RustSec advisory database](https://github.com/RustSec/advisory-db).
+
+The exact artifact inventory and strict notice collection satisfy the issue's
+technical C2 gate; they are not legal clearance to redistribute the binary.
+Production approval, other target inventories and independent distribution
+review remain open. Regenerate the notice bundle and SBOM whenever the lock,
+native fingerprint, artifact or target changes.

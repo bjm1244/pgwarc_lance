@@ -20,6 +20,17 @@ SQL 쓰기 로그는 파일 변경 전에 INSERT한다. 로그 테이블·sequen
 Lance를 변경하기 전에 실패하고, 복구(`restore`)도 기록한다. 다만 이후 SQL
 ROLLBACK·세션 종료·파일 변경 직후 오류는 Lance 변경을 되돌리지 못한다.
 
+0.1.21의 importer `outbox` 경로는 vector payload와 WARC/BM25 변경을 먼저 한
+PostgreSQL transaction에 저장한다. 별도 `lance_outbox_process_next()` 호출이
+commit된 payload를 Lance ID upsert로 반영하므로 read-after-write는 outbox 작업이
+`completed`가 된 뒤에만 보장된다. Lance 반영 뒤 SQL acknowledgment 전에 중단되면
+같은 ID를 다시 upsert한다. 이는 at-least-once/eventual consistency이며 두 저장소의
+분산 atomic commit은 아니다. 해당 worker 호출은 단독 SQL statement로 실행한다.
+enqueue/worker C 함수는 제한된 `EXECUTE` 권한과 `pg_catalog, pg_temp` 고정 search
+path를 가진 `SECURITY DEFINER` 함수다. 애플리케이션 역할에는 queue payload 테이블의
+INSERT/UPDATE 권한을 주지 말고 함수별 권한만 부여하라. 기존 direct writer가 outbox
+대기 이벤트 순서를 확인할 수 있도록 `uri,state` 컬럼 SELECT만 허용한다.
+
 동일 BM25 문서의 동시 재색인은 문서 행을 먼저 upsert해 잠근 뒤 posting을
 교체한다. 신뢰한 writer끼리도 같은 문서를 동시에 수정할 수 있으므로 실제 DB
 동시성 회귀 검증을 운영 배포의 선행 조건으로 둔다.

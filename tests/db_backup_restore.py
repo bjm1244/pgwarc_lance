@@ -63,6 +63,8 @@ def main() -> int:
         'terms', (SELECT count(*) FROM pgwarc_lance.bm25_term),
         'records', (SELECT count(*) FROM pgwarc_lance.warc_record),
         'writes', (SELECT count(*) FROM pgwarc_lance.lance_write_log),
+        'outbox_pending', (SELECT count(*) FROM pgwarc_lance.lance_outbox WHERE state='pending'),
+        'outbox_events', (SELECT count(*) FROM pgwarc_lance.lance_outbox),
         'search', (SELECT json_agg(doc_id ORDER BY doc_id) FROM bm25_search('shared', 10)));"""
     try:
         for db in [source_db, restored_db]:
@@ -130,15 +132,18 @@ def main() -> int:
                     "upgrade_rekeys_existing_long_posting",
                 )
             checks["populated_extension_upgrade"] = True
+        # Preserve a durable, not-yet-applied payload through SQL dump/restore.
+        sql(source_db, f"SELECT lance_outbox_enqueue('{uri}',ARRAY[3]::bigint[],ARRAY[0,0,1,0]::real[],4,ARRAY['queued-backup']::text[]);")
+        next_outbox_id = sql(source_db, "SELECT last_value + 1 FROM pgwarc_lance.lance_outbox_id_seq;")
         sql(source_db, f"SELECT bm25_index_document(3, '{long_token}');")
         sql(source_db, f"GRANT SELECT ON pgwarc_lance.bm25_long_term TO {role};")
         expect(sql(source_db, f"SET ROLE {role}; SELECT doc_id FROM bm25_search('{long_token}',10);"), "3", "long_token_search_works_for_reader")
         original_summary = json.loads(sql(source_db, summary_sql))
-        expect(sql(source_db, "SELECT cardinality(extconfig) FROM pg_extension WHERE extname='pgwarc_lance';"), "6", "all_tables_and_sequence_registered")
+        expect(sql(source_db, "SELECT cardinality(extconfig) FROM pg_extension WHERE extname='pgwarc_lance';"), "8", "all_tables_and_sequences_registered")
         # The fixture has no concurrent writers. Production must quiesce writers
         # before taking the SQL and filesystem snapshots as one backup set.
         dump = run(tool("pg_dump") + ["--no-owner", "-d", source_db])
-        for table in ["bm25_doc", "bm25_term", "bm25_long_term", "warc_record", "lance_write_log"]:
+        for table in ["bm25_doc", "bm25_term", "bm25_long_term", "warc_record", "lance_write_log", "lance_outbox"]:
             if f"COPY pgwarc_lance.{table} " not in dump:
                 raise AssertionError(f"pg_dump omitted {table} data")
         checks["dump_contains_all_extension_table_data"] = True
@@ -150,9 +155,14 @@ def main() -> int:
         checks["sql_data_and_bm25_results_restored"] = True
         expect(sql(restored_db, f"SET ROLE {role}; SELECT doc_id FROM bm25_search('{long_token}',10);"), "3", "long_token_search_restored_for_reader")
         expect(sql(restored_db, "SELECT nextval('pgwarc_lance.lance_write_log_id_seq');"), "10001", "write_log_sequence_state_restored")
+        expect(sql(restored_db, "SELECT nextval('pgwarc_lance.lance_outbox_id_seq');"), next_outbox_id, "outbox_sequence_state_restored")
         expect(sql(restored_db, f"SELECT lance_count('{restored_uri}');"), "2", "lance_row_count_restored")
         expect(sql(restored_db, f"SELECT string_agg(version::text,',' ORDER BY version) FROM lance_dataset_versions('{restored_uri}');"), original_versions, "lance_versions_restored")
         expect(sql(restored_db, f"SELECT id FROM lance_vector_search('{restored_uri}',ARRAY[0,0,0,0]::float4[],1);"), "1", "vector_retrieval_restored")
+        expect(sql(restored_db, "SELECT state||'|'||cardinality(ids)||'|'||labels[1] FROM pgwarc_lance.lance_outbox WHERE state='pending';"), "pending|1|queued-backup", "outbox_payload_restored_pending")
+        sql(restored_db, f"UPDATE pgwarc_lance.lance_outbox SET uri='{restored_uri}' WHERE uri='{uri}';")
+        expect(sql(restored_db, "SELECT status FROM lance_outbox_process_next();"), "completed", "restored_outbox_job_applies")
+        expect(sql(restored_db, f"SELECT id||'|'||label FROM lance_scan('{restored_uri}',10) WHERE id=3;"), "3|queued-backup", "restored_outbox_vector_materialized")
         expect(sql(restored_db, f"SET ROLE {role}; SELECT count(*) FROM bm25_search('shared',10);"), "2", "selective_reader_grants_restored")
         expect(sql(restored_db, "SELECT count(*) FROM pg_proc p JOIN pg_depend d ON d.classid='pg_proc'::regclass AND d.objid=p.oid JOIN pg_extension e ON d.refclassid='pg_extension'::regclass AND d.refobjid=e.oid CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE e.extname='pgwarc_lance' AND d.deptype='e' AND a.grantee=0 AND a.privilege_type='EXECUTE';"), "0", "public_execute_remains_revoked_after_restore")
         evidence["status"] = "passed"

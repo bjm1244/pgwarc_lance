@@ -4,6 +4,62 @@
 
 이 문서는 로컬 Docker 기반으로 `pgwarc_lance` extension artifact를 만들고 설치하는 절차와 version upgrade 정책을 정리한다.
 
+## Current 0.1.21 PG16 package and notice validation (2026-10-28)
+
+The corrected 0.1.21 source was packaged on Linux x86_64 with PostgreSQL
+16.15/Bookworm, Rust 1.96.0, cargo-pgrx 0.19.1 and the pinned PostgreSQL 16
+image. The locked build ran `cargo fetch --locked`, then
+`PGRX_BUILD_FLAGS="--locked --offline" CARGO_NET_OFFLINE=true cargo pgrx
+package --pg-config /usr/bin/pg_config --out-dir /dist --no-default-features
+--features pg16`; the Cargo.lock checksum remained unchanged. The generated
+shared-library SHA-256 is
+`f326f9b649c177e196768c91e08f819d8a65dc5d1bd92025c17a2d1ad20efb60`, the
+install SQL SHA-256 is
+`c99bb8b91f4bca9dcce96b86b5dd3644aa47265d5d1384bbd8eed39f1913ed1b`, and
+Cargo.lock SHA-256 is
+`2c9fed1e80c4f7a1bf7acbbdf54e645632df53b991d4615c3f24e3abc158c36c`.
+
+Artifact inspection, official-image fresh install, `tests/test.sql`, and the
+four `pg_regress` cases (`setup`, `functions`, `search`, `security`) passed.
+The importer DB test, all 18 runtime-safety checks, populated 0.1.20-to-0.1.21
+upgrade, and 15 backup/restore checks passed on the same PG16.15 runtime. The
+native fingerprint is
+`b017d3cfb809584f4a1bd2ad2cd4b6fea2407d8537750fa35839d751f68e6c02`.
+`THIRD_PARTY.md` records the artifact-bound CycloneDX SBOM, full notice bundle,
+current RustSec result and their checksums.
+
+One additional outbox harness run passed 32 assertions, then stopped because
+the test queried `lance_outbox_status.applied_version`, while the installed
+view exposes `latest_applied_version`. That harness result is not counted as a
+pass and no out-of-scope source or test change was made in this issue #4 cycle.
+The required native receipt checks passed; the view assertion remains a
+separate test follow-up.
+
+This is Linux x86_64 / PostgreSQL 16.15 validation only. It does not grant
+binary redistribution or production approval. Package files and full notices
+remain validation artifacts rather than committed binaries.
+
+## 0.1.21 pre-fix outbox artifact checkpoint (2026-10-28, historical)
+
+The source candidate is `0.1.21`. A locked PG16.15 package was generated on
+Linux x86_64 inside the pinned image
+`docker.io/library/postgres:16-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0`
+(GLIBC 2.36), with Rust 1.96.0 and cargo-pgrx 0.19.1. That pre-fix artifact passed artifact
+inspection, extracted-artifact installation, the four SQL regression cases,
+the importer DB test, runtime safety, and a populated 0.1.20-to-0.1.21
+upgrade. Its shared-library SHA-256 was
+`106ea01c380bdfa0644cf18669aad8bd5af8667b029ca73fb08b87c6cf9c74fc`.
+
+The first actual delivery test found that the worker's `FOR UPDATE SKIP LOCKED`
+selection used pgrx's read-only SPI method and PostgreSQL rejected it. The
+restored pending-event test hit the same error. The Rust source now uses the
+writable SPI method for that locking query, but the above artifact predates this
+change and must not be treated as validation of the corrected source. The
+corrected-source PG16 package checks are recorded in the current section above.
+The supplemental outbox test-harness mismatch described there remains open; no
+binary redistribution or production approval is claimed. See [the issue #5
+development record](docs/development-log.md).
+
 ## PG16 Official Package Recovery (verified 2026-10-28)
 
 The verified package target is Linux x86_64, PostgreSQL 16.15 on Debian
@@ -44,18 +100,21 @@ smoke; the separate PG16 `regress` job runs the four pg_regress cases. The
 verified packaging scope is PostgreSQL 16.15 on Linux x86_64/Bookworm. The
 PG13–17 feature gates remain separate compatibility targets; this verification
 does not claim support for other majors. GitHub Actions itself was not run in
-this local validation. Package validation does not grant binary redistribution
-or production approval; dependency and native-component notices remain a
-separate gate.
+this local validation. Issue #4 generated a strict Cargo/native/compiler notice
+bundle and CycloneDX 1.6 SBOM for this exact PG16 artifact, binding its Cargo.lock,
+artifact and notice hashes. This closes the notice inventory gate for this
+target; package validation still does not grant binary redistribution or
+production approval. Other PostgreSQL majors and distribution profiles were
+not covered by this notice/SBOM evidence.
 
 ## Version Coordinates
 
-- Current extension/crate version: `0.1.20` development candidate (`Cargo.toml`)
+- Current extension/crate version: `0.1.21` development candidate (`Cargo.toml`); the corrected source has passed the recorded PG16 native package gate for this issue #4 cycle.
 - Control file version: `default_version = '@CARGO_VERSION@'`
 - PostgreSQL build target: PostgreSQL 16 by default; optional Docker build arg `PG_MAJOR=13..17`
 - Rust toolchain: `1.96.0`
 - cargo-pgrx: `0.19.1`
-- This candidate: PG16.15 locked official package, artifact checks, fresh install, four SQL regressions, importer/runtime/backup tests, and populated 0.1.19→0.1.20 upgrade passed. Other majors were not verified for this packaging path. Binary redistribution and production approval remain open.
+- The verified 0.1.20 package remains historical and passed its recorded PG16 checks. The pre-fix 0.1.21 artifact passed artifact checks, fresh install, four SQL regressions, importer/runtime tests and populated 0.1.20→0.1.21 upgrade, but its outbox worker and pending-event restore failed; it does not validate the corrected current source. Other majors were not verified. Binary redistribution and production approval remain open.
 
 `Cargo.toml`에는 `pg13`부터 `pg17` feature gate가 남아 있다. Dockerfile은 `PG_MAJOR` build arg로 `postgres:${PG_MAJOR}`, 해당 server dev package, `cargo pgrx init --pg${PG_MAJOR}`, matching `pg${PG_MAJOR}` Cargo feature를 함께 선택한다. 기본 local verification은 PostgreSQL 16 기준이며, 다른 major는 `make smoke-pg-version` 또는 `make pg-version-matrix`로 fresh install smoke를 확인한다.
 

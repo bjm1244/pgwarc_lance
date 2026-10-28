@@ -58,12 +58,22 @@ GRANT SELECT, INSERT, DELETE ON pgwarc_lance.bm25_term,
     pgwarc_lance.bm25_long_term TO pgwarc_writer;
 GRANT INSERT ON pgwarc_lance.lance_write_log TO pgwarc_writer;
 GRANT USAGE ON SEQUENCE pgwarc_lance.lance_write_log_id_seq TO pgwarc_writer;
+GRANT SELECT (uri, state) ON pgwarc_lance.lance_outbox TO pgwarc_writer;
+GRANT SELECT ON pgwarc_lance.lance_outbox_status TO pgwarc_reader, pgwarc_writer;
 GRANT EXECUTE ON FUNCTION public.bm25_index_document(bigint,text),
-    public.lance_upsert_many(text,bigint[],real[],integer,text[]) TO pgwarc_writer;
+    public.lance_upsert_many(text,bigint[],real[],integer,text[]),
+    public.lance_outbox_enqueue(text,bigint[],real[],integer,text[]) TO pgwarc_writer;
+
+CREATE ROLE pgwarc_outbox_worker NOLOGIN;
+GRANT USAGE ON SCHEMA public, pgwarc_lance TO pgwarc_outbox_worker;
+GRANT SELECT ON pgwarc_lance.lance_outbox_status,
+    pgwarc_lance.lance_outbox_failures TO pgwarc_outbox_worker;
+GRANT EXECUTE ON FUNCTION public.lance_outbox_process_next() TO pgwarc_outbox_worker;
 
 -- Replace these existing managed login names with your service identities.
 GRANT pgwarc_reader TO archive_reader_login;
 GRANT pgwarc_writer TO archive_writer_login;
+GRANT pgwarc_outbox_worker TO archive_worker_login;
 ALTER ROLE archive_reader_login SET statement_timeout = '2s';
 ALTER ROLE archive_reader_login SET idle_in_transaction_session_timeout = '30s';
 ALTER ROLE archive_reader_login SET work_mem = '4MB';
@@ -80,7 +90,65 @@ limits for trusted services, not an untrusted-user resource isolation boundary.
 These are trusted whole-corpus roles. Table grants and dataset-function access
 are not a per-document or per-tenant isolation mechanism. The writer can modify
 its granted SQL data and write permitted datasets, so use a separate database
-and OS root when corpus isolation is required. Readers need no write-log grant.
+and OS root when corpus isolation is required. The importer writer receives
+only SELECT on outbox `uri` and `state` for direct-writer ordering checks.
+Outbox enqueue and delivery use granted C functions with a locked search path;
+application roles receive no payload-table write rights. The delivery role can
+inspect aggregate status and failed-event diagnostics without reading vector
+payloads. Readers need no write-log grant. The worker does not need BM25
+content-table write grants.
+
+## Commit-safe vector ingestion
+
+Create the Lance dataset administratively, then import with the `outbox` mode.
+The WARC metadata, BM25 changes and vector payload commit as one SQL transaction.
+An external worker applies each committed payload after commit:
+
+```bash
+python3 tools/warc_importer.py input.warc.gz --skip-schema \
+    --lance-uri /srv/pgwarc/archive.lance --lance-mode outbox \
+    --vector-dim 384 --embedding-jsonl vectors.jsonl --execute \
+    --psql "$WRITER_PSQL" --summary-json import.summary.json
+python3 tools/lance_outbox_worker.py --psql "$WORKER_PSQL" --poll-interval-ms 1000
+```
+
+Run one worker instance per deployment unless the workload needs parallelism;
+multiple workers are safe, and PostgreSQL row/advisory locks preserve the event
+order for each URI. A failed earlier event blocks later work for that URI.
+Check backlog and failure status with:
+
+```sql
+SELECT uri, pending_jobs, failed_jobs,
+       oldest_unfinished_ms, latest_applied_version, last_completed_at
+FROM pgwarc_lance.lance_outbox_status;
+
+SELECT id, uri, attempt_count, last_attempt_at, last_error
+FROM pgwarc_lance.lance_outbox_failures
+ORDER BY id;
+```
+
+After resolving a permanent failure and confirming an ID-upsert replay is safe,
+an administrator may return that event to the retry queue:
+
+```sql
+UPDATE pgwarc_lance.lance_outbox
+SET state = 'pending', attempt_count = 0, last_error = NULL,
+    available_at = clock_timestamp(), completed_at = NULL,
+    applied_version = NULL
+WHERE id = 123 AND state = 'failed';
+```
+
+Do not set a row to `completed` manually. PostgreSQL and Lance have no shared
+atomic commit: if Lance upsert succeeds but its SQL acknowledgment rolls back,
+the worker replays the same IDs. Completed rows clear their vector arrays after
+the success acknowledgment commits; failed rows retain their payload for a
+reviewed retry. Read-after-write for vector/hybrid queries is
+available after the relevant outbox event is `completed`; BM25 and WARC metadata
+are visible immediately after the importer transaction commits. For backups,
+pause ingestion and workers and snapshot the SQL database and Lance directory as
+one consistent set. A pending queue must be restored with the matching Lance
+directory before workers restart. The worker executable provides polling and
+signal handling but does not install a service manager or scheduler.
 
 From 0.1.4, BM25 and hybrid query text is limited to 65,536 UTF-8 bytes; the
 0.1.16 candidate raises that bound to 2,500,000 bytes so the longest token in the

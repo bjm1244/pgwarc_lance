@@ -1,10 +1,10 @@
 # pgwarc_lance
 
-> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 후보는 **0.1.20**이다. 완료된 BM25 인덱스·제한형 PDF/DOCX 추출·레코드별 charset 보정을 통합했고, 최신 RustSec에서 발견된 zstd 의존성을 수정했다. 실제 PostgreSQL 16의 신규 설치·데이터가 있는 업그레이드·검색 결과 비교 근거와 한계는 [PUBLICATION.md](PUBLICATION.md)에 있다. 독립 relevance 평가, 운영 SLA, 전체 raw-WARC 적재 및 바이너리 라이선스 고지는 아직 완료되지 않았다. 보안·트랜잭션 제약은 [SECURITY.md](SECURITY.md)를 확인하라.
+> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 개발 후보는 **0.1.21**이다. 기존 BM25·제한형 문서 추출과 레코드별 charset 보정에 durable vector outbox/worker 경로를 추가했다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며, outbox 경로의 반영은 commit 뒤 eventual consistency를 제공한다. Linux x86_64 / PostgreSQL 16.15 artifact의 실제 설치·upgrade·SQL·importer·runtime·backup 검증과 남은 한계는 [PUBLICATION.md](PUBLICATION.md)에 기록한다. strict 의존성 고지와 CycloneDX SBOM은 현재 0.1.21 PG16 artifact에 checksum으로 결합했지만 binary 재배포·프로덕션 승인을 뜻하지 않는다.
 >
 > 라이선스: Apache-2.0 ([LICENSE](LICENSE)). 기여 전 [CONTRIBUTING.md](CONTRIBUTING.md)·[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)를 참고하라.
 
-이전 0.1.18 실험과 현재 0.1.19 인덱스 및 WARC extraction source 후보의 결과·한계는 [개발 기록](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), [THIRD_PARTY.md](THIRD_PARTY.md)에 기록한다.
+이전 0.1.18 실험, 0.1.19 인덱스, 0.1.20 후보와 현재 0.1.21 배포 고지 검토의 결과·한계는 [개발 기록](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), [THIRD_PARTY.md](THIRD_PARTY.md)에 기록한다.
 
 `pgwarc_lance`는 WARC/Web archive 데이터를 PostgreSQL 안에서 검색 가능한 레코드로 다루기 위한 pgrx 기반 확장이다. 현재 구현은 PostgreSQL 테이블 기반 BM25, Lance dataset 기반 벡터 검색, RRF 기반 hybrid search, 그리고 초기 WARC/WARC.GZ SQL importer를 제공한다.
 
@@ -60,12 +60,15 @@ pgwarc_lance/
 │   ├── bench_warc_bm25_modes.py # function/bulk BM25 WARC import 비교 하네스
 │   ├── compare_benchmark_runs.py # baseline/candidate benchmark 회귀 비교 하네스
 │   ├── eval_quality.py        # synthetic relevance quality eval 하네스
+│   ├── lance_outbox_worker.py # committed Lance outbox를 반영하는 standalone worker
 │   ├── execution_budget.py    # 분석 하네스 run-scoped 실행 예산(iteration/query/deadline) gate
 │   ├── make_quality_fixture.py # records/vector/label JSON -> quality fixture builder
 │   ├── doctor_quality_labels.py # query label JSON schema/coverage doctor
 │   ├── report_quality_fixture.py # quality fixture schema/label coverage report
 │   ├── make_public_warc_quality_fixture.py # public WARC labeled quality fixture 생성
 │   ├── check_release_artifacts.py # release artifact 구조/버전 검증
+│   ├── collect_dependency_notices.py # target별 Cargo/native 의존성 고지 수집
+│   ├── build_distribution_sbom.py # artifact/lock 체크섬 결합 CycloneDX SBOM 생성
 │   ├── smoke_release_artifacts.py # release artifact를 깨끗한 Postgres 컨테이너에 설치 smoke
 │   ├── smoke_release_upgrade.py # release artifact 기반 ALTER EXTENSION smoke
 │   ├── doctor_release_upgrade_inputs.py # old artifact/upgrade SQL preflight doctor
@@ -92,6 +95,8 @@ pgwarc_lance/
     ├── test.sql               # smoke 테스트 (라이브 컨테이너 대상)
     ├── test_audit_bm25_index.py # BM25 content/posting audit 단위 테스트
     ├── test_warc_importer.py  # Python WARC importer 단위 테스트
+    ├── test_lance_outbox_worker.py # outbox worker 단위 테스트
+    ├── db_outbox.py           # PG16 committed-only/restart outbox 통합 테스트
     ├── test_eval_quality.py   # quality fixture 단위 테스트
     ├── test_execution_budget.py # 분석 실행 예산 gate 단위 테스트
     ├── test_make_quality_fixture.py # quality fixture builder 단위 테스트
@@ -144,6 +149,8 @@ pgwarc_lance/
 | `lance_create_table(uri, vector_dim=3, overwrite=false)` | Lance dataset 생성 |
 | `lance_insert(uri, id, vector, label)` | Lance dataset에 벡터 row 삽입 |
 | `lance_insert_many(uri, ids, flat_vectors, vector_dim, labels)` | Lance dataset에 여러 벡터 row를 한 번의 batch append로 삽입 |
+| `lance_outbox_enqueue(uri, ids, flat_vectors, vector_dim, labels)` | caller transaction에 재시도 안전한 벡터 upsert 작업을 저장 |
+| `lance_outbox_process_next()` | 독립 transaction에서 가장 오래된 완료 가능 작업을 Lance에 반영하고 결과 버전/지연을 반환 |
 | `lance_scan(uri, limit=100)` | Lance row 스캔 |
 | `lance_vector_dim(uri)` | Lance dataset의 vector 차원 반환 |
 | `lance_vector_search(uri, query, k=10)` | Lance nearest-neighbor 검색 |
@@ -152,19 +159,25 @@ pgwarc_lance/
 | `lance_dataset_versions(uri)` | dataset 버전 목록 `(version, created_ms)` 반환 (오래된 순) |
 | `lance_restore_version(uri, version)` | 지정 버전을 최신 상태로 재승격 (롤백 보상 경로) |
 
+`pgwarc_lance.lance_outbox`는 importer가 같은 PostgreSQL transaction에 저장한 vector payload, 대기/실패 상태, 재시도 수와 완료 Lance 버전을 보관한다. 성공적으로 반영된 행은 완료와 applied version을 커밋할 때 큰 vector payload를 비우고, 작은 완료 영수증은 상태 모니터링용으로 유지한다. `lance_outbox_status`는 URI별 ready/pending/failed 작업 수, 가장 오래 기다린 지연, 마지막 완료 시각과 outbox 반영 버전을 요약한다.
+
 `lance_create_table()`은 기존 1-argument 호출 호환성을 위해 기본 차원을 3으로 둔다. 실제 embedding 연동에서는 모델 차원에 맞춰 `vector_dim`을 명시한다. 테스트처럼 반복 실행이 필요한 경우에만 `overwrite=true`로 dataset을 재생성한다.
 
 `pgwarc_lance.warc_record` metadata table은 importer가 적재한 WARC record의 URI, WARC date, content type, HTTP status, payload digest, text length, source file을 보관한다.
 
-`pgwarc_lance.lance_write_log` table은 PostgreSQL이 **커밋한** Lance 쓰기(uri, op, row 수, 시각)를 남긴다. 아래의 트랜잭션 한계를 운영에서 reconciliation할 때 `lance_dataset_versions()`와 함께 사용한다.
+`pgwarc_lance.lance_write_log`는 direct API 쓰기와 성공한 outbox 반영의 URI, op, 행 수, 시각을 남긴다. `lance_outbox`의 `completed`와 `applied_version`이 해당 queued 작업의 완료 근거다.
 
 ### 트랜잭션·동시성 한계 (반드시 읽어라)
 
-Lance dataset은 PostgreSQL이 관리하지 않는 파일이다. 따라서:
+Lance dataset은 PostgreSQL이 관리하지 않는 파일이다. 기본 direct 함수와 importer의 `create`/`overwrite`/`append`/`upsert` 모드는 Lance 파일을 즉시 변경하므로 기존 경계가 남아 있다. 이 경계를 피하는 importer 모드는 `outbox`다.
 
-- **`ROLLBACK`은 이미 커밋된 Lance append를 되돌리지 않는다.** PostgreSQL 트랜잭션이 실패해도 파일에는 데이터가 남는다. 정합성이 필요한 서비스는 이 경계를 설계에 반영해야 한다.
-- 되돌려야 하는 경우 `lance_dataset_versions()`로 목표 버전을 찾고 `lance_restore_version()`으로 복구한다. `pgwarc_lance.lance_write_log`가 어떤 쓰기가 커밋되었는지 알려준다.
-- 동시 writer는 `pg_advisory_xact_lock`으로 dataset 경로별 직렬화된다. 트랜잭션이 끝나면 해제되므로 데드락은 발생하지 않지만, 대량 적재는 직렬로 수행된다.
+- `outbox` 모드는 WARC metadata, BM25와 vector payload를 같은 PostgreSQL transaction에 기록한다. rollback되면 이 SQL 행들이 모두 사라지고 worker는 해당 작업을 볼 수 없다. commit 뒤 `python3 tools/lance_outbox_worker.py`가 vector payload를 Lance ID upsert로 반영한다.
+- PostgreSQL과 Lance 간 단일 atomic commit은 없다. worker/DB가 Lance write 후 SQL completion commit 전에 중단되면 작업은 pending으로 되돌아오고 다시 전달된다. 같은 document ID와 payload를 upsert하므로 재전달은 멱등적이다. `completed`는 SQL acknowledgment와 Lance `applied_version`이 커밋된 상태를 뜻한다.
+- worker는 autocommit의 standalone SQL call로만 동작한다. 같은 transaction의 미커밋 XID는 선택에서 제외되고 explicit `BEGIN` 안의 worker 호출은 거부된다. URI별 이전 작업이 완료되기 전에는 다음 이벤트를 처리하지 않으므로 한 URI의 pending/failed 이벤트가 뒤 작업을 막는다.
+- 처리 전까지 BM25와 WARC metadata는 보이고 vector/hybrid 결과는 늦을 수 있다. read-after-write가 필요하면 해당 outbox ID가 `completed`인지 확인한 뒤 vector 검색을 수행한다. `lance_outbox_status`의 대기 지연, 실패, 완료 버전을 감시한다.
+- direct Lance API는 즉시 쓰기 의미를 유지한다. 같은 URI에 미완료 outbox 이벤트가 있으면 direct write/restore는 거부되어 두 writer 경로가 순서를 바꾸지 못하게 한다. 한 dataset에서 outbox worker와 외부 Lance writer를 동시에 운용하지 않는다.
+- outbox 상태와 payload는 extension configuration data로 `pg_dump` 대상이다. backup 시 importer와 worker를 함께 멈추고 queue가 비었는지 확인한다. pending 작업을 보존한 snapshot은 SQL과 그 시점의 Lance directory를 함께 복구한 뒤 worker를 재개해야 한다.
+- outbox를 사용하지 않는 direct write의 rollback/취소 보상은 `lance_dataset_versions()`와 `lance_restore_version()`으로 관리한다. 이 경우 `lance_write_log` 부재가 외부 파일 쓰기 부재를 증명하지 않는다.
 
 ### 보안/운영 설정 (GUC)
 
@@ -571,8 +584,20 @@ python3 tools/warc_importer.py sample.warc.gz \
 | `create` | `lance_create_table(uri, dim, false)` 호출. 기존 dataset이 있으면 실패 | 새 dataset 최초 적재 |
 | `overwrite` | `lance_create_table(uri, dim, true)` 호출. 기존 dataset 재생성 | 테스트/재실행 |
 | `append` | dataset 생성 호출을 생략하고 `lance_insert_many()`만 수행 | 기존 dataset에 추가 적재 |
+| `upsert` | 같은 transaction에서 `lance_upsert_many()`를 즉시 수행 | synchronous direct write. SQL rollback은 Lance write를 되돌리지 않음 |
+| `outbox` | metadata/BM25/vector payload를 PostgreSQL transaction에 저장하고 별도 worker가 `lance_upsert_many` 의미로 반영 | commit 뒤 eventual consistency와 at-least-once recovery |
 
-`--overwrite-lance`는 하위 호환용 alias이며 새 사용법에서는 `--lance-mode overwrite`를 쓴다. `append` 모드는 기존 dataset에 row를 추가하지만 Lance row 자체를 deduplicate하지는 않는다. 같은 WARC를 반복 import하면 PostgreSQL metadata/BM25는 doc_id 기준으로 갱신되지만 Lance dataset에는 중복 vector row가 쌓일 수 있다. 반복 실행이 필요한 테스트나 재생성 import에는 `overwrite`를 사용한다. importer는 append vector SQL에 중복 가능성 warning comment를 넣고, summary에는 `lance_append_duplicates=possible`을 표시한다.
+`--overwrite-lance`는 하위 호환용 alias이며 새 사용법에서는 `--lance-mode overwrite`를 쓴다. `append` 모드는 기존 dataset에 row를 추가하지만 Lance row 자체를 deduplicate하지는 않는다. 같은 WARC를 반복 import하면 PostgreSQL metadata/BM25는 doc_id 기준으로 갱신되지만 Lance dataset에는 중복 vector row가 쌓일 수 있다. 반복 실행이 필요한 테스트나 재생성 import에는 `overwrite`를 사용한다. importer는 append vector SQL에 중복 가능성 warning comment를 넣고, summary에는 `lance_append_duplicates=possible`을 표시한다. `outbox`에는 이미 만든 Lance dataset이 필요하며, importer의 `--execute`가 끝난 뒤 worker를 실행한다:
+
+```bash
+python3 tools/warc_importer.py input.warc.gz --skip-schema \
+    --lance-uri /srv/pgwarc/archive.lance --lance-mode outbox \
+    --vector-dim 384 --embedding-jsonl vectors.jsonl --execute \
+    --psql "$WRITER_PSQL" --summary-json import.summary.json
+python3 tools/lance_outbox_worker.py --psql "$OUTBOX_WORKER_PSQL" --poll-interval-ms 1000
+```
+
+worker는 각 job을 PostgreSQL standalone transaction으로 실행하므로 importer chunk가 rollback되면 Lance write도 시작하지 않는다. commit 응답을 얻은 뒤 `lance_outbox`의 해당 ID가 `completed`인지 확인해야 vector 검색의 read-after-write를 보장할 수 있다. 종료 후 새 worker를 시작하면 pending job을 이어서 처리한다.
 
 `--embedding-command`는 stdin으로 record JSONL을 받는다. 각 줄은 `doc_id`, `target_uri`, `warc_date`, `content_type`, `http_status`, `payload_digest`, `text_len`, `source_file`, `text`를 포함한다. stdout은 줄마다 `{"doc_id": 123, "vector": [0.1, ...]}` 형식이어야 하며 vector 길이는 `--vector-dim`과 정확히 같아야 한다. `tools/embed_records_openai.py`는 이 계약을 구현한 OpenAI-compatible 예제이며, `--embedding-jsonl`도 같은 출력 형식을 사용한다.
 
@@ -580,10 +605,11 @@ python3 tools/warc_importer.py sample.warc.gz \
 
 ### Import Failure Recovery
 
-Importer-generated SQL은 PostgreSQL metadata/BM25 변경을 chunk 단위 `BEGIN`/`COMMIT`으로 묶지만, Lance dataset write는 PostgreSQL transaction rollback과 같은 원자성을 보장하지 않는다. 실패 후 상태가 애매하면 같은 입력 WARC 목록과 같은 embedding 설정으로 `--lance-mode overwrite`를 사용해 전체 import를 재실행하는 것이 기본 복구 경로다.
+Importer-generated SQL의 direct Lance 모드는 PostgreSQL metadata/BM25를 chunk 단위 `BEGIN`/`COMMIT`으로 묶지만 파일 쓰기는 별도다. 그 경로의 실패 후 상태가 애매하면 같은 입력과 embedding 설정으로 `--lance-mode overwrite`를 사용해 전체 import를 재실행한다. `outbox`는 payload와 metadata를 먼저 한 SQL transaction에 commit하며 worker가 뒤에 반영한다. Lance write 후 DB completion commit 전에 worker가 중단되면 같은 ID의 멱등 upsert를 재전달한다. PostgreSQL/Lance 사이 exactly-once atomic commit은 제공하지 않는다.
 
 - 실패 위치가 batch comment 전이면 schema/table 준비나 Lance dataset 생성 단계에서 멈춘 것이다. 설정을 고친 뒤 `overwrite`로 재실행한다.
-- 실패 위치가 batch 내부이면 PostgreSQL의 해당 chunk는 rollback되지만, 이미 호출된 `lance_insert_many()`의 외부 dataset write는 남아 있을 수 있다. 안전한 재시도는 `overwrite`로 Lance dataset을 재생성하는 것이다.
+- `create`/`overwrite`/`append`/`upsert` direct mode가 batch 안에서 실패하면 PostgreSQL chunk는 rollback되지만 이미 호출된 Lance write는 남아 있을 수 있다. 안전한 재시도는 `overwrite`로 Lance dataset을 재생성하는 것이다.
+- `outbox` mode의 SQL chunk가 rollback되면 해당 event와 metadata가 모두 사라진다. commit된 event의 worker가 종료되면 PostgreSQL transaction rollback으로 event는 pending에 남으며 다음 worker가 재개한다. Lance upsert 후 ack 전에 끊겨도 같은 payload가 멱등 재실행된다. `lance_outbox_status`와 event의 `attempt_count`, `last_error`, `applied_version`을 점검하고 `failed`가 있으면 원인을 해결하기 전 뒤 작업을 처리하지 않는다.
 - `append` mode에서 실패하거나 같은 WARC를 반복 실행하면 Lance에는 같은 `doc_id` vector row가 중복될 수 있다. PostgreSQL metadata/BM25는 `doc_id` 기준으로 갱신되지만, vector search rank는 중복 row의 영향을 받을 수 있으므로 append 재시도는 dataset 상태가 명확할 때만 사용한다.
 - 대형 import에서는 `--summary-json`을 항상 남기고 `IMPORT_SUMMARY=import.summary.json make doctor-import-summary` 또는 `IMPORT_SUMMARY=import.summary.json BENCH_OUT_DIR=benchmarks/local make finalize-import-run`으로 schema, `execute=false`, zero records, Lance append duplicate risk와 run directory completeness를 확인한다. 실패 분석이 필요할 때만 `--output import.sql`로 SQL artifact를 보관한다. 정상 실행 기본 경로는 disk에 큰 SQL 파일을 만들지 않는 `--execute` streaming이다.
 - chunk 단위 수동 복구가 필요하면 generated SQL의 `-- pgwarc_lance import batch start-end` comment를 기준으로 실패 batch를 찾는다. 이 경우에도 Lance 상태가 불확실하면 batch만 재실행하지 말고 `overwrite` 전체 재실행을 우선한다.
@@ -680,7 +706,9 @@ BENCH_OUT_DIR=benchmarks/local make report-release-smoke-matrix
 BENCH_OUT_DIR=benchmarks/local make finalize-release-run
 ```
 
-기본 출력은 `dist/pgwarc_lance-0.1.17-pg16/`이며, `PG_MAJOR`를 바꾸면 `dist/pgwarc_lance-0.1.17-pg17/`처럼 major별 디렉토리에 `.so`, `.control`, `pgwarc_lance--0.1.17.sql`을 추출한다. `release-artifacts`는 추출 직후 `.so` ELF header, control `default_version`/`module_pathname`, generated SQL의 핵심 함수 symbol을 검사한다. `smoke-release-artifacts`는 그 산출물을 build image 밖의 official Postgres 컨테이너에 설치해 fresh install smoke를 수행한다. `smoke-release-upgrade`는 old/new artifact와 `pgwarc_lance--OLD--NEW.sql`로 `ALTER EXTENSION UPDATE`를 확인한다. Matrix target은 `PG_MATRIX`의 major 목록을 순회하며, install/upgrade matrix는 기존 `dist/` 산출물을 사용한다. `report-release-artifacts`는 major별 artifact 상태와 SHA-256을 JSON/Markdown으로 남기고, run doctor는 이 artifact matrix report의 row/file schema도 검사한다. `report-release-smoke-matrix`는 major별 runtime smoke 실행 결과와 로그 tail을 남기며, run doctor는 smoke result rows와 pass/exit-code consistency도 검사한다. `RELEASE_SMOKE_TARGET=smoke-release-upgrade`이면 `report-release-upgrade-smoke-matrix`가 `tools/report_release_upgrade_smoke_matrix.py`로 각 major의 `doctor_release_upgrade_inputs` preflight을 먼저 실행하고, blocked major는 smoke를 실행하지 않은 채 per-major `preflight`/`smoke_skipped` field와 함께 non-zero report를 남긴다. `finalize-release-run`은 두 release report와 run metadata/manifest/doctor를 packaging profile로 한 run directory에 마감한다. host PostgreSQL 설치, version upgrade SQL 전략, Rust toolchain pinning 정책은 [PACKAGING.md](PACKAGING.md)에 정리한다.
+기본 출력은 `dist/pgwarc_lance-0.1.20-pg16/`이며, `PG_MAJOR`를 바꾸면 `dist/pgwarc_lance-0.1.20-pg17/`처럼 major별 디렉토리에 `.so`, `.control`, `pgwarc_lance--0.1.20.sql`을 추출한다. `release-artifacts`는 추출 직후 `.so` ELF header, control `default_version`/`module_pathname`, generated SQL의 핵심 함수 symbol을 검사한다. `smoke-release-artifacts`는 그 산출물을 build image 밖의 official Postgres 컨테이너에 설치해 fresh install smoke를 수행한다. `smoke-release-upgrade`는 old/new artifact와 `pgwarc_lance--OLD--NEW.sql`로 `ALTER EXTENSION UPDATE`를 확인한다. Matrix target은 `PG_MATRIX`의 major 목록을 순회하며, install/upgrade matrix는 기존 `dist/` 산출물을 사용한다. `report-release-artifacts`는 major별 artifact 상태와 SHA-256을 JSON/Markdown으로 남기고, run doctor는 이 artifact matrix report의 row/file schema도 검사한다. `report-release-smoke-matrix`는 major별 runtime smoke 실행 결과와 로그 tail을 남기며, run doctor는 smoke result rows와 pass/exit-code consistency도 검사한다. `RELEASE_SMOKE_TARGET=smoke-release-upgrade`이면 `report-release-upgrade-smoke-matrix`가 `tools/report_release_upgrade_smoke_matrix.py`로 각 major의 `doctor_release_upgrade_inputs` preflight을 먼저 실행하고, blocked major는 smoke를 실행하지 않은 채 per-major `preflight`/`smoke_skipped` field와 함께 non-zero report를 남긴다. `finalize-release-run`은 두 release report와 run metadata/manifest/doctor를 packaging profile로 한 run directory에 마감한다. host PostgreSQL 설치, version upgrade SQL 전략, Rust toolchain pinning 정책은 [PACKAGING.md](PACKAGING.md)에 정리한다.
+
+PG16 배포 후보의 의존성 고지는 `python3 tools/collect_dependency_notices.py --metadata-json <cargo-metadata.json> --target x86_64-unknown-linux-gnu --output-dir <notice-dir> --strict`로 수집한다. 실제 `.so`, 동일 Cargo.lock, compiler/native inventory 및 strict notice report를 `python3 tools/build_distribution_sbom.py`에 전달해 CycloneDX SBOM과 통합 고지 파일을 만든다. 이 결과는 PG16 후보의 artifact·lock 체크섬에 결합되며, binary redistribution 승인을 뜻하지 않는다. 상세 scope와 해시는 [THIRD_PARTY.md](THIRD_PARTY.md)와 [PACKAGING.md](PACKAGING.md)에 있다.
 
 ## 기술 스택
 
@@ -706,9 +734,10 @@ BENCH_OUT_DIR=benchmarks/local make finalize-release-run
 
 ## 0.1.2 운영 후보
 
-`--lance-mode upsert`는 기존 데이터셋에 같은 ID를 교체하거나 새 ID를 추가한다.
-반복 적재와 중단 후 재시도에는 이 모드를 사용한다. 최초 데이터셋 생성은 관리자가
-한 번 수행하고, 이후에는 `create`/`overwrite` 대신 `upsert`를 사용한다.
+`--lance-mode upsert`는 기존 dataset에 같은 ID를 교체하거나 새 ID를 추가하는 immediate direct write다.
+단일 chunk 재시도에는 멱등이지만 PostgreSQL rollback과 원자적이지 않다. commit 이후의
+재시작 복구가 필요한 batch ingestion에는 `--lance-mode outbox`와
+`tools/lance_outbox_worker.py`를 사용한다. 최초 dataset 생성은 관리자가 한 번 수행한다.
 기존 데이터셋의 해당 ID가 이미 중복이면 쓰기 전에 거부한다. 한 배치는 최대
 10,000행이다. SQL과 Lance의 commit은 별개이며 전체 import의 원자성을 보장하지 않는다.
 

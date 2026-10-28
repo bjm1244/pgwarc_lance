@@ -31,6 +31,7 @@ static ALLOW_DESTRUCTIVE_OPS: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// Keep individual search inputs bounded while allowing the longest observed
 /// Common Crawl token (2,298,914 characters) to be searched exactly.
 const MAX_QUERY_BYTES: usize = 2_500_000;
+const OUTBOX_MAX_ATTEMPTS: i32 = 8;
 
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
@@ -84,6 +85,24 @@ fn require_finite_vector(values: &[f32]) {
         fail(
             PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
             "input requires finite vector values (NaN and infinity are rejected)",
+        );
+    }
+}
+
+fn ensure_no_pending_outbox(uri: &str) {
+    let has_pending = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (\
+            SELECT 1 FROM pgwarc_lance.lance_outbox \
+            WHERE uri = $1 AND state <> 'completed'\
+        )",
+        &[DatumWithOid::from(uri)],
+    )
+    .unwrap_or_report()
+    .unwrap_or(false);
+    if has_pending {
+        fail(
+            PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "dataset has unfinished Lance outbox work; drain or reconcile it before direct writes",
         );
     }
 }
@@ -183,14 +202,122 @@ fn lock_dataset(uri: &str) {
     .unwrap_or_report();
 }
 
-/// Records a committed Lance write next to the SQL data.
-///
-/// Insert the log row before external mutation so missing SQL privileges,
-/// sequence access, or SQL-side insert errors cannot leave unlogged file changes.
-/// Rows in this table live in the same transaction as the write itself, so they
-/// represent writes that PostgreSQL committed. A rolled back transaction cannot
-/// undo the already-committed Lance append, so this log plus
-/// `lance_dataset_versions`/`lance_restore_version` is the reconciliation path.
+struct OutboxJob {
+    id: i64,
+    uri: String,
+    ids: Vec<i64>,
+    flat_vectors: Vec<f32>,
+    vector_dim: i32,
+    labels: Vec<String>,
+    attempts: i32,
+}
+
+fn take_outbox_job() -> Option<OutboxJob> {
+    Spi::connect_mut(|client| {
+        let rows = client
+            // The locking clause requires writable SPI execution. `select`
+            // requests a read-only SPI snapshot and PostgreSQL rejects its
+            // `FOR UPDATE SKIP LOCKED` clause even though this C function is
+            // declared VOLATILE.
+            .update(
+                "SELECT job.id, job.uri, job.ids, job.flat_vectors, job.vector_dim, \
+                        job.labels, job.attempt_count \
+                 FROM pgwarc_lance.lance_outbox AS job \
+                 WHERE job.state = 'pending' \
+                   AND (pg_current_xact_id_if_assigned() IS NULL \
+                        OR job.xmin <> pg_current_xact_id_if_assigned()::xid) \
+                   AND job.available_at <= clock_timestamp() \
+                   AND NOT EXISTS ( \
+                       SELECT 1 FROM pgwarc_lance.lance_outbox AS older \
+                       WHERE older.uri = job.uri AND older.id < job.id \
+                         AND older.state <> 'completed' \
+                   ) \
+                 ORDER BY job.id \
+                 LIMIT 1 FOR UPDATE OF job SKIP LOCKED",
+                Some(1),
+                &[],
+            )
+            .unwrap_or_report();
+        if rows.is_empty() {
+            return None;
+        }
+        let row = rows.first();
+        Some(OutboxJob {
+            id: row.get_by_name::<i64, _>("id").unwrap_or_report().unwrap(),
+            uri: row
+                .get_by_name::<String, _>("uri")
+                .unwrap_or_report()
+                .unwrap(),
+            ids: row
+                .get_by_name::<Vec<i64>, _>("ids")
+                .unwrap_or_report()
+                .unwrap(),
+            flat_vectors: row
+                .get_by_name::<Vec<f32>, _>("flat_vectors")
+                .unwrap_or_report()
+                .unwrap(),
+            vector_dim: row
+                .get_by_name::<i32, _>("vector_dim")
+                .unwrap_or_report()
+                .unwrap(),
+            labels: row
+                .get_by_name::<Vec<String>, _>("labels")
+                .unwrap_or_report()
+                .unwrap(),
+            attempts: row
+                .get_by_name::<i32, _>("attempt_count")
+                .unwrap_or_report()
+                .unwrap(),
+        })
+    })
+}
+
+fn outbox_result(
+    job_id: i64,
+    status: &str,
+    applied_version: Option<i64>,
+) -> (i64, String, Option<i64>, i64) {
+    let queue_lag_ms = Spi::get_one_with_args::<i64>(
+        "SELECT GREATEST(0, floor(extract(epoch FROM \
+            (clock_timestamp() - enqueued_at)) * 1000)::bigint) \
+         FROM pgwarc_lance.lance_outbox WHERE id = $1",
+        &[DatumWithOid::from(job_id)],
+    )
+    .unwrap_or_report()
+    .unwrap_or(0);
+    (job_id, status.to_string(), applied_version, queue_lag_ms)
+}
+
+fn fail_outbox_attempt(job: &OutboxJob, error: &str) -> (i64, String, Option<i64>, i64) {
+    let attempt_count = job.attempts.saturating_add(1);
+    let state = if attempt_count >= OUTBOX_MAX_ATTEMPTS {
+        "failed"
+    } else {
+        "pending"
+    };
+    let bounded_error: String = error.chars().take(2048).collect();
+    Spi::run_with_args(
+        "UPDATE pgwarc_lance.lance_outbox \
+         SET state = $2, attempt_count = $3, last_attempt_at = clock_timestamp(), \
+             available_at = CASE WHEN $2 = 'failed' THEN available_at \
+               ELSE clock_timestamp() + make_interval(secs => \
+                 LEAST(3600, power(2, LEAST(12, $3 - 1))::integer)) END, \
+             last_error = $4 \
+         WHERE id = $1",
+        &[
+            DatumWithOid::from(job.id),
+            DatumWithOid::from(state),
+            DatumWithOid::from(attempt_count),
+            DatumWithOid::from(bounded_error.as_str()),
+        ],
+    )
+    .unwrap_or_report();
+    outbox_result(job.id, state, None)
+}
+
+/// Records a Lance mutation in the current SQL transaction. Direct writes call
+/// this before file mutation; outbox workers call it after the idempotent upsert.
+/// A rolled-back row cannot establish whether an external Lance version survived.
 fn record_write(uri: &str, operation: &str, row_count: i64) {
     Spi::run_with_args(
         "INSERT INTO pgwarc_lance.lance_write_log (uri, op, row_count) VALUES ($1, $2, $3)",
@@ -348,6 +475,62 @@ pgrx::extension_sql!(
 
     CREATE INDEX IF NOT EXISTS lance_write_log_uri_idx ON pgwarc_lance.lance_write_log (uri);
 
+    -- Vector payloads are committed atomically with BM25/WARC metadata. A
+    -- worker later applies them to Lance using retry-safe ID upserts.
+    CREATE TABLE IF NOT EXISTS pgwarc_lance.lance_outbox (
+        id             bigserial PRIMARY KEY,
+        uri            text NOT NULL,
+        ids            bigint[] NOT NULL,
+        flat_vectors   real[] NOT NULL,
+        vector_dim     integer NOT NULL CHECK (vector_dim > 0),
+        labels         text[] NOT NULL,
+        state          text NOT NULL DEFAULT 'pending'
+                       CHECK (state IN ('pending', 'processing', 'completed', 'failed')),
+        attempt_count  integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        enqueued_at    timestamptz NOT NULL DEFAULT clock_timestamp(),
+        available_at   timestamptz NOT NULL DEFAULT clock_timestamp(),
+        last_attempt_at timestamptz,
+        completed_at   timestamptz,
+        applied_version bigint,
+        last_error     text,
+        CHECK (
+            (state = 'completed' AND cardinality(ids) = 0
+             AND cardinality(flat_vectors) = 0 AND cardinality(labels) = 0)
+            OR (state <> 'completed' AND cardinality(ids) BETWEEN 1 AND 10000
+                AND cardinality(ids) = cardinality(labels)
+                AND cardinality(flat_vectors) = cardinality(ids) * vector_dim)
+        ),
+        CHECK ((state = 'completed') = (completed_at IS NOT NULL)),
+        CHECK (state <> 'completed' OR applied_version IS NOT NULL)
+    );
+
+    CREATE INDEX IF NOT EXISTS lance_outbox_uri_id_idx
+        ON pgwarc_lance.lance_outbox (uri, id);
+    CREATE INDEX IF NOT EXISTS lance_outbox_available_idx
+        ON pgwarc_lance.lance_outbox (available_at, id)
+        WHERE state = 'pending';
+
+    CREATE OR REPLACE VIEW pgwarc_lance.lance_outbox_status AS
+    SELECT uri,
+           count(*) FILTER (WHERE state = 'pending') AS pending_jobs,
+           count(*) FILTER (WHERE state = 'pending' AND available_at <= clock_timestamp()) AS ready_jobs,
+           count(*) FILTER (WHERE state = 'failed') AS failed_jobs,
+           min(enqueued_at) FILTER (WHERE state <> 'completed') AS oldest_unfinished_at,
+           COALESCE(
+               floor(extract(epoch FROM (clock_timestamp() -
+                   min(enqueued_at) FILTER (WHERE state <> 'completed'))) * 1000)::bigint,
+               0
+           ) AS oldest_unfinished_ms,
+           max(applied_version) FILTER (WHERE state = 'completed') AS latest_applied_version,
+           max(completed_at) FILTER (WHERE state = 'completed') AS last_completed_at
+    FROM pgwarc_lance.lance_outbox
+    GROUP BY uri;
+
+    CREATE OR REPLACE VIEW pgwarc_lance.lance_outbox_failures AS
+    SELECT id, uri, attempt_count, last_attempt_at, available_at, last_error
+    FROM pgwarc_lance.lance_outbox
+    WHERE state = 'failed';
+
     -- Extension member tables are otherwise omitted from pg_dump. All indexed
     -- documents, postings, archive metadata and write history are user data.
     SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.bm25_doc', '');
@@ -356,6 +539,8 @@ pgrx::extension_sql!(
     SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.warc_record', '');
     SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.lance_write_log', '');
     SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.lance_write_log_id_seq', '');
+    SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.lance_outbox', '');
+    SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.lance_outbox_id_seq', '');
     "#,
     name = "bm25_tables",
 );
@@ -370,6 +555,23 @@ pgrx::extension_sql!(
         extension_function regprocedure;
         function_count integer := 0;
     BEGIN
+        FOR extension_function IN
+            SELECT p.oid::regprocedure
+            FROM pg_proc AS p
+            JOIN pg_depend AS d
+              ON d.classid = 'pg_proc'::regclass
+             AND d.objid = p.oid
+             AND d.refclassid = 'pg_extension'::regclass
+             AND d.deptype = 'e'
+            JOIN pg_extension AS e ON e.oid = d.refobjid
+            WHERE e.extname = 'pgwarc_lance'
+              AND p.proname IN ('lance_outbox_enqueue', 'lance_outbox_process_next')
+        LOOP
+            EXECUTE format(
+                'ALTER FUNCTION %s SECURITY DEFINER SET search_path = pg_catalog, pg_temp',
+                extension_function
+            );
+        END LOOP;
         FOR extension_function IN
             SELECT p.oid::regprocedure
             FROM pg_proc AS p
@@ -495,6 +697,7 @@ fn lance_create_table(uri: &str, vector_dim: default!(i32, 3), overwrite: defaul
         require_destructive_op("lance_create_table(overwrite => true)");
     }
     lock_dataset(uri);
+    ensure_no_pending_outbox(uri);
     record_write(
         uri,
         if overwrite {
@@ -515,6 +718,7 @@ fn lance_insert(uri: &str, id: i64, vector: Vec<f32>, label: Option<String>) {
     let authorized_uri = authorize_uri(uri);
     let uri = authorized_uri.as_ref();
     lock_dataset(uri);
+    ensure_no_pending_outbox(uri);
     record_write(uri, "insert", 1);
     if let Err(e) = lance_store::insert_rows(uri, vec![id], vec![vector], vec![label]) {
         fail_operation("lance_insert", e);
@@ -534,6 +738,7 @@ fn lance_insert_many(
     let authorized_uri = authorize_uri(uri);
     let uri = authorized_uri.as_ref();
     lock_dataset(uri);
+    ensure_no_pending_outbox(uri);
     if ids.len() != labels.len() {
         fail(
             PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
@@ -581,6 +786,7 @@ fn lance_upsert_many(
     let authorized_uri = authorize_uri(uri);
     let uri = authorized_uri.as_ref();
     lock_dataset(uri);
+    ensure_no_pending_outbox(uri);
     let row_count = ids.len() as i64;
     record_write(uri, "upsert_many", row_count);
     if let Err(error) = lance_store::upsert_flat_rows(
@@ -593,6 +799,145 @@ fn lance_upsert_many(
         fail_operation("lance_upsert_many", error);
     }
     row_count
+}
+
+/// Persist a retry-safe vector upsert in PostgreSQL. This row commits or rolls
+/// back with caller metadata; no Lance file is touched in the caller's txn.
+#[pg_extern]
+fn lance_outbox_enqueue(
+    uri: &str,
+    ids: Vec<i64>,
+    flat_vectors: Vec<f32>,
+    vector_dim: i32,
+    labels: Vec<String>,
+) -> i64 {
+    let vector_dim = positive_i32(vector_dim, "vector_dim");
+    let expected_values = ids.len().checked_mul(vector_dim as usize);
+    if ids.is_empty()
+        || ids.len() > 10_000
+        || ids.len() != labels.len()
+        || expected_values != Some(flat_vectors.len())
+    {
+        fail(
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "outbox enqueue requires 1..10000 matching IDs/labels and exactly rows * vector_dim values",
+        );
+    }
+    let unique: std::collections::HashSet<i64> = ids.iter().copied().collect();
+    if unique.len() != ids.len() {
+        fail(
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "outbox enqueue requires unique document IDs",
+        );
+    }
+    require_finite_vector(&flat_vectors);
+    let authorized_uri = authorize_uri(uri);
+    let uri = authorized_uri.as_ref();
+    // Serializing enqueue transactions gives each dataset a stable committed
+    // order and prevents mixing an in-flight direct Lance write with a new job.
+    lock_dataset(uri);
+    Spi::get_one_with_args::<i64>(
+        "INSERT INTO pgwarc_lance.lance_outbox \
+         (uri, ids, flat_vectors, vector_dim, labels) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        &[
+            DatumWithOid::from(uri),
+            DatumWithOid::from(ids),
+            DatumWithOid::from(flat_vectors),
+            DatumWithOid::from(vector_dim),
+            DatumWithOid::from(labels),
+        ],
+    )
+    .unwrap_or_report()
+    .unwrap_or_else(|| {
+        fail(
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            "outbox insert returned no job ID",
+        )
+    })
+}
+
+/// Apply the oldest committed outbox event whose predecessor is complete.
+/// The event lock, Lance upsert and completion update share one SQL transaction;
+/// a crash after the Lance commit causes an idempotent replay, never a lost job.
+#[pg_extern]
+fn lance_outbox_process_next() -> TableIterator<
+    'static,
+    (
+        name!(outbox_id, i64),
+        name!(status, String),
+        name!(applied_version, Option<i64>),
+        name!(queue_lag_ms, i64),
+    ),
+> {
+    if unsafe { pg_sys::IsTransactionBlock() } {
+        fail(
+            PgSqlErrorCode::ERRCODE_ACTIVE_SQL_TRANSACTION,
+            "lance_outbox_process_next must run as a standalone statement after enqueue transactions commit",
+        );
+    }
+    let Some(job) = take_outbox_job() else {
+        return TableIterator::new(std::iter::empty::<(i64, String, Option<i64>, i64)>());
+    };
+    let uri = authorize_uri(&job.uri).into_owned();
+    // Lock the same URI used by direct writes and by other queue workers.
+    lock_dataset(&uri);
+    Spi::run_with_args(
+        "UPDATE pgwarc_lance.lance_outbox \
+         SET state = 'processing', attempt_count = attempt_count + 1, \
+             last_attempt_at = clock_timestamp() \
+         WHERE id = $1",
+        &[DatumWithOid::from(job.id)],
+    )
+    .unwrap_or_report();
+
+    match lance_store::upsert_flat_rows(
+        &uri,
+        job.ids.clone(),
+        job.flat_vectors.clone(),
+        job.vector_dim,
+        job.labels.iter().cloned().map(Some).collect(),
+    ) {
+        Ok(row_count) => match lance_store::versions(&uri) {
+            Ok(versions) => match versions.iter().map(|version| version.version).max() {
+                Some(applied_version) => {
+                    record_write(&uri, "outbox_upsert_many", row_count as i64);
+                    Spi::run_with_args(
+                        "UPDATE pgwarc_lance.lance_outbox \
+                         SET state = 'completed', completed_at = clock_timestamp(), \
+                             applied_version = $2, last_error = NULL, \
+                             ids = ARRAY[]::bigint[], flat_vectors = ARRAY[]::real[], \
+                             labels = ARRAY[]::text[] \
+                         WHERE id = $1",
+                        &[
+                            DatumWithOid::from(job.id),
+                            DatumWithOid::from(applied_version),
+                        ],
+                    )
+                    .unwrap_or_report();
+                    let result = outbox_result(job.id, "completed", Some(applied_version));
+                    TableIterator::new(std::iter::once(result))
+                }
+                None => {
+                    let result = fail_outbox_attempt(
+                        &job,
+                        "Lance returned no dataset versions after upsert",
+                    );
+                    TableIterator::new(std::iter::once(result))
+                }
+            },
+            Err(error) => {
+                let message = error.to_string();
+                let result = fail_outbox_attempt(&job, &message);
+                TableIterator::new(std::iter::once(result))
+            }
+        },
+        Err(error) => {
+            let message = error.to_string();
+            let result = fail_outbox_attempt(&job, &message);
+            TableIterator::new(std::iter::once(result))
+        }
+    }
 }
 
 #[pg_extern]
@@ -689,6 +1034,7 @@ fn lance_restore_version(uri: &str, version: i64) -> i64 {
     let uri = authorized_uri.as_ref();
     require_destructive_op("lance_restore_version");
     lock_dataset(uri);
+    ensure_no_pending_outbox(uri);
     if version < 0 {
         fail(
             PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,

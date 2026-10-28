@@ -363,6 +363,27 @@ class WarcImporterTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "must not exceed 10000"):
             warc_importer.main(["unused.warc", "--lance-uri", "/tmp/replay.lance", "--lance-mode", "upsert", "--batch-size", "10001"])
 
+    def test_outbox_cli_commits_vector_payload_for_eventual_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path, output, summary_path = root / "input.warc", root / "import.sql", root / "summary.json"
+            path.write_bytes(warc_response("https://example.test/outbox", "2026-10-01T00:00:00Z", "body"))
+            warc_importer.main([
+                str(path), "--output", str(output), "--summary-json", str(summary_path),
+                "--lance-uri", "/tmp/outbox.lance", "--lance-mode", "outbox",
+                "--vector-dim", "4", "--skip-schema",
+            ])
+            sql = output.read_text()
+            summary = json.loads(summary_path.read_text())
+            self.assertIn("lance_outbox_version_guard", sql)
+            self.assertIn("SELECT lance_outbox_enqueue(", sql)
+            self.assertNotIn("lance_upsert_many(", sql)
+            self.assertNotIn("lance_create_table(", sql)
+            self.assertEqual(summary["lance_index_consistency"], "eventual_after_commit")
+            self.assertEqual(summary["required_extension_version"], "0.1.21")
+        with self.assertRaisesRegex(SystemExit, "must not exceed 10000"):
+            warc_importer.main(["unused.warc", "--lance-uri", "/tmp/outbox.lance", "--lance-mode", "outbox", "--batch-size", "10001"])
+
     def test_declared_oversized_record_fails_before_payload_read(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "oversized.warc"

@@ -1,5 +1,92 @@
 # Development log
 
+## Issue #4 complete — current PG16 notices and SBOM (2026-10-28)
+
+- The queue selected P0 issue #4 on the clean canonical `development` branch.
+  Earlier C1/C3 work and a 0.1.20 SBOM existed, but the current 0.1.21 native
+  fingerprint differed, so that artifact could not satisfy C2. This cycle
+  rechecked all three criteria against the current source snapshot.
+- C1: strict target-filtered collection passed for 436 reachable Linux x86_64
+  Cargo packages with no missing primary texts. `random_word` 0.5.2 remains
+  replaced by the project-owned Apache-2.0-compatible 0.5.3 English-word
+  package; its word-list asset is tracked separately. `seahash` 4.1.0 uses the
+  exact verified upstream MIT text and revision, not a guessed substitute.
+- C2: source commit `e0fcbae6695c62ef740c4b852ddcbe5a8ac5c9d7`, Cargo.lock
+  SHA-256 `2c9fed1e80c4f7a1bf7acbbdf54e645632df53b991d4615c3f24e3abc158c36c`,
+  and native fingerprint
+  `b017d3cfb809584f4a1bd2ad2cd4b6fea2407d8537750fa35839d751f68e6c02` were
+  packaged with Rust 1.96.0 / cargo-pgrx 0.19.1 for PostgreSQL 16.15 on the
+  pinned Bookworm image. The locked package command passed without lock drift.
+  Artifact `.so` SHA-256 is
+  `f326f9b649c177e196768c91e08f819d8a65dc5d1bd92025c17a2d1ad20efb60`.
+  Artifact inspection, official-image fresh install, `tests/test.sql`, all four
+  `pg_regress` cases, importer DB, all 18 runtime-safety checks, populated
+  0.1.20-to-0.1.21 upgrade, and 15 backup/restore checks passed. The strict
+  notice bundle and CycloneDX 1.6 SBOM cover 436 Cargo plus five
+  native/compiler components; their SHA-256 values are recorded in
+  [THIRD_PARTY.md](../THIRD_PARTY.md).
+- C3: current `cargo-audit` 0.22.2 checked 557 packages against RustSec
+  revision `40f5be6fb12ed93fc591bf4ab23b7d793b3f2239` (1,381 advisories).
+  Vulnerabilities, unsound and yanked packages were zero, with no exceptions.
+  Three unmaintained warnings remain: `paste` 1.0.15,
+  `proc-macro-error2` 2.0.1 and `serde_cbor` 0.11.2. Vendored patch origins
+  and removal conditions remain in [vendor/README.md](../vendor/README.md).
+- The additional outbox harness passed 32 assertions but stopped at a test
+  query for `lance_outbox_status.applied_version`; the view exposes
+  `latest_applied_version`. This test result is not claimed as passed and no
+  issue #5 source or test code was changed. Initial setup attempts also exposed
+  an offline metadata cache miss, an unfiltered notice run that included five
+  non-target packages, a missing lockfile in the isolated compatibility crate,
+  inherited read-only modes in the old-artifact staging copy, and a regression
+  DB role mismatch. Each was corrected within the private run; target-filtered
+  strict notices, the isolated compatibility test and all four PG regressions
+  then passed. Detailed commands and outputs remain in the private evidence.
+- Scope is Linux x86_64 / PostgreSQL 16.15 / Bookworm. This technical package
+  validation does not grant binary redistribution or production approval.
+  Other PostgreSQL majors and legal distribution review remain open. The
+  separate publisher will review and publish the tracked source snapshot; no
+  direct push or binary publication was performed in this cycle.
+
+## Issue #5 progress — durable vector outbox (2026-10-28)
+
+- The 1.0 runner selected P0 issue #5 on the canonical `development` branch.
+  The source tree was clean at start and no other writer was active. The
+  configured model remained GPT-6 Luna with max reasoning effort.
+- The implementation adds an importer `outbox` mode that commits vector
+  payloads with WARC metadata and BM25 rows, plus a separately supervised
+  worker that applies ID-upserts after commit. Per-URI ordering, durable retry,
+  terminal failure diagnostics, queue lag and applied-version reporting,
+  restrictive worker/ingester grants and pending-job backup coverage are
+  implemented. Direct write modes retain their existing immediate-I/O boundary.
+- A locked Linux x86_64 / PostgreSQL 16.15 package was generated with Rust
+  1.96.0, cargo-pgrx 0.19.1 and the pinned PostgreSQL 16 Bookworm image.
+  Cargo.lock SHA-256 was
+  `2c9fed1e80c4f7a1bf7acbbdf54e645632df53b991d4615c3f24e3abc158c36c`; the
+  generated `.so` SHA-256 was
+  `106ea01c380bdfa0644cf18669aad8bd5af8667b029ca73fb08b87c6cf9c74fc`.
+  Before a later Rust source fix, artifact inspection, fresh install,
+  `pg_regress` setup/functions/search/security (4/4), importer DB, runtime
+  safety, and populated 0.1.20-to-0.1.21 upgrade passed. These results do not
+  validate the current source because the binary predates the SPI fix below.
+- The first actual outbox DB run verified fresh install, restricted function
+  execution, same-statement enqueue exclusion, SQL rollback, and standalone
+  transaction enforcement, then failed when the worker claimed the first
+  committed event: pgrx's read-only `SpiClient::select` rejected the
+  `FOR UPDATE SKIP LOCKED` query. Backup/restore also restored the pending
+  payload and failed at the post-restore worker application for the same reason.
+  This left delivery, crash replay, duplicate idempotence, concurrent ordering,
+  PostgreSQL restart recovery and their lag/failure/version assertions
+  unverified. The source now routes that locking query through pgrx writable
+  SPI. `cargo check --locked --offline --release --no-default-features
+  --features pg16` passed on the PG16 builder, but the corrected optimized
+  package and actual DB tests remain required.
+- C1-C3 are not complete. Rebuild and validate the corrected source, then
+  rerun fresh install, SQL regressions, importer DB, runtime safety, the full
+  outbox/crash/restart/concurrency test, backup/restore and populated upgrade.
+  The pre-fix artifact and failed attempt are retained as diagnostic evidence;
+  no 0.1.21 artifact-bound SBOM, production approval or binary redistribution
+  approval is claimed.
+
 ## Issue #3 complete — PG16 official package and SQL generation (2026-10-28)
 
 - The 1.0 runner selected P0 issue #3. This turn resumed its timed-out run on
@@ -37,6 +124,53 @@
   not verified for this package path, and binary redistribution, production
   approval, independent relevance, raw-WARC acceptance and operating SLA remain
   open. No push, binary release or deployment was performed.
+
+## Issue #4 complete — binary notices, SBOM and dependency review (2026-10-28)
+
+- The queue-selected P0 issue #4 continued from its prior source remediation.
+  Work stayed on the canonical `development` line with the configured
+  `gpt-6-luna` / `max` model. No competing writer was present.
+- C1 was rechecked against the active PG16 lock and strict target graph. The
+  project-owned Apache-2.0 `random_word` compatibility package and the exact
+  upstream MIT text for `seahash` remain checksum-verified; no guessed license
+  text was added. The prior compatibility regression and C1 review are retained
+  as evidence.
+- C2: `cargo metadata --locked --offline` and strict notice collection passed
+  for Linux x86_64 / PG16, covering 436 Cargo package records with zero missing
+  primary texts. The existing PG16 artifact was reused only after the current
+  `native_fingerprint`, Cargo.lock checksum, artifact checksum and native-test
+  receipts matched. Its `.so` SHA-256 is
+  `701e7050ca694d68d2f828fcc61928640828db49d5139e800620a5b40e896d29`; the
+  Cargo.lock SHA-256 is
+  `3869b04a56336e1de2880b5b04a18b22110aa588525ff40d656ad0073cda4550`.
+  The actual PG16 compiler/runtime inventory and checksum-verified license
+  texts were included. CycloneDX 1.6 output contains 441 components and binds
+  the artifact, lock, PG16 target, native fingerprint and notice-bundle hash.
+  The SBOM SHA-256 is
+  `58ef2bbb4313f0db1f17c6bbfb0fb22a081e72f6cec9cd93139ca9793dee7080`; the
+  bundled notices SHA-256 is
+  `df3ca0236e1a296a490cd11d02df900d7f0a50c42515d410f0112b10f78a1fa7`.
+- C3: cargo-audit 0.22.2 checked 557 packages against RustSec DB revision
+  `99670cfc0bc574433034b75876a4b791ccaa2efb` (1,380 advisories); the audited
+  DB matched upstream `main`. Vulnerabilities, unsound packages and yanked
+  packages were zero, with an empty exception list. Three unmaintained warnings
+  (`paste`, `proc-macro-error2`, `serde_cbor`) remain recorded with their exact
+  versions. Vendored patch sources and removal conditions remain documented.
+- Focused regressions passed: dependency notice collector 13/13 and SBOM
+  generator 5/5. The full Python suite (482 tests), Rust formatting, docs and
+  source checks had passed in the preceding issue #4 source-remediation run;
+  this continuation changed documentation and receipts only. Current docs
+  validation and `git diff --check` are recorded with this cycle's evidence.
+- An initial SBOM assembly used the current checkout commit instead of the
+  artifact's build source commit; that attempt was retained but excluded. The
+  final SBOM was regenerated with the artifact's verified source commit and
+  archive checksum. A native license-file alias lookup also failed once and
+  was corrected to the exact copied GPL-3 text before the final inventory.
+- Scope remains PG16.15 on Linux x86_64/Bookworm; other PostgreSQL majors,
+  GitHub Actions, independent legal redistribution review and production
+  acceptance were not completed. Binary redistribution and production approval
+  remain unapproved. GitHub synchronization is pending the external publisher;
+  no push, issue close, binary release or deployment was performed.
 
 ## Issue #3 progress checkpoint — PG16 official packaging (2026-10-27)
 

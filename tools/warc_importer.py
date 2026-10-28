@@ -42,7 +42,8 @@ DEFAULT_PSQL = (
     "psql -h localhost -p 55432 -U pgwarc_lance "
     "-d pgwarc_lance_test -v ON_ERROR_STOP=1"
 )
-LANCE_MODES = ("create", "overwrite", "append", "upsert")
+LANCE_MODES = ("create", "overwrite", "append", "upsert", "outbox")
+OUTBOX_MIN_EXTENSION_VERSION = "0.1.21"
 BM25_MODES = ("function", "bulk", "copy")
 APPEND_DUPLICATE_WARNING = (
     "lance append mode does not deduplicate by doc_id; repeated imports can "
@@ -1191,8 +1192,8 @@ def iter_sql_chunks(
         lance_mode = "overwrite" if overwrite_lance else "create"
     if lance_mode not in LANCE_MODES:
         raise ValueError(f"lance_mode must be one of: {', '.join(LANCE_MODES)}")
-    if lance_mode == "upsert" and batch_size > 10_000:
-        raise ValueError("upsert batch_size must not exceed 10000")
+    if lance_mode in {"upsert", "outbox"} and batch_size > 10_000:
+        raise ValueError(f"{lance_mode} batch_size must not exceed 10000")
     if bm25_mode not in BM25_MODES:
         raise ValueError(f"bm25_mode must be one of: {', '.join(BM25_MODES)}")
 
@@ -1220,8 +1221,14 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
     ]
     if skip_schema:
         lines = ["SET standard_conforming_strings = on;"]
+    requires_outbox = lance_mode == "outbox"
+    guards = []
     if requires_long_term_storage:
-        lines = ["BEGIN;", long_term_version_guard_sql(), *lines]
+        guards.append(long_term_version_guard_sql())
+    if requires_outbox:
+        guards.append(lance_outbox_version_guard_sql())
+    if guards:
+        lines = ["BEGIN;", *guards, *lines]
     has_lance_vectors = bool(lance_uri) and (include_hash_vectors or vectors_by_doc_id is not None)
     if lance_uri and has_lance_vectors and lance_mode in {"create", "overwrite"}:
         overwrite = "true" if lance_mode == "overwrite" else "false"
@@ -1231,7 +1238,7 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
     elif lance_uri and has_lance_vectors and lance_mode == "append":
         lines.append(f"-- WARNING: {APPEND_DUPLICATE_WARNING}.")
 
-    if requires_long_term_storage:
+    if guards:
         lines.append("COMMIT;")
 
     yield "\n".join(lines) + "\n"
@@ -1246,8 +1253,7 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
             f"records {start + 1}-{end}"
         )
         lines.append("BEGIN;")
-        if requires_long_term_storage:
-            lines.append(long_term_version_guard_sql())
+        lines.extend(guards)
         lance_ids: list[int] = []
         lance_flat_vectors: list[float] = []
         lance_labels: list[str] = []
@@ -1301,7 +1307,7 @@ INSERT INTO pgwarc_lance.warc_record (
             lines.extend(emit_bm25_copy_sql(batch_records))
         if lance_uri and lance_ids:
             lines.append(
-                f"SELECT {'lance_upsert_many' if lance_mode == 'upsert' else 'lance_insert_many'}("
+                f"SELECT {'lance_outbox_enqueue' if lance_mode == 'outbox' else 'lance_upsert_many' if lance_mode == 'upsert' else 'lance_insert_many'}("
                 f"{sql_string(lance_uri)}, {sql_bigint_array(lance_ids)}, "
                 f"{sql_vector(lance_flat_vectors)}, {vector_dim}, {sql_text_array(lance_labels)}"
                 ");"
@@ -1364,11 +1370,22 @@ def summary_data(
     oversized_records = sum(1 for count, _ in oversized if count)
     oversized_count = sum(count for count, _ in oversized)
     max_term_bytes = max((size for _, size in oversized), default=0)
+    required_versions = []
+    if oversized_count:
+        required_versions.append(LONG_TERM_STORAGE_MIN_VERSION)
+    if lance_uri and lance_mode == "outbox":
+        required_versions.append(OUTBOX_MIN_EXTENSION_VERSION)
+    required_version = max(required_versions, key=lambda value: tuple(map(int, value.split(".")))) if required_versions else None
     return {
         "records": len(records),
         "sql_bytes": len(sql.encode("utf-8")),
         "vectors": vectors,
         "lance_mode": lance_mode if lance_uri else "none",
+        "lance_index_consistency": (
+            "none" if not lance_uri else (
+                "eventual_after_commit" if lance_mode == "outbox" else "external_immediate_non_atomic"
+            )
+        ),
         "lance_append_duplicates": "possible" if append_duplicates else "none",
         "bm25_mode": bm25_mode,
         "execute": execute,
@@ -1376,7 +1393,7 @@ def summary_data(
         "oversized_ascii_term_records": oversized_records,
         "oversized_ascii_terms": oversized_count,
         "max_oversized_ascii_term_bytes": max_term_bytes,
-        "required_extension_version": LONG_TERM_STORAGE_MIN_VERSION if oversized_count else None,
+        "required_extension_version": required_version,
     }
 
 
@@ -1388,6 +1405,7 @@ def format_summary(data: dict[str, Any]) -> str:
         f"sql_bytes={data['sql_bytes']}",
         f"vectors={data['vectors']}",
         f"lance_mode={data['lance_mode']}",
+        f"lance_index_consistency={data.get('lance_index_consistency', 'external_immediate_non_atomic')}",
         f"lance_append_duplicates={data['lance_append_duplicates']}",
         f"bm25_mode={data['bm25_mode']}",
         f"execute={data['execute']}",
@@ -1481,6 +1499,26 @@ END
 $pgwarc_lance_long_term_version_guard$;"""
 
 
+def lance_outbox_version_guard_sql() -> str:
+    return """DO $pgwarc_lance_outbox_version_guard$
+DECLARE
+    installed_version text;
+BEGIN
+    SELECT extversion INTO installed_version
+    FROM pg_catalog.pg_extension
+    WHERE extname = 'pgwarc_lance';
+
+    IF installed_version IS NULL
+       OR string_to_array(installed_version, '.')::integer[] < ARRAY[0, 1, 21] THEN
+        RAISE EXCEPTION
+            'Lance outbox requires pgwarc_lance 0.1.21 or newer (found %)',
+            COALESCE(installed_version, 'not installed')
+            USING ERRCODE = '0A000';
+    END IF;
+END
+$pgwarc_lance_outbox_version_guard$;"""
+
+
 def iter_import_records(
     paths: list[Path],
     limit: int | None,
@@ -1568,8 +1606,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         choices=LANCE_MODES,
         default="create",
         help=(
-            "Lance dataset handling before vector inserts: create fails if the dataset "
-            "already exists, overwrite recreates it, append adds rows, upsert merges by doc_id in an existing dataset"
+            "Lance dataset handling: create fails if the dataset already exists, "
+            "overwrite recreates it, append adds rows, upsert merges by doc_id, "
+            "outbox commits vector jobs for lance-outbox-worker (existing dataset required)"
         ),
     )
     parser.add_argument(
@@ -1610,7 +1649,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "BM25 indexing SQL path: function calls bm25_index_document per record; "
             "bulk inserts bm25_doc/bm25_term rows per batch; "
-            "copy streams bm25_doc/bm25_term rows with psql COPY FROM stdin"
+            "copy streams bm25_doc/bm25_term rows with psql COPY FROM stdin; "
+            "outbox commits vector jobs in SQL and requires lance-outbox-worker to materialize them"
         ),
     )
     parser.add_argument("--max-record-bytes", type=int, default=DEFAULT_MAX_RECORD_BYTES,
@@ -1893,13 +1933,21 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                 "vector_rows_expected": (len(vectors) if vectors is not None else spool.db.execute("SELECT count(*) FROM records WHERE text_available=1").fetchone()[0] if args.lance_uri and not args.no_hash_vectors else 0),
                 "records": spool.count, "sql_bytes": sql_path.stat().st_size,
                 "vectors": vector_count, "lance_mode": lance_mode if args.lance_uri else "none",
+                "lance_index_consistency": (
+                    "none" if not args.lance_uri else (
+                        "eventual_after_commit" if lance_mode == "outbox" else "external_immediate_non_atomic"
+                    )
+                ),
                 "lance_append_duplicates": "possible" if args.lance_uri and lance_mode == "append" and vector_count != 0 else "none",
                 "bm25_mode": args.bm25_mode, "execute": args.execute, "psql": args.psql,
                 "oversized_ascii_term_records": spool.oversized_ascii_term_records,
                 "oversized_ascii_terms": spool.oversized_ascii_terms,
                 "max_oversized_ascii_term_bytes": spool.max_oversized_ascii_term_bytes,
-                "required_extension_version": (
-                    LONG_TERM_STORAGE_MIN_VERSION if spool.oversized_ascii_terms else None
+                "required_extension_version": max(
+                    ([LONG_TERM_STORAGE_MIN_VERSION] if spool.oversized_ascii_terms else [])
+                    + ([OUTBOX_MIN_EXTENSION_VERSION] if args.lance_uri and lance_mode == "outbox" else []),
+                    key=lambda value: tuple(map(int, value.split("."))),
+                    default=None,
                 ),
             }
             if args.summary_json:
@@ -1939,12 +1987,12 @@ def main(argv: list[str]) -> int:
         raise SystemExit("--lance-mode requires --lance-uri")
     lance_mode = args.lance_mode
     if args.overwrite_lance:
-        if args.lance_mode in {"append", "upsert"}:
-            raise SystemExit("--overwrite-lance conflicts with --lance-mode append/upsert")
+        if args.lance_mode in {"append", "upsert", "outbox"}:
+            raise SystemExit("--overwrite-lance conflicts with --lance-mode append/upsert/outbox")
         lance_mode = "overwrite"
 
-    if lance_mode == "upsert" and args.batch_size > 10_000:
-        raise SystemExit("upsert --batch-size must not exceed 10000")
+    if lance_mode in {"upsert", "outbox"} and args.batch_size > 10_000:
+        raise SystemExit(f"{lance_mode} --batch-size must not exceed 10000")
     return run_spooled_import(args, lance_mode)
 
 

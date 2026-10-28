@@ -1,12 +1,16 @@
 # Production readiness
 
 This is still a source preview. Passing unit tests is not a production approval.
-The current source candidate is 0.1.20. Its security-only native update follows
-0.1.19 with a no-DDL migration; earlier versioned examples below are historical.
-Official PG16 package generation, generated install SQL, fresh install, four SQL
-regressions, and a populated 0.1.19-to-0.1.20 upgrade were verified on
-2026-10-28. See [PACKAGING.md](PACKAGING.md) for the exact scope and checksums;
-this closes the package-generation gap only.
+The current source candidate is 0.1.21. It adds a transactionally stored vector
+outbox and standalone delivery worker; PostgreSQL and Lance do not share an
+atomic commit. The corrected .21 PG16 package, strict Cargo notices and
+CycloneDX SBOM are bound to the current native fingerprint. Fresh install, SQL
+regressions, importer/runtime checks, populated upgrade and backup/restore
+passed for Linux x86_64 / PostgreSQL 16.15. A supplemental outbox test-harness
+view-column mismatch remains open. See [PACKAGING.md](PACKAGING.md),
+[PUBLICATION.md](PUBLICATION.md) and [THIRD_PARTY.md](THIRD_PARTY.md) for the
+verified scope and unverified checks. Neither package verification nor notice
+collection grants binary redistribution or production approval.
 Install the complete consecutive upgrade chain and reconnect existing backends.
 See [PUBLICATION.md](PUBLICATION.md) for current evidence and limitations.
 The initial validation profile is PostgreSQL 16, a single instance, local Lance
@@ -27,7 +31,8 @@ Confirm the intended workload and corpus before assigning release thresholds.
 | Performance | Explicit corpus size, vector dimension, concurrency, latency targets and memory/storage limits; reproducible import/search measurements. |
 | Search memory | Bound query/output inputs and BM25 intermediate memory under common terms in a larger corpus; cancellation must leave the backend reusable. 0.1.4 moves aggregation into the PostgreSQL executor and passes a fixed 100,000-document spill/timeout/quota fixture; validate operational query memory and temp-file limits too. |
 | Backup and recovery | Coordinated PostgreSQL and Lance snapshots; restore into a clean instance and verify row counts, dataset versions and retrieval results. |
-| Release and upgrade | Immutable versioned artifact with license notices; fresh install tested from the artifact. Test an actual upgrade whenever a supported previous version exists. Existing sessions must reconnect to load the replacement shared library. |
+| Outbox consistency | Verify committed-only delivery, duplicate replay, per-URI ordering, failure blocking, event version/lag reporting and pending-queue backup recovery. |
+| Release and upgrade | PG16 candidate has a versioned artifact, checksum-bound Cargo/native/compiler notices and SBOM, fresh install, and populated upgrade evidence. Binary redistribution and production approval remain separate decisions. Test an actual upgrade whenever a supported previous version exists; reconnect sessions after replacing the shared library. |
 | Operations | Least-privilege roles, managed credentials, OS-controlled dataset root, monitoring, cancellation limits and tested incident procedures. |
 
 ## Validation commands
@@ -58,8 +63,9 @@ role. It creates temporary BM25 records and Lance datasets. SQL test data is
 cleaned up; dataset files are retained for inspection. It does not touch another
 database and must never be pointed at production. The backup test creates two
 new databases and a temporary reader role, then removes them. It verifies all
-four SQL data tables, the write-log sequence, BM25 results, Lance contents and
-versions, and selective function grants after restoring within the same cluster.
+extension configuration tables/sequences, pending outbox payload restoration,
+BM25 results, Lance contents and versions, and selective function grants after
+restoring within the same cluster.
 The extracted-artifact corruption test creates two separate PostgreSQL containers
 with no network, published ports or host data mounts. It restores role definitions
 from a separate backup into the second cluster, verifies grants and database
@@ -182,10 +188,10 @@ candidate is not production approved.
 
 PostgreSQL backups do not contain Lance files. Treat the SQL dump and the entire
 dataset directories as one backup set, including their version manifests and
-data files. The extension registers its four SQL tables and write-log sequence
+data files. Version 0.1.21 registers six extension tables and two sequences
 with `pg_extension_config_dump`; ordinary `pg_dump` includes their contents.
 
-1. Stop new imports and all SQL/external Lance writers. Wait for active write
+1. Stop new imports, all outbox workers, and all SQL/external Lance writers. Wait for active write
    transactions and file operations to finish. Keep writers stopped until both
    snapshots are complete.
 2. Record the extension version, PostgreSQL major, dataset URIs and
@@ -205,7 +211,7 @@ with `pg_extension_config_dump`; ordinary `pg_dump` includes their contents.
    destructive-operation policies on new connections. Use the original URIs, or explicitly
    update every application/configuration reference when relocating them; the
    historical write log continues to contain the original URIs.
-5. Verify SQL row counts, sequence state, BM25 results, Lance row counts and
+5. Verify SQL row counts, outbox state, sequence state, BM25 results, Lance row counts and
    versions, backup file hashes, representative vector/hybrid results, and
    reader/writer grants. Exercise a controlled write to verify restored file ownership.
    Enable application traffic only after these checks pass.
@@ -216,13 +222,21 @@ dump alone is insufficient to recover the vector store.
 
 ## Transaction and storage contract
 
-Lance commits are separate from PostgreSQL commits. A SQL rollback, statement
+The direct Lance functions and importer `create`, `overwrite`, `append` and
+`upsert` modes mutate files separately from PostgreSQL. A SQL rollback, statement
 cancellation, backend termination or a subsequent SQL error can leave a newer
-Lance version while the SQL transaction rolls back. Until coordinated recovery
-has been exercised on representative data, this behavior remains a release
-gate, not an atomicity guarantee.
+Lance version while the SQL transaction rolls back. Use importer `outbox` mode
+when the SQL-side queue must commit with metadata and BM25. That mode delays
+vector visibility until a separate worker applies the committed event; if the
+Lance upsert succeeds but the PostgreSQL acknowledgment rolls back, the event is
+retried by ID. This is at-least-once delivery and eventual consistency, not a
+distributed atomic commit. Unfinished events block later events for that URI and
+direct writers cannot overtake them. Check completion and `applied_version`
+before relying on vector read-after-write. The behavior remains a production
+gate until these checks are repeated with representative workload and recovery
+conditions.
 
-The SQL write log is inserted before file mutation so a permission or sequence
+The direct SQL write log is inserted before file mutation so a permission or sequence
 error cannot first mutate the dataset. A rolled-back SQL log entry disappears;
 therefore absence of a log entry does not prove absence of a Lance write.
 Restore to a known dataset version only after stopping all writers and verifying

@@ -591,6 +591,11 @@ audit-dependencies:
 test-storage-faults:
 	python3 tests/db_storage_faults.py --dist-dir "$(DIST_DIR)" --version "$(EXT_VERSION)" --postgres-image "$(ARTIFACT_SMOKE_IMAGE)"
 
+.PHONY: test-outbox
+# Requires extracted PG16 release artifacts. Verifies durable outbox delivery in an isolated container.
+test-outbox:
+	python3 tests/db_outbox.py --dist-dir "$(DIST_DIR)" --version "$(EXT_VERSION)" --postgres-image "$(ARTIFACT_SMOKE_IMAGE)"
+
 .PHONY: test-search-memory
 test-search-memory:
 	python3 tests/db_search_memory.py
