@@ -1,5 +1,53 @@
 # Development log
 
+## Issue #6 progress — read-only PG–Lance doctor baseline (2026-10-29)
+
+- The issue queue selected P0 issue #6 after issue #5's published outbox
+  prerequisite. Work continued on the clean canonical `development` branch
+  with `gpt-6-luna` / `max`; the project-local model settings were unchanged.
+- Local implementation commit: `5827b0d315605baacfe463b3cf6e3662d94538a7`.
+- Added `tools/doctor_pg_lance.py`, which reads PG state in a repeatable-read,
+  read-only transaction and inventories Lance through one scan. It reports
+  duplicate Lance IDs, PG documents without a vector candidate, Lance IDs
+  absent from the extension tables, WARC-label mismatches, and pending/failed
+  outbox jobs. It performs no repair and states when the row limit truncates
+  the inventory. The README describes the command and limits.
+- PostgreSQL 16.15 isolated-container validation passed 76 assertions with the
+  retained 0.1.21 artifact (`.so` SHA-256
+  `f326f9b649c177e196768c91e08f819d8a65dc5d1bd92025c17a2d1ad20efb60`,
+  Cargo.lock SHA-256
+  `2c9fed1e80c4f7a1bf7acbbdf54e645632df53b991d4615c3f24e3abc158c36c`, native
+  fingerprint
+  `b017d3cfb809584f4a1bd2ad2cd4b6fea2407d8537750fa35839d751f68e6c02`). The
+  new DB fixture detected duplicate, missing-candidate, orphan, stale-label and
+  pending-outbox cases. Dataset row count/version, outbox count and write-log
+  count were unchanged across the doctor call. No native source changed, so the
+  existing PG16 receipt was reused; no new native receipt was fabricated.
+- The first test run exposed that pending outbox rows were counted as missing
+  vectors. A later run exposed that the test's pending job remained queued and
+  blocked the following concurrency scenario. The doctor now excludes known
+  pending IDs from missing candidates, and the disposable test drains its job
+  only after its before/after read-only assertion. The final DB harness passed.
+- Exit codes distinguish observed findings, inventory truncation, execution
+  errors and an apparently mismatch-free scan that still cannot prove complete
+  reconciliation; the report also keeps `reconciliation_complete=false`.
+- Verification: `python3 -B -m unittest discover -s tests -p 'test_*.py'`
+  passed 492 tests; `python3 tools/check_docs.py` passed; the focused doctor
+  unit tests passed 4/4. The DB harness `test_harness_sha256` is recorded with
+  the private run result. The scoped change is Python and documentation only.
+- C1-C3 remain incomplete. Current PG document rows are not durably associated
+  with a Lance URI, completed outbox payloads are cleared, and Lance rows do
+  not retain a document revision. Therefore the doctor can only report
+  unscoped missing-vector candidates and label mismatches; it cannot verify an
+  exact stale vector revision. Cross-store reads also have no shared atomic
+  snapshot, so writers must be paused for a meaningful reconciliation window.
+  `reconciliation_complete` remains false; no dry-run repair or explicit
+  recovery command is claimed.
+- Next issue #6 work: persist a URI/document/revision mapping and applied
+  revision without changing search labels, define update ordering across
+  duplicate/concurrent writes, then verify dry-run and explicitly requested
+  repair after an injected partial failure in isolated PG16.
+
 ## Issue #5 complete — durable vector outbox verification (2026-10-29)
 
 - The selected P0 issue's C1-C3 criteria were rechecked against the current

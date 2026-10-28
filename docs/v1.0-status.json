@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-28T16:42:55.934835+00:00",
+  "updated_at": "2026-10-28T22:45:01.771204+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -60,6 +60,7 @@
       ],
       "status": "done",
       "summary": "PG16.15 검증에서 durable outbox의 rollback·커밋 후 반영·버전/지연/실패 관측·동시 worker·종료 후 재생과 중복 전달 안전성을 확인했다. Python 회귀 488개와 문서 검사도 통과했다.",
+      "public_commit": "721bb7ad31fc4847c3be3c537d71079d7a3e2e1d",
       "criteria_passed": [
         "C1",
         "C2",
@@ -74,7 +75,8 @@
       "depends_on": [
         5
       ],
-      "status": "queued",
+      "status": "in_progress",
+      "summary": "PG16 격리 DB에서 read-only 대사 진단과 비변경 동작을 검증했다. URI별 document revision을 보존하는 저장 구조와 명시적 복구 경로가 없어 C1–C3는 계속 진행 중이다.",
       "criteria_passed": []
     },
     {

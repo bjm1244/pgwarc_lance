@@ -83,6 +83,7 @@ pgwarc_lance/
 │   ├── check_docs.py           # 문서 링크와 하네스 drift 검증
 │   ├── preflight_quality_inputs.py # WARC/query/qrels와 real-corpus manifest read-only preflight
 │   ├── audit_bm25_index.py    # 저장 본문과 BM25 posting read-only 일관성 검사
+│   ├── doctor_pg_lance.py     # PostgreSQL/Lance ID·metadata·outbox read-only 대사
 │   ├── audit_warc_import.py   # raw WARC import accounting과 fingerprint manifest
 │   └── warc_importer.py       # WARC/WARC.GZ -> metadata/BM25/Lance SQL importer
 ├── src/
@@ -94,6 +95,7 @@ pgwarc_lance/
 └── tests/
     ├── test.sql               # smoke 테스트 (라이브 컨테이너 대상)
     ├── test_audit_bm25_index.py # BM25 content/posting audit 단위 테스트
+    ├── test_doctor_pg_lance.py # PG–Lance doctor 분류 회귀
     ├── test_warc_importer.py  # Python WARC importer 단위 테스트
     ├── test_lance_outbox_worker.py # outbox worker 단위 테스트
     ├── db_outbox.py           # PG16 committed-only/restart outbox 통합 테스트
@@ -178,6 +180,37 @@ Lance dataset은 PostgreSQL이 관리하지 않는 파일이다. 기본 direct �
 - direct Lance API는 즉시 쓰기 의미를 유지한다. 같은 URI에 미완료 outbox 이벤트가 있으면 direct write/restore는 거부되어 두 writer 경로가 순서를 바꾸지 못하게 한다. 한 dataset에서 outbox worker와 외부 Lance writer를 동시에 운용하지 않는다.
 - outbox 상태와 payload는 extension configuration data로 `pg_dump` 대상이다. backup 시 importer와 worker를 함께 멈추고 queue가 비었는지 확인한다. pending 작업을 보존한 snapshot은 SQL과 그 시점의 Lance directory를 함께 복구한 뒤 worker를 재개해야 한다.
 - outbox를 사용하지 않는 direct write의 rollback/취소 보상은 `lance_dataset_versions()`와 `lance_restore_version()`으로 관리한다. 이 경우 `lance_write_log` 부재가 외부 파일 쓰기 부재를 증명하지 않는다.
+
+### PG–Lance read-only doctor (Issue #6 progress)
+
+`tools/doctor_pg_lance.py`는 PostgreSQL read-only transaction에서 BM25/WARC ID,
+Lance ID/label, 미완료 outbox를 대사한다. 중복 Lance ID, WARC 문서 중 벡터 누락
+후보, PG에 없는 Lance ID, WARC metadata와 다른 label, 대기/실패 outbox를 보고한다.
+`--max-rows`는 기본 100,000행이고 250,000행을 넘길 수 없다. Lance scan은 벡터 배열을
+backend에서 물질화하므로 행 제한을 넘긴 corpus는 `incomplete`로 보고하고 합격 판정을
+내리지 않는다. 전체 corpus 대규모 대사에는 paged scanner가 필요하다.
+
+현재 PG metadata/BM25 행은 Lance URI와 영구 연결되지 않고, Lance row에는 document
+revision이 저장되지 않으며 완료 outbox payload는 비워진다. 따라서 doctor는 PG의
+`doc_id`, payload digest, BM25 content checksum에서 source-side fingerprint만 만들며
+완료된 Lance vector의 정확한 revision/내용상 stale 여부는 확인하지 못한다. label 불일치는
+stale metadata 후보일 뿐이고, 벡터 누락은 URI 소속이나 vector 생성을 끈 적재와 구분할 수
+없는 후보이다. `reconciliation_complete`는 이 구조적 한계 때문에 항상 `false`다. 이 도구는
+read-only 점검이며 자동 복구 명령을 제공하지 않는다.
+Exit code `0`은 관측 mismatch가 없다는 뜻이지 대사 완료가 아니다. `1`은 관측된
+mismatch, `2`는 조회 실패, `3`은 row limit 초과, `4`는 관측 mismatch는 없지만 구조적
+검증 한계가 남았음을 뜻한다.
+
+PostgreSQL 조회는 `REPEATABLE READ READ ONLY`, Lance 조회는 단일 dataset scan으로
+고정하지만 두 시스템 사이의 원자적 snapshot은 아니다. 운영 중 writer가 돌고 있으면
+결과가 한 시점의 cross-store 상태를 뜻하지 않으므로 importer/worker와 외부 Lance writer를
+멈춘 점검 창에서 실행해야 한다.
+
+```bash
+python3 tools/doctor_pg_lance.py --uri "$LANCE_URI" \
+    --psql "$READ_ONLY_PSQL" --max-rows 100000 \
+    > "$PRIVATE_EVIDENCE_DIR/pg-lance-doctor.json"
+```
 
 ### 보안/운영 설정 (GUC)
 

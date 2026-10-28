@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import check_release_artifacts
+import doctor_pg_lance
 import smoke_release_artifacts
 import warc_importer
 
@@ -53,6 +54,7 @@ def main() -> int:
     cte_uri = f"/tmp/pgwarc_outbox_cte_{suffix}.lance"
     bad_uri = f"/tmp/pgwarc_outbox_bad_{suffix}.lance"
     concurrent_uri = f"/tmp/pgwarc_outbox_concurrent_{suffix}.lance"
+    doctor_uri = f"/tmp/pgwarc_doctor_{suffix}.lance"
     report: dict[str, object] = {
         "status": "running",
         "container": container,
@@ -362,6 +364,75 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
         expect(failure, f"{failed_id}|failed|null", "lance_failure_is_not_completed")
         expect(sql(f"SELECT state||'|'||(last_error IS NOT NULL)::text||'|'||(completed_at IS NULL)::text FROM pgwarc_lance.lance_outbox WHERE id={failed_id};"), "failed|true|true", "failure_reason_and_noncompletion_persist")
         expect(sql(f"SELECT pending_jobs||'|'||failed_jobs FROM pgwarc_lance.lance_outbox_status WHERE uri='{bad_uri}';"), "0|1", "terminal_failure_visible_to_operator")
+
+        # The read-only doctor inspects a disposable mixed-state dataset. It
+        # reports observable row mismatches and an unfinished job without
+        # acknowledging the job, adding a Lance version, or changing write logs.
+        sql(f"SELECT lance_create_table('{doctor_uri}',2,false);")
+        sql("""
+            INSERT INTO pgwarc_lance.warc_record
+                (doc_id,target_uri,payload_digest,text_len)
+            VALUES
+                (-851001,'https://example.test/doctor/ok','sha1:ok',5),
+                (-851002,'https://example.test/doctor/metadata-only','sha1:metadata',0),
+                (-851003,'https://example.test/doctor/missing','sha1:missing',7),
+                (-851004,'https://example.test/doctor/stale','sha1:stale',4),
+                (-851005,'https://example.test/doctor/pending','sha1:pending',6);
+            SELECT bm25_index_document(-851001,'doctor expected content');
+            SELECT bm25_index_document(-851002,'');
+            SELECT bm25_index_document(-851003,'missing vector content');
+            SELECT bm25_index_document(-851004,'stale label content');
+            SELECT bm25_index_document(-851005,'pending vector content');
+        """)
+        sql(
+            f"SELECT lance_insert_many('{doctor_uri}',ARRAY[-851001,-851004,-851006]::bigint[],"
+            "ARRAY[1,0,0,1,1,1]::real[],2,"
+            "ARRAY['https://example.test/doctor/ok','https://example.test/doctor/old','orphan']::text[]);"
+        )
+        sql(
+            f"SELECT lance_insert('{doctor_uri}',-851006,ARRAY[2,2]::real[],'duplicate orphan'); "
+            f"SELECT lance_outbox_enqueue('{doctor_uri}',ARRAY[-851005]::bigint[],"
+            "ARRAY[3,3]::real[],2,ARRAY['https://example.test/doctor/pending']::text[]);"
+        )
+        doctor_before = sql(
+            f"SELECT lance_count('{doctor_uri}')||'|'||"
+            f"(SELECT count(*) FROM lance_dataset_versions('{doctor_uri}'))||'|'||"
+            f"(SELECT count(*) FROM pgwarc_lance.lance_outbox WHERE uri='{doctor_uri}')||'|'||"
+            f"(SELECT count(*) FROM pgwarc_lance.lance_write_log WHERE uri='{doctor_uri}');"
+        )
+        doctor = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parents[1] / "tools" / "doctor_pg_lance.py"),
+             "--uri", doctor_uri, "--psql", shlex.join(sql_command), "--max-rows", "20"],
+            text=True, capture_output=True, timeout=90,
+        )
+        if doctor.returncode != 1:
+            raise AssertionError(f"read-only doctor failed: {doctor.stderr[-2000:]}")
+        doctor_report = json.loads(doctor.stdout)
+        report["doctor_report"] = doctor_report
+        expect(str(doctor.returncode), "1", "doctor_exit_code_reports_observed_findings")
+        expect(doctor_report["status"], "findings", "doctor_reports_reconciliation_findings")
+        expect(str(doctor_report["read_only"]), "True", "doctor_marks_read_only_mode")
+        expect(str(doctor_report["findings"]["duplicate_lance_ids"]), "1", "doctor_detects_duplicate_lance_id")
+        expect(str(doctor_report["findings"]["missing_vector_candidates"]), "2", "doctor_detects_missing_vector_candidates")
+        expect(str(doctor_report["findings"]["orphan_lance_ids"]), "1", "doctor_detects_orphan_lance_id")
+        expect(str(doctor_report["findings"]["stale_label_ids"]), "1", "doctor_detects_stale_metadata_label")
+        expect(str(doctor_report["findings"]["unfinished_outbox_jobs"]), "1", "doctor_detects_unfinished_outbox")
+        expect(str(doctor_report["findings"]["unfinished_outbox_document_ids"]), "1", "doctor_counts_pending_document_ids")
+        expect(str(doctor_report["reconciliation_complete"]), "False", "doctor_does_not_claim_complete_reconciliation")
+        expect(str(doctor_report["revision_check"]["postgres_documents_scoped_to_lance_uri"]), "False", "doctor_discloses_missing_uri_mapping")
+        expect(str(doctor_report["revision_check"]["lance_revision_persisted"]), "False", "doctor_discloses_missing_lance_revision")
+        expect(str(doctor_report["snapshot"]["cross_store_atomic_snapshot"]), "False", "doctor_discloses_cross_store_snapshot_limit")
+        doctor_after = sql(
+            f"SELECT lance_count('{doctor_uri}')||'|'||"
+            f"(SELECT count(*) FROM lance_dataset_versions('{doctor_uri}'))||'|'||"
+            f"(SELECT count(*) FROM pgwarc_lance.lance_outbox WHERE uri='{doctor_uri}')||'|'||"
+            f"(SELECT count(*) FROM pgwarc_lance.lance_write_log WHERE uri='{doctor_uri}');"
+        )
+        expect(doctor_after, doctor_before, "doctor_does_not_mutate_pg_or_lance")
+        doctor_drain = worker_once()
+        if doctor_drain is None:
+            raise AssertionError("doctor fixture outbox job was not available for cleanup")
+        expect(str(doctor_drain["status"]), "completed", "doctor_fixture_outbox_cleaned_after_read_only_assertion")
 
         # Two concurrent workers cannot overtake a locked predecessor for the
         # same URI. The first worker commits after a controlled SQL sleep.
