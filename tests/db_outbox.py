@@ -293,6 +293,9 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
 
         # Exercise the actual importer write path: SQL/BM25/WARC commit first,
         # then the worker applies the vector and records its exact Lance version.
+        write_log_before = int(sql(
+            f"SELECT count(*) FROM pgwarc_lance.lance_write_log WHERE uri='{uri}' AND op='outbox_upsert_many';"
+        ))
         warc_uri = f"https://example.test/outbox/{suffix}"
         with tempfile.TemporaryDirectory(prefix="pgwarc-outbox-fixture-") as tmp:
             warc_path = Path(tmp) / "fixture.warc"
@@ -337,11 +340,15 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
         expect(sql(f"SELECT id||'|'||label FROM lance_scan('{uri}',10) WHERE id={doc_id};"), f"{doc_id}|{warc_uri}", "vector_visible_after_outbox_completion")
         bm25_after = sql(f"SELECT string_agg(doc_id::text||':'||score::text,',' ORDER BY doc_id) FROM bm25_search('outbox',10) WHERE doc_id={doc_id};")
         expect(bm25_after, bm25_before, "same_fixture_bm25_fingerprint_unchanged_after_vector_delivery")
-        expect(sql(f"SELECT max(applied_version)||'|'||max(last_completed_at IS NOT NULL)::text FROM pgwarc_lance.lance_outbox_status WHERE uri='{uri}';"), f"{version}|true", "dataset_status_reports_version_and_completion")
+        expect(sql(f"SELECT max(latest_applied_version)||'|'||bool_or(last_completed_at IS NOT NULL)::text FROM pgwarc_lance.lance_outbox_status WHERE uri='{uri}';"), f"{version}|true", "dataset_status_reports_version_and_completion")
         if int(delivery["queue_lag_ms"]) < 25:
             raise AssertionError("worker queue delay did not include the controlled enqueue wait")
         checks["worker_reports_queue_delay"] = True
-        expect(sql(f"SELECT count(*) FROM pgwarc_lance.lance_write_log WHERE uri='{uri}' AND op='outbox_upsert_many';"), "1", "successful_delivery_logged")
+        expect(
+            sql(f"SELECT count(*) FROM pgwarc_lance.lance_write_log WHERE uri='{uri}' AND op='outbox_upsert_many';"),
+            str(write_log_before + 1),
+            "successful_delivery_logged",
+        )
 
         # Dimension mismatch is a real Lance-side failure: the worker records it,
         # never marks it complete, and exposes it in the status view.

@@ -1,5 +1,37 @@
 # Development log
 
+## Issue #5 complete — durable vector outbox verification (2026-10-29)
+
+- The selected P0 issue's C1-C3 criteria were rechecked against the current
+  source. The native fingerprint and Cargo.lock hash match the retained PG16
+  receipt and artifact, so no native package rebuild was needed. The immutable
+  Linux x86_64 / PostgreSQL 16.15 `.so` SHA-256 is
+  `f326f9b649c177e196768c91e08f819d8a65dc5d1bd92025c17a2d1ad20efb60`.
+- C1: the importer stores metadata, BM25 and vector payload in one SQL
+  transaction; rollback and an injected importer outbox-insert failure left no
+  Lance write or partial SQL rows. Existing README and operations guidance
+  state the separate Lance commit boundary and post-commit eventual consistency.
+- C2: the actual PG16 integration run passed committed-only delivery,
+  same-URI worker ordering, backend termination before SQL acknowledgment,
+  idempotent duplicate replay, durable PostgreSQL restart and pending-job
+  restoration. No event was incorrectly marked complete or lost in these
+  checks.
+- C3: pending/failure counts, queue delay, applied Lance version, completion
+  timestamp, failure reason and read-after-write visibility passed. BM25 was
+  queryable before vector delivery; vector search observed the vector after
+  the event completed. The run exercised two workers and a PostgreSQL crash in
+  an isolated PG16.15 container using disposable fixtures.
+- The first test attempts exposed stale view-column/aggregate assumptions and
+  an assertion that ignored an earlier same-URI delivery. The test harness was
+  corrected to use `latest_applied_version`, `bool_or`, and a before/after
+  write-log count. The full outbox integration command then passed. All 488
+  Python `test_*.py` tests and the documentation check passed.
+- Evidence for this cycle is stored outside the public source tree. No
+  production workload, other PostgreSQL major, multi-host Lance coordination,
+  binary redistribution or production approval was evaluated. Native receipt
+  evidence remains bound to the matching artifact; the separate publisher
+  still controls public GitHub fast-forward publication.
+
 ## Issue #4 complete — current PG16 notices and SBOM (2026-10-28)
 
 - The queue selected P0 issue #4 on the clean canonical `development` branch.

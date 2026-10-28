@@ -1,4 +1,4 @@
-# Source publication review — updated 2026-10-28
+# Source publication review — updated 2026-10-29
 
 ## Current source and distribution review: 0.1.21 (2026-10-28)
 
@@ -12,10 +12,9 @@ four SQL regressions, importer DB, runtime safety, populated 0.1.20-to-0.1.21
 upgrade and backup/restore passed. Hashes and the limited target are in
 [THIRD_PARTY.md](THIRD_PARTY.md) and [PACKAGING.md](PACKAGING.md).
 
-An extra outbox harness run stopped on a test query for a view column named
-`applied_version`; the generated status view uses `latest_applied_version`.
-This supplemental harness failure is retained as a follow-up and was not
-counted as a passing result or changed outside the selected issue scope.
+An earlier supplemental outbox harness run stopped on stale status-view query
+assumptions. Issue #5's follow-up below corrected the test queries and passed
+the full isolated PG16 delivery/recovery integration run.
 Packaging evidence does not approve binary redistribution or production use.
 Public source publication remains subject to the separate reviewed publisher.
 
@@ -511,7 +510,7 @@ autovacuum coverage or sustained production workload was validated. Binary
 notice review remains open; this source-preview candidate is not production
 approved, and GitHub `main` remains unchanged.
 
-## 2026-10-28 — 0.1.21 outbox validation remains open
+## 2026-10-28 — 0.1.21 outbox validation checkpoint
 
 The current source candidate adds a PostgreSQL transactional vector outbox and
 a supervised delivery worker. A PG16.15 package built before the final SPI
@@ -520,8 +519,29 @@ the importer DB and runtime-safety fixtures, and a populated 0.1.20-to-0.1.21
 upgrade. Its outbox worker could not claim a committed event because a locking
 query went through pgrx's read-only SPI path; the backup-restore worker check
 failed at the same point. The source has been corrected to use writable SPI,
-but the pre-correction binary is not evidence for that source. The corrected
-package, delivery/crash/replay/concurrency tests, backup-restore and populated
-upgrade still need to pass before the 0.1.21 native validation gate can pass.
-The 0.1.20 notice and SBOM evidence does not cover 0.1.21. This candidate is
-not production approved, and public GitHub `main` remains unchanged.
+but the earlier binary and failing attempt did not close issue #5. The next
+section records the later outbox-specific follow-up. The candidate remains a
+source preview; technical package evidence is not production approval.
+
+## 2026-10-29 — issue #5 outbox delivery and recovery verified
+
+The current native fingerprint is unchanged from the existing 0.1.21 PG16
+receipt, so the exact immutable Linux x86_64 / PostgreSQL 16.15 artifact was
+reused rather than rebuilt. Its `.so` SHA-256 is
+`f326f9b649c177e196768c91e08f819d8a65dc5d1bd92025c17a2d1ad20efb60`; the
+Cargo.lock SHA-256 remains
+`2c9fed1e80c4f7a1bf7acbbdf54e645632df53b991d4615c3f24e3abc158c36c`.
+The isolated PostgreSQL 16.15 integration run passed the importer rollback,
+committed-only delivery, applied-version and queue-lag reporting, failure
+visibility, same-URI ordering, backend termination replay, duplicate
+idempotence and PostgreSQL crash/restart checks. BM25 remained visible before
+vector delivery, and the vector became visible after the committed event was
+acknowledged. The test-only status query and write-log baseline assumptions
+were corrected after actual PG16 errors exposed them; no native source change
+was needed.
+
+This verifies the outbox contract on the tested Linux x86_64 / PostgreSQL
+16.15 target with disposable test fixtures. It does not establish performance
+under production load, multi-host Lance coordination, other PostgreSQL majors,
+binary redistribution rights or production approval. GitHub `main` remains
+unchanged until the separate publisher reviews and fast-forwards the source.

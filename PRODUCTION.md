@@ -6,8 +6,9 @@ outbox and standalone delivery worker; PostgreSQL and Lance do not share an
 atomic commit. The corrected .21 PG16 package, strict Cargo notices and
 CycloneDX SBOM are bound to the current native fingerprint. Fresh install, SQL
 regressions, importer/runtime checks, populated upgrade and backup/restore
-passed for Linux x86_64 / PostgreSQL 16.15. A supplemental outbox test-harness
-view-column mismatch remains open. See [PACKAGING.md](PACKAGING.md),
+passed for Linux x86_64 / PostgreSQL 16.15. The issue #5 outbox integration
+run also passed commit/rollback, delivery, replay, concurrency and PostgreSQL
+restart checks against that matching artifact. See [PACKAGING.md](PACKAGING.md),
 [PUBLICATION.md](PUBLICATION.md) and [THIRD_PARTY.md](THIRD_PARTY.md) for the
 verified scope and unverified checks. Neither package verification nor notice
 collection grants binary redistribution or production approval.

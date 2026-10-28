@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-28T11:19:41.444146+00:00",
+  "updated_at": "2026-10-28T16:42:55.934835+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -42,6 +42,7 @@
       "depends_on": [],
       "status": "done",
       "summary": "0.1.21 Linux x86_64/PG16.15 artifact의 436개 Cargo 고지와 native/compiler 고지·CycloneDX SBOM을 lock/artifact checksum에 결합하고 strict notice 수집, RustSec 점검, 실제 PG16 패키지 검증을 마쳤다. 바이너리 재배포와 프로덕션 승인은 포함하지 않는다.",
+      "public_commit": "5413dd0a57223d2f844847a70360df293a95d70c",
       "criteria_passed": [
         "C1",
         "C2",
@@ -57,9 +58,13 @@
         2,
         3
       ],
-      "status": "blocked",
-      "summary": "0.1.21 transactional vector outbox and worker were implemented. PG16 install, SQL regressions, importer/runtime checks, and a populated 0.1.20 to 0.1.21 upgrade passed on the initial package. The actual worker test exposed a read-only SPI locking-query failure; the source was corrected and a locked PG16 compile check passed, while full package and database validation remain.",
-      "criteria_passed": []
+      "status": "done",
+      "summary": "PG16.15 검증에서 durable outbox의 rollback·커밋 후 반영·버전/지연/실패 관측·동시 worker·종료 후 재생과 중복 전달 안전성을 확인했다. Python 회귀 488개와 문서 검사도 통과했다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
     },
     {
       "number": 6,
