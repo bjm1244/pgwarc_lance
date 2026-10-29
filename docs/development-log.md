@@ -1,5 +1,57 @@
 # Development log
 
+## Issue #7 — resumable WARC import checkpoints (complete, 2026-10-29)
+
+- The runner selected P0 issue #7 after prerequisites #2, #5 and #6. Work stayed
+  on the canonical `development` branch with the project-local `gpt-6-luna` /
+  `max` setting unchanged. The importer now has opt-in `--checkpoint-db` mode
+  backed by a private SQLite ledger. It binds each lineage to the source SHA,
+  importer code and import settings, records archive ordinals, per-record
+  extraction/vector/PostgreSQL state and import-run state, binds execution to a
+  hashed PostgreSQL target, and holds a single-writer file lock. SQLite page
+  count, cache, record, batch and estimated working-set limits are enforced.
+- Failed extraction and embedding records remain visible and retry separately.
+  PostgreSQL batches use error-stop and durable in-flight state; a batch with an
+  uncertain commit is replayed through document upsert. Vector checkpointing
+  requires Lance `upsert` or `outbox`. Gzip is scanned from byte zero to the
+  saved ordinal because the stream cannot seek directly to a compressed record.
+  The operations docs explain checkpoint privacy and the fact that embedding
+  command identity does not reveal a remote model revision.
+- The isolated PostgreSQL 16.15 run used the retained 0.1.22 extension artifact
+  and the read-only Common Crawl file
+  `CC-MAIN-20260904131603-20260904161603-00000.warc.gz` (938,695,574 bytes;
+  SHA-256 `4b6b55dc25afdb8ef9bb0e48213faa73cf07756f195b0863ba2693638bf784f8`).
+  With the final importer bytes and a fresh checkpoint, a 251-document prefix
+  accounted for 789 raw records: 251 imported, 531 policy-skipped and 7
+  explicit conversion failures. The worker received SIGKILL after a SQL batch
+  committed, leaving its run `running`, with 100 PostgreSQL rows in-flight and
+  151 pending. Resume marked the old run `interrupted`, completed all 251 unique
+  WARC/BM25 rows and produced record fingerprint
+  `722538edf0ed89a79ef5e428508cc5dbf7e5ff7bda050cf2f5e65f51d365b909` under
+  the same configuration checksum. Repeating that file/configuration emitted
+  zero SQL batches; WARC rows, BM25 documents and 86,226 posting rows stayed
+  fixed. Only the seven failed records were retried. They remained explicit, so
+  summaries correctly stayed `partial`; no failed record was silently
+  discarded. The archive prefix and its checksum-bound state are not a full-file
+  completion claim.
+- Resource evidence for the exact final-byte kill/resume/repeat: SQLite
+  checkpoint high-water 3,350,528 bytes under the 1 GiB hard cap, rollback
+  journal 49,760 bytes, sampled importer RSS 42,248 KiB at kill and 47,716 KiB
+  peak during resume, and sampled PostgreSQL container memory 95,493,816 bytes
+  under its 2 GiB limit. The configured working-set estimate was 236,997,376
+  bytes under the 256 MiB estimate cap; this is not an OS RSS quota. PostgreSQL
+  temporary files/bytes both remained zero. A focused regression verifies that
+  SQLite refuses growth beyond the configured page limit.
+- Verification passed: 89 importer-focused tests, all 504 `test_*.py` tests,
+  `make check-docs` and `git diff --check`. No native input changed, so the
+  existing PG16 native-validation receipt was reused. Full-archive import,
+  real-input vectors/Lance delivery, production operation and release approval
+  were not tested. The validated bounded prefix does not claim full-segment
+  completion.
+- The validated change is committed locally on `development`. GitHub publication
+  remains with the separate reviewed publisher; no direct push or issue closure
+  was performed.
+
 ## Issue #6 — revision reconciliation, idempotent updates and recovery (2026-10-29)
 
 - The selected P0 issue #6 was completed on the canonical `development` line;

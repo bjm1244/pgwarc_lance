@@ -129,6 +129,38 @@ Lance rows acquire a nullable `revision` column on their first upsert, and stay
 unversioned until such an update. Do not grant the writer direct access to
 `lance_document_revision`; the security-definer enqueue function maintains it.
 
+For a long-running source, preserve a durable importer checkpoint across
+worker restarts:
+
+```bash
+python3 tools/warc_importer.py input.warc.gz --skip-schema \
+    --lance-uri /srv/pgwarc/archive.lance --lance-mode outbox \
+    --vector-dim 384 --embedding-jsonl vectors.jsonl \
+    --checkpoint-db /srv/pgwarc/checkpoints/import.sqlite \
+    --checkpoint-max-bytes 21474836480 \
+    --batch-size 500 --batch-max-bytes 16777216 \
+    --execute --psql "$WRITER_PSQL" --summary-json import.summary.json
+```
+
+Create the checkpoint parent directory with operator-only access. The SQLite
+file contains extracted text and vector material and is created mode `0600`.
+Its config binds to each source SHA-256, importer source and import settings;
+its stored target hash prevents accidental reuse against a different PostgreSQL
+instance. Keep the same checkpoint file, source bytes, embedding JSONL and
+settings when resuming. Changed source bytes or semantic settings create a
+separate checkpoint lineage. The importer re-reads gzip framing from byte zero
+to the saved record ordinal, skips completed extraction and database batches,
+and retries failed or unacknowledged records. It returns non-zero while a
+record or vector remains failed. A batch is checkpointed only after `psql`
+exits successfully; an uncertain commit is replayed through idempotent document
+upsert/outbox delivery.
+
+The durable database is capped by `--checkpoint-max-bytes`. The default
+working-set check is estimated at 256 MiB and is not an OS RSS quota. The
+checkpoint cap and measured RSS/temp/WAL during a representative run are
+separate operating limits. Do not delete a checkpoint to clear an import
+failure; resolve the record or preserve the state for diagnosis first.
+
 Run one worker instance per deployment unless the workload needs parallelism;
 multiple workers are safe, and PostgreSQL row/advisory locks preserve the event
 order for each URI. A failed earlier event blocks later work for that URI.

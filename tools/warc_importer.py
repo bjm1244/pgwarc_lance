@@ -1684,6 +1684,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=Path,
         help="preflight the complete input and save a private accounting/fingerprint manifest before SQL",
     )
+    parser.add_argument(
+        "--checkpoint-db",
+        type=Path,
+        help="opt in to a durable, size-limited SQLite checkpoint for resumable imports",
+    )
+    parser.add_argument(
+        "--checkpoint-max-bytes",
+        type=int,
+        default=20 * 1024 * 1024 * 1024,
+        help="maximum SQLite checkpoint database size (default: 20 GiB)",
+    )
+    parser.add_argument(
+        "--checkpoint-max-memory-bytes",
+        type=int,
+        default=256 * 1024 * 1024,
+        help="estimated working-memory ceiling for checkpoint mode (default: 256 MiB)",
+    )
     return parser.parse_args(argv)
 
 
@@ -1781,6 +1798,15 @@ class ImportSpool:
 
 
 def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
+    if args.checkpoint_db:
+        if __name__ == "__main__":
+            repo_root = str(Path(__file__).resolve().parents[1])
+            if repo_root not in sys.path:
+                sys.path.insert(0, repo_root)
+        from tools import resumable_import
+
+        return resumable_import.run(args, lance_mode, sys.modules[__name__])
+
     audit_manifest: dict[str, Any] | None = None
     audit_inputs: list[dict[str, Any]] = []
     if args.audit_manifest_json:
@@ -1993,6 +2019,8 @@ def main(argv: list[str]) -> int:
         raise SystemExit("--batch-max-bytes must be positive")
     if args.batch_size <= 0:
         raise SystemExit("--batch-size must be positive")
+    if args.checkpoint_max_bytes <= 0:
+        raise SystemExit("--checkpoint-max-bytes must be positive")
     if args.limit is not None and args.limit < 0:
         raise SystemExit("--limit must be non-negative")
     if args.min_text_chars < 0:
@@ -2013,6 +2041,22 @@ def main(argv: list[str]) -> int:
 
     if lance_mode in {"upsert", "outbox"} and args.batch_size > 10_000:
         raise SystemExit(f"{lance_mode} --batch-size must not exceed 10000")
+    if args.checkpoint_db and args.lance_uri and (
+        args.embedding_command or args.embedding_jsonl or not args.no_hash_vectors
+    ):
+        if lance_mode not in {"upsert", "outbox"}:
+            raise SystemExit(
+                "--checkpoint-db with vectors requires --lance-mode upsert or outbox; "
+                "create/overwrite/append cannot safely resume"
+            )
+    if args.checkpoint_db and args.audit_manifest_json:
+        raise SystemExit(
+            "--audit-manifest-json is not supported with --checkpoint-db; checkpoint mode reports its own streaming accounting"
+        )
+    if args.checkpoint_max_bytes <= 0:
+        raise SystemExit("--checkpoint-max-bytes must be positive")
+    if args.checkpoint_max_memory_bytes <= 0:
+        raise SystemExit("--checkpoint-max-memory-bytes must be positive")
     return run_spooled_import(args, lance_mode)
 
 

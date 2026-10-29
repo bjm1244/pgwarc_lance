@@ -2,6 +2,7 @@ import importlib.util
 import gzip
 import io
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -10,6 +11,8 @@ import zipfile
 from unittest import mock
 from pathlib import Path
 from xml.sax.saxutils import escape
+
+from tools import resumable_import
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,6 +94,186 @@ def fake_pdftotext(path: Path) -> Path:
 
 
 class WarcImporterTests(unittest.TestCase):
+    def test_checkpoint_repeated_input_reuses_records_and_fingerprint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, checkpoint = root / "input.warc", root / "checkpoint.sqlite"
+            first_sql, second_sql = root / "first.sql", root / "second.sql"
+            source.write_bytes(
+                warc_response("https://example.test/a", "2026-10-01T00:00:00Z", "first body")
+                + warc_response("https://example.test/b", "2026-10-01T00:00:01Z", "second body")
+            )
+            args = [str(source), "--checkpoint-db", str(checkpoint), "--output"]
+            with mock.patch.object(resumable_import, "_target_fingerprint", return_value="b" * 64):
+                with mock.patch.object(warc_importer, "execute_sql"):
+                    self.assertEqual(warc_importer.main(args + [str(first_sql), "--execute", "--summary-json", str(root / "first.json")]), 0)
+                    self.assertEqual(warc_importer.main(args + [str(second_sql), "--execute", "--summary-json", str(root / "second.json")]), 0)
+            first = json.loads((root / "first.json").read_text())
+            second = json.loads((root / "second.json").read_text())
+            self.assertEqual(first["accounting"]["raw_records"], 2)
+            self.assertTrue(first["accounting"]["balanced"])
+            self.assertEqual(first["accounting"]["imported"], 2)
+            self.assertEqual(second["reused_records"], 2)
+            self.assertEqual(second["sql_batches"], 0)
+            self.assertEqual(first["record_fingerprint_sha256"], second["record_fingerprint_sha256"])
+            self.assertIn("INSERT INTO pgwarc_lance.warc_record", first_sql.read_text())
+            self.assertEqual(second_sql.read_text(), "")
+            self.assertEqual(checkpoint.stat().st_mode & 0o777, 0o600)
+            db = sqlite3.connect(checkpoint)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM import_runs WHERE status='complete'").fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM record_checkpoints WHERE outcome='ready'").fetchone()[0], 2)
+            db.close()
+
+    def test_checkpoint_retries_only_failed_parse_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, checkpoint = root / "input.warc", root / "checkpoint.sqlite"
+            source.write_bytes(b"".join(
+                warc_response(f"https://example.test/{name}", f"2026-10-01T00:00:0{index}Z", f"body {name}")
+                for index, name in enumerate(("a", "bad", "c"))
+            ))
+            original = warc_importer.import_record_from_warc
+            calls = []
+            should_fail = True
+
+            def fail_selected(raw, *args, **kwargs):
+                nonlocal should_fail
+                calls.append(raw.headers.get("warc-target-uri"))
+                if should_fail and raw.headers.get("warc-target-uri", "").endswith("/bad"):
+                    raise ValueError("injected extraction failure")
+                return original(raw, *args, **kwargs)
+
+            with mock.patch.object(warc_importer, "import_record_from_warc", side_effect=fail_selected):
+                self.assertEqual(warc_importer.main([str(source), "--checkpoint-db", str(checkpoint), "--summary-json", str(root / "first.json"), "--output", str(root / "first.sql")]), 2)
+                should_fail = False
+                calls.clear()
+                self.assertEqual(warc_importer.main([str(source), "--checkpoint-db", str(checkpoint), "--summary-json", str(root / "second.json"), "--output", str(root / "second.sql")]), 0)
+            self.assertEqual(calls, ["https://example.test/bad"])
+            second = json.loads((root / "second.json").read_text())
+            self.assertEqual(second["reused_records"], 2)
+            self.assertEqual(second["accounting"]["raw_records"], 3)
+            self.assertTrue(second["accounting"]["balanced"])
+            db = sqlite3.connect(checkpoint)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM record_checkpoints WHERE outcome='ready'").fetchone()[0], 3)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM record_checkpoints WHERE outcome='failed'").fetchone()[0], 0)
+            db.close()
+
+    def test_checkpoint_embedding_failure_retries_only_missing_vector(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, checkpoint = root / "input.warc", root / "checkpoint.sqlite"
+            script, flag = root / "embed.py", root / "fail-once"
+            source.write_bytes(
+                warc_response("https://example.test/good", "2026-10-01T00:00:00Z", "good body")
+                + warc_response("https://example.test/retry", "2026-10-01T00:00:01Z", "retry body")
+            )
+            flag.touch()
+            script.write_text(
+                "import json,pathlib,sys\n"
+                f"flag=pathlib.Path({str(flag)!r})\n"
+                "for line in sys.stdin:\n"
+                " r=json.loads(line)\n"
+                " if 'retry body' in r['text'] and flag.exists(): flag.unlink(); continue\n"
+                " print(json.dumps({'doc_id':r['doc_id'],'vector':[1,0,0]}))\n",
+                encoding="utf-8",
+            )
+            base = [
+                str(source), "--checkpoint-db", str(checkpoint), "--lance-uri", "/private/test.lance",
+                "--lance-mode", "upsert", "--embedding-command", f"{sys.executable} {script}",
+                "--summary-json",
+            ]
+            first_sql = root / "first.sql"
+            with mock.patch.object(resumable_import, "_target_fingerprint", return_value="c" * 64):
+                with mock.patch.object(warc_importer, "execute_sql"):
+                    self.assertEqual(warc_importer.main(base + [str(root / "first.json"), "--output", str(first_sql), "--execute"]), 2)
+                    first = json.loads((root / "first.json").read_text())
+                    self.assertEqual(first["embedding"]["completed"], 1)
+                    self.assertEqual(first["embedding"]["failed"], 1)
+                    self.assertEqual(first["database"]["pending_vectors"], 1)
+                    self.assertEqual(first_sql.read_text().count("SELECT lance_upsert_many("), 1)
+                    retry_id = next(r.doc_id for r in warc_importer.iter_import_records([source], None, 1) if "retry body" in r.text)
+                    self.assertNotIn(str(retry_id), first_sql.read_text())
+
+                    second_sql = root / "second.sql"
+                    self.assertEqual(warc_importer.main(base + [str(root / "second.json"), "--output", str(second_sql), "--execute"]), 0)
+            first = json.loads((root / "first.json").read_text())
+            second = json.loads((root / "second.json").read_text())
+            self.assertEqual(second["embedding"]["attempted"], 1)
+            self.assertEqual(second["embedding"]["completed"], 1)
+            self.assertEqual(second["database"]["completed_database"], 2)
+            self.assertIn(str(retry_id), second_sql.read_text())
+
+    def test_checkpoint_replays_unacknowledged_database_batch_after_worker_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, checkpoint = root / "input.warc", root / "checkpoint.sqlite"
+            source.write_bytes(warc_response("https://example.test/replay", "2026-10-01T00:00:00Z", "replay body"))
+            captured = []
+            with mock.patch.object(resumable_import, "_target_fingerprint", return_value="a" * 64):
+                with mock.patch.object(warc_importer, "execute_sql"):
+                    self.assertEqual(warc_importer.main([str(source), "--checkpoint-db", str(checkpoint), "--summary-json", str(root / "initial.json"), "--output", str(root / "initial.sql")]), 0)
+                identity = resumable_import._file_identity(source)
+                with resumable_import.CheckpointStore(checkpoint, 20 * 1024 * 1024 * 1024, {source.resolve()}) as store:
+                    config_sha = json.loads((root / "initial.json").read_text())["config_sha256"]
+                    run_id = store.start_run(config_sha, "a" * 64)
+                    archive_key = store.add_archive(run_id, config_sha, identity, 0)
+                    row = store.connection.execute(
+                        "SELECT ordinal,doc_id FROM record_checkpoints WHERE archive_key=? AND outcome='ready'",
+                        (archive_key,),
+                    ).fetchone()
+                    self.assertTrue(store.register_run_record(run_id, archive_key, row[0], row[1]))
+                    store.set_pg_status(run_id, [row[1]], "inflight")
+                with mock.patch.object(warc_importer, "execute_sql", side_effect=lambda sql, _psql: captured.append(sql)):
+                    self.assertEqual(warc_importer.main([str(source), "--checkpoint-db", str(checkpoint), "--execute", "--summary-json", str(root / "resume.json")]), 0)
+            summary = json.loads((root / "resume.json").read_text())
+            self.assertEqual(summary["database"]["completed_database"], 1)
+            self.assertEqual(len(captured), 1)
+            self.assertIn("ON CONFLICT (doc_id) DO UPDATE", captured[0])
+            db = sqlite3.connect(checkpoint)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM import_runs WHERE status='interrupted'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT pg_status FROM record_checkpoints").fetchone()[0], "complete")
+            db.close()
+
+    def test_checkpoint_configuration_change_does_not_reuse_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, checkpoint = root / "input.warc", root / "checkpoint.sqlite"
+            source.write_bytes(warc_response("https://example.test/config", "2026-10-01T00:00:00Z", "config body"))
+            self.assertEqual(warc_importer.main([str(source), "--checkpoint-db", str(checkpoint), "--summary-json", str(root / "first.json"), "--output", str(root / "first.sql")]), 0)
+            first = json.loads((root / "first.json").read_text())
+            self.assertEqual(warc_importer.main([str(source), "--checkpoint-db", str(checkpoint), "--min-text-chars", "2", "--summary-json", str(root / "changed.json"), "--output", str(root / "changed.sql")]), 0)
+            changed = json.loads((root / "changed.json").read_text())
+            self.assertEqual(changed["reused_records"], 0)
+            self.assertNotEqual(changed["config_sha256"], first["config_sha256"])
+
+    def test_checkpoint_lock_allows_only_one_writer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkpoint = root / "checkpoint.sqlite"
+            with resumable_import.CheckpointStore(checkpoint, 8 * 1024 * 1024, set()):
+                with self.assertRaisesRegex(RuntimeError, "another importer currently owns"):
+                    resumable_import.CheckpointStore(checkpoint, 8 * 1024 * 1024, set())
+
+    def test_checkpoint_target_binding_rejects_a_different_postgres_instance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, checkpoint = root / "input.warc", root / "checkpoint.sqlite"
+            source.write_bytes(warc_response("https://example.test/target", "2026-10-01T00:00:00Z", "target body"))
+            with mock.patch.object(resumable_import, "_target_fingerprint", return_value="d" * 64):
+                with mock.patch.object(warc_importer, "execute_sql") as execute:
+                    self.assertEqual(warc_importer.main([str(source), "--checkpoint-db", str(checkpoint), "--execute"]), 0)
+                    self.assertEqual(execute.call_count, 1)
+            with mock.patch.object(resumable_import, "_target_fingerprint", return_value="e" * 64):
+                with self.assertRaisesRegex(ValueError, "different PostgreSQL target"):
+                    warc_importer.main([str(source), "--checkpoint-db", str(checkpoint), "--execute"])
+
+    def test_checkpoint_enforces_hard_database_page_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "checkpoint.sqlite"
+            with self.assertRaises(sqlite3.OperationalError):
+                resumable_import.CheckpointStore(checkpoint, 4096, set())
+            self.assertLessEqual(checkpoint.stat().st_size, 4096)
+
     def test_document_revision_is_stable_for_replay_and_changes_with_indexed_text(self):
         original = warc_importer.ImportRecord(
             123, "https://example.test/revision", "2026-10-01T00:00:00Z",

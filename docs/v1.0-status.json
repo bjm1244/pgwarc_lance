@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-29T05:41:37.367143+00:00",
+  "updated_at": "2026-10-29T11:28:23.270718+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -77,7 +77,7 @@
       ],
       "status": "done",
       "summary": "안정된 문서 revision 기반 read-only 대사, 중복·동시 갱신의 최신 revision 수렴, 부분 실패 뒤 명시적 재시도 복구를 격리 PG16 DB에서 검증했다. 제한과 artifact 검증 근거를 공개 문서에 기록했다.",
-      "public_commit": "cb8d8b8f3a0d98e08c3ab4d8f429b56e5669020d",
+      "public_commit": "ce00cb311fb0577e1be7bb1d4c86f703a433804d",
       "criteria_passed": [
         "C1",
         "C2",
@@ -94,8 +94,13 @@
         5,
         6
       ],
-      "status": "queued",
-      "criteria_passed": []
+      "status": "done",
+      "summary": "증분 적재 체크포인트와 재개 경로를 구현하고, 실제 PostgreSQL 16 WARC prefix에서 worker 중단·재개·반복 실행의 회계, 멱등성 및 자원 상태를 검증했다. 입력에서 확인된 7건의 변환 실패는 명시적으로 보존했으며 전체 archive 완료나 운영 승인은 주장하지 않는다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
     },
     {
       "number": 8,

@@ -650,6 +650,14 @@ worker는 각 job을 PostgreSQL standalone transaction으로 실행하므로 imp
 
 Importer-generated SQL의 direct Lance 모드는 PostgreSQL metadata/BM25를 chunk 단위 `BEGIN`/`COMMIT`으로 묶지만 파일 쓰기는 별도다. 그 경로의 실패 후 상태가 애매하면 같은 입력과 embedding 설정으로 `--lance-mode overwrite`를 사용해 전체 import를 재실행한다. `outbox`는 payload와 metadata를 먼저 한 SQL transaction에 commit하며 worker가 뒤에 반영한다. Lance write 후 DB completion commit 전에 worker가 중단되면 같은 ID의 멱등 upsert를 재전달한다. PostgreSQL/Lance 사이 exactly-once atomic commit은 제공하지 않는다.
 
+대형 또는 중단될 수 있는 import에는 opt-in `--checkpoint-db <private-path>`를 사용한다. SQLite checkpoint는 archive SHA-256, importer 소스와 유효 설정 checksum, archive별 다음 WARC record ordinal, record outcome/revision, vector 및 PostgreSQL batch 상태를 보존한다. 같은 입력·설정으로 다시 실행하면 성공한 record의 본문 추출, embedding, SQL은 건너뛰고 실패 또는 commit 확인을 받지 못한 record만 다시 시도한다. gzip은 임의 압축 위치로 바로 이동할 수 없어 처음부터 checkpoint ordinal까지 순차 파싱하지만 이미 저장된 record는 재추출하지 않는다. JSON summary의 accounting은 실제로 방문한 raw record 범위만 설명한다. `--limit` 결과를 archive 전체 accounting으로 해석하지 않는다.
+
+Checkpoint mode는 importer 인스턴스 하나만 SQLite file lock으로 실행한다. PostgreSQL 연결 대상 checksum을 state에 결합해 다른 DB에서 같은 checkpoint를 재사용하지 못하게 한다. `--execute`는 batch마다 psql error-stop을 켜고 성공 반환 뒤에만 batch를 완료 처리한다. DB commit 후 응답을 받기 전에 worker가 종료됐으면 해당 batch가 미확인 상태로 남아 멱등 재생된다. vector를 쓸 때는 이미 만든 dataset에 `--lance-mode upsert` 또는 `outbox`를 지정해야 한다. 운영에서는 PostgreSQL transaction과 durable retry를 이용하는 `outbox`가 권장되며, outbox worker가 종료돼도 importer checkpoint와 독립적으로 pending job을 재개한다.
+
+Checkpoint SQLite는 추출 본문과 성공한 embedding vector를 포함할 수 있으므로 접근 권한이 제한된 private filesystem에 둔다. 파일은 mode `0600`으로 만들고, 기본 영속 DB 한도는 `--checkpoint-max-bytes 21474836480` (20 GiB), SQLite cache는 2 MiB다. `--checkpoint-max-memory-bytes`는 record, batch, vector 설정으로 계산한 importer working-set estimate를 제한하며 OS 수준 RSS quota는 아니다. record payload/본문은 `--max-record-bytes`, batch input은 `--batch-max-bytes`로 제한한다. checkpoint mode는 별도 SQL/temp spool을 만들지 않는다. embedding stdout은 line·batch 범위에서 스트리밍되고, 외부 embedding command 자체의 모델 memory는 importer가 제한하지 않으므로 별도로 측정한다. Summary의 record fingerprint와 archive checksum을 보관하고, 실패 상태를 조사하기 전 checkpoint를 삭제하거나 다른 target에 복사하지 않는다.
+
+Embedding command 설정 checksum은 command 문자열을 기록하고, embedding JSONL 방식은 파일 내용을 checksum한다. 원격 model endpoint에서 사용된 실제 model revision까지 자동으로 알아내지는 않으므로 재시도 사이에 model version이 바뀌지 않도록 운영자가 고정해야 한다.
+
 - 실패 위치가 batch comment 전이면 schema/table 준비나 Lance dataset 생성 단계에서 멈춘 것이다. 설정을 고친 뒤 `overwrite`로 재실행한다.
 - `create`/`overwrite`/`append`/`upsert` direct mode가 batch 안에서 실패하면 PostgreSQL chunk는 rollback되지만 이미 호출된 Lance write는 남아 있을 수 있다. 안전한 재시도는 `overwrite`로 Lance dataset을 재생성하는 것이다.
 - `outbox` mode의 SQL chunk가 rollback되면 해당 event와 metadata가 모두 사라진다. commit된 event의 worker가 종료되면 PostgreSQL transaction rollback으로 event는 pending에 남으며 다음 worker가 재개한다. Lance upsert 후 ack 전에 끊겨도 같은 payload가 멱등 재실행된다. `lance_outbox_status`와 event의 `attempt_count`, `last_error`, `applied_version`을 점검하고 `failed`가 있으면 원인을 해결하기 전 뒤 작업을 처리하지 않는다.
