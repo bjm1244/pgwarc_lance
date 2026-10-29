@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-29T17:29:44.723293+00:00",
+  "updated_at": "2026-10-29T22:49:54.069199+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -114,6 +114,7 @@
       ],
       "status": "done",
       "summary": "revision 기반 tombstone 삭제, 재시도 가능한 벡터 삭제 outbox, 이전 snapshot 보존과 복원 동작을 구현하고 PostgreSQL 16 검증을 마쳤다.",
+      "public_commit": "b6122ca24c1e25c2ab9065e68d84006ecb482a5e",
       "criteria_passed": [
         "C1",
         "C2",
@@ -130,8 +131,13 @@
         6,
         8
       ],
-      "status": "queued",
-      "criteria_passed": []
+      "status": "done",
+      "summary": "격리된 PG16.15 환경에서 역할·정책·SQL/Lance·revision·대기 outbox의 새 인스턴스 복원과 SIGTERM, SIGKILL, ENOSPC, 손상·부분 복사 복구를 검증했다. 복구 절차와 fixture에서 측정한 RPO/RTO 범위를 문서화했다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
     },
     {
       "number": 10,

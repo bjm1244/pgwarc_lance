@@ -42,6 +42,45 @@ multi-host Lance coordination, binary redistribution right or production
 approval is established. This source preview is committed locally for the
 separate reviewed fast-forward publisher; no direct push was made.
 
+## Issue #9 — isolated backup and new-instance recovery (2026-10-30)
+
+Using the unchanged 0.1.23 PG16 artifact, a synthetic quiescent PostgreSQL 16.15
+fixture was dumped with its global no-password role definition, role settings,
+database policies, seven extension configuration tables, sequences, revision
+map, and a committed pending outbox payload. A second network-isolated cluster
+restored the SQL and Lance snapshot. It matched the four SQL documents and
+revision mappings, restored the three vectors present at the snapshot point,
+replayed the fourth pending vector exactly once, preserved search results and
+grants, and accepted a revision-aware write. A restore copy missing its Lance
+data object failed with an internal storage error and no result rows; the
+untouched backup then restored successfully.
+
+Separate PG16.15 fixtures distinguished clean SIGTERM from container SIGKILL,
+an 8 MiB isolated-tmpfs ENOSPC error, and missing or truncated Lance files.
+SIGTERM preserved committed rows, revisions, retrieval and ACLs. SIGKILL
+triggered PostgreSQL automatic recovery; the open SQL revision update rolled
+back while a direct Lance write remained, then explicit idempotent replay
+reconciled it. The transactional revisioned outbox event was absent after the
+rollback and succeeded when explicitly retried. Counts, revisions, retrieval
+and reader privileges were checked after recovery.
+
+Across three repeat runs, the synthetic new-instance restore, including
+startup, role/settings restore, SQL/Lance restore, verification and a
+post-restore write, took 10.551–10.912 seconds. The SIGTERM restart and verified
+state took 1.353–1.580 seconds; SIGKILL plus PostgreSQL recovery, explicit
+reconciliation and verification took 4.471–4.642 seconds. These are measured
+times for four small fixture documents and four-dimensional test vectors on
+one local Docker host, not production RTOs. The quiescent snapshot had zero
+observed loss of committed fixture state, including the pending outbox event.
+The recovery procedure discards uncommitted SQL/outbox transactions and
+requires all committed state at the last verified snapshot to survive; later
+writes may be lost back to that point. No maximum time-based production loss is
+set because a backup schedule is not approved. Direct PostgreSQL/Lance calls
+still have no shared atomic commit.
+Host power loss, active-writer snapshots, hardware/storage-stack faults,
+production corpus restore, an approved RPO/RTO and production approval remain
+unverified. Private command logs and checksums stay outside this repository.
+
 ## Previous package and distribution review: 0.1.22 (2026-10-29)
 
 Issue #6 adds a URI-scoped document revision mapping, revision-bearing Lance

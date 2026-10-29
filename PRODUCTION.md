@@ -221,6 +221,48 @@ The automated fixture exercises a quiescent backup. It does not establish
 consistency for snapshots taken while writers are running. A successful SQL
 dump alone is insufficient to recover the vector store.
 
+## Issue #9 recovery drill (2026-10-30)
+
+The unchanged 0.1.23 PG16.15 artifact was exercised in disposable,
+network-isolated PostgreSQL containers. A four-document fixture included three
+materialized vectors and one committed revisioned outbox payload awaiting
+delivery. The coordinated SQL/Lance/role/settings backup restored into a new
+cluster: SQL counts and all four expected revisions matched; the restored
+dataset started with three vectors at the snapshot version; the pending event
+was replayed once to produce the fourth vector. The drill compared Lance file
+hashes and versions, BM25/vector/hybrid results, extension ACLs, selective
+reader grants, PUBLIC EXECUTE revocation, role attributes/settings, database
+GUCs and both sequence positions. A controlled revision-aware write succeeded
+after restore.
+
+The same fixture rejected a partial Lance copy with SQLSTATE `XX000` and no
+partial rows, while leaving restored SQL state and the complete backup intact.
+Separate tests recorded a clean SIGTERM shutdown, PostgreSQL automatic recovery
+after SIGKILL, real `ENOSPC` on a private 8 MiB tmpfs, and missing/truncated
+Lance manifests/data. They distinguish a rolled-back, uncommitted outbox event
+from a direct Lance write that survives PostgreSQL transaction rollback and
+needs an explicit retry/reconciliation. Each scenario rechecked counts,
+revisions, BM25/vector retrieval and reader grants.
+
+Three repeat runs on the same local Docker host measured 10.551–10.912 seconds
+from fresh-cluster launch through role/settings restore, SQL and Lance restore,
+verification and a post-restore write. The verified SIGTERM restart took
+1.353–1.580 seconds; SIGKILL recovery through explicit reconciliation and
+verification took 4.471–4.642 seconds. These are fixture-specific observations
+for four documents, four-dimensional vectors and a single PostgreSQL 16.15
+instance; they are not a service objective. The coordinated snapshot preserved
+all committed fixture state (observed RPO zero at that point), including the
+pending event. Writes after a backup are outside that recovery point; operators
+must choose and test a backup interval to set their maximum loss window. There
+is no bounded recovery point for direct concurrent PostgreSQL/Lance writes.
+For this procedure, discard uncommitted in-flight SQL/outbox transactions,
+preserve every committed row and queued event at the verified snapshot, and
+accept that later writes may be lost back to that point. No maximum time-based
+loss window is approved until an operator sets a backup cadence.
+These runs do not test active-writer snapshots, host power loss, physical
+storage failure, a representative corpus, production RPO/RTO or production
+approval.
+
 ## Transaction and storage contract
 
 The direct Lance functions and importer `create`, `overwrite`, `append` and

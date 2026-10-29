@@ -441,3 +441,36 @@ Fixtures cover rollback, backend/container termination, isolated ENOSPC,
 permissions, retry, missing/truncated Lance files and quiescent recovery into
 a separately initialized cluster, including roles and a post-restore write. Host power loss, the actual storage
 stack and domain-specific recovery time objectives still require operating-environment drills.
+
+### Recovery evidence and loss window
+
+The 2026-10-30 isolated PostgreSQL 16.15 drill used four synthetic documents,
+four-dimensional vectors, one separate fresh cluster, and no production data.
+It restored a PostgreSQL dump, no-password global role backup, saved database
+policies, a complete Lance snapshot, and one pending revisioned outbox event.
+The event remained pending at the restored snapshot point and produced exactly
+one vector when the worker resumed. Counts, revision mappings and Lance row
+revisions, BM25/vector/hybrid retrieval, extension ACLs, reader grants, role
+settings, database GUCs, sequence state and a controlled write were checked.
+
+Three repeat runs measured these fixture-specific intervals:
+
+| Recovery path | Observed time |
+| --- | ---: |
+| Fresh cluster launch through SQL/Lance/role restore, verification and a new write | 10.551–10.912 s |
+| SIGTERM restart through verified counts, revisions, retrieval and grants | 1.353–1.580 s |
+| SIGKILL, PostgreSQL automatic recovery, explicit cross-store reconciliation and verification | 4.471–4.642 s |
+
+The coordinated snapshot lost none of its committed fixture rows or pending
+work. Its RPO is zero relative to that quiescent point; writes committed after
+the snapshot remain outside it, so the operator's backup cadence sets the
+maximum recovery loss window. This procedure discards uncommitted in-flight
+SQL/outbox transactions and requires all committed rows and queued events at
+the verified snapshot to survive. No maximum time-based window is set until an
+operator chooses the backup cadence. The SIGKILL test also observed that an uncommitted
+direct Lance write can survive when PostgreSQL rolls back its transaction;
+therefore direct writers have no bounded cross-store recovery point. Use the
+revisioned outbox, stop writers and workers for backups, keep SQL and Lance
+artifacts together, and do not admit traffic until fresh-instance checks pass.
+The measurements do not establish a production RTO, active-writer backup
+consistency or host/storage failure behavior.

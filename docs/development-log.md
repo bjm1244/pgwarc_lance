@@ -1,5 +1,60 @@
 # Development log
 
+## Issue #9 — coordinated backup, fresh-instance restore and recovery (2026-10-30)
+
+- The runner selected P0 issue #9 after prerequisites #3, #6 and #8. The queue
+  supersedes the older development-log next-work note. Work remained on the
+  canonical `development` line with the configured `gpt-6-luna` / `max` setting.
+- The native fingerprint and Cargo.lock remained equal to the existing PG16
+  receipt, so the immutable 0.1.23 artifact was reused; no Rust, SQL, Cargo or
+  packaging input changed. The regression harness now restores all seven
+  extension configuration tables, both sequences, global no-password roles,
+  role settings and database policies into a separately initialized cluster.
+  Its fixture includes revision-bearing Lance rows and a committed pending
+  outbox payload. It rejects an incomplete filesystem copy, verifies the
+  untouched backup, replays the pending event once and performs a controlled
+  revision-aware write after restore.
+- The storage-fault harness now verifies normal SIGTERM shutdown separately
+  from SIGKILL and automatic PostgreSQL recovery. It injects ENOSPC only into a
+  disposable 8 MiB tmpfs and verifies rollback, retry, committed counts,
+  revisions, BM25/vector retrieval and least-privilege reader access. It also
+  records the distinct direct-write crash window: the database transaction
+  rolls back while an external Lance write survives until explicit replay.
+  Truncated manifests/data, missing data objects and an incomplete restore
+  copy fail closed without changing the preserved backup.
+- Three final repeated PG16.15 runs passed each database harness. The fixture
+  had four documents, four-dimensional vectors, three Lance rows at the backup
+  point and one pending outbox vector. The measured new-instance restore,
+  including validation and a post-restore write, took 10.551–10.912 seconds;
+  verified SIGTERM recovery took 1.353–1.580 seconds; SIGKILL plus explicit
+  reconciliation and verification took 4.471–4.642 seconds. ENOSPC free-space
+  and retry took 1.030–1.658 seconds. These timings are local synthetic-fixture
+  measurements, not service RTOs. The coordinated snapshot showed zero fixture
+  loss relative to its quiescent point; the procedure discards uncommitted work,
+  preserves all committed snapshot state and allows post-snapshot work to be
+  lost back to that point. No maximum time window is set without an operator
+  backup cadence; direct PG/Lance calls have no shared atomic recovery point.
+- Early attempts exposed harness mistakes rather than extension defects: a
+  Lance fixture under the test tmpfs disappeared across container restart; a
+  query-error probe treated `psql` exit code 0 with `ON_ERROR_STOP=0` as success;
+  and one BM25 assertion used a term shared by two fixture rows. The tests now
+  place restart data outside the tmpfs, classify the SQLSTATE/output directly,
+  and query a discriminating term. Failed reports were retained privately.
+- The locked artifact SHA-256 is
+  `42045ec4de13487786015698ad9a871f02f96aefe07eacd289d14d66a4df61ec`, Cargo.lock
+  SHA-256 is `147e894f1e41a2fa9c5cddf16feb68f9346661efbc450e4b895e92bdef2863ed`,
+  and native fingerprint is
+  `b659227e940cfe9c4f44eabb4aaf31d4fcc390c973d6ee8e34a4f7926da934a5`. The
+  test image was the PostgreSQL 16 Bookworm image pinned by digest. Private
+  commands, DB files, detailed fault logs and checksums remain outside this
+  repository. Host power loss, active-writer backup, physical storage failure,
+  production-scale restore and approved RPO/RTO remain unverified.
+- C1-C3 pass for the recorded isolated fixture and PG16.15 artifact. The full
+  `python3 -B -m unittest discover -s tests -p 'test_*.py'` suite passed 505
+  tests; `python3 tools/check_docs.py`, `cargo fmt --all --check` and
+  `git diff --check` passed. The source is committed locally for the reviewed
+  publisher; this task does not directly push or approve production use.
+
 ## Issue #8 — document deletion, tombstones and vector cleanup (complete, 2026-10-30)
 
 - The runner selected P0 issue #8 after prerequisites #6 and #7 on the canonical
