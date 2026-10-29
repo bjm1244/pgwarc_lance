@@ -91,6 +91,28 @@ def fake_pdftotext(path: Path) -> Path:
 
 
 class WarcImporterTests(unittest.TestCase):
+    def test_document_revision_is_stable_for_replay_and_changes_with_indexed_text(self):
+        original = warc_importer.ImportRecord(
+            123, "https://example.test/revision", "2026-10-01T00:00:00Z",
+            "text/plain", 200, "sha256:payload", "stable source text", "source.warc",
+        )
+        replay = warc_importer.ImportRecord(
+            123, "https://example.test/revision", "2026-10-01T00:00:00Z",
+            "text/plain", 200, "sha256:payload", "stable source text", "retry.warc",
+        )
+        changed = warc_importer.ImportRecord(
+            123, "https://example.test/revision", "2026-10-01T00:00:00Z",
+            "text/plain", 200, "sha256:payload", "changed source text", "retry.warc",
+        )
+        changed_metadata = warc_importer.dataclasses.replace(original, content_type="text/html")
+
+        revision = warc_importer.record_revision(original)
+        self.assertEqual(revision, warc_importer.record_revision(replay))
+        self.assertNotEqual(revision, warc_importer.record_revision(changed))
+        self.assertNotEqual(revision, warc_importer.record_revision(changed_metadata))
+        self.assertEqual(len(revision), 64)
+        self.assertEqual(warc_importer.record_to_json(original)["revision"], revision)
+
     def test_retention_diagnostics_remain_bounded_across_many_failed_documents(self):
         retention = warc_importer.ExtractionRetention("metadata-only")
         for number in range(1000):
@@ -376,11 +398,13 @@ class WarcImporterTests(unittest.TestCase):
             sql = output.read_text()
             summary = json.loads(summary_path.read_text())
             self.assertIn("lance_outbox_version_guard", sql)
-            self.assertIn("SELECT lance_outbox_enqueue(", sql)
+            self.assertIn("SELECT lance_outbox_enqueue_revision(", sql)
+            imported = next(warc_importer.iter_import_records([path], None, 1))
+            self.assertIn(warc_importer.record_revision(imported), sql)
             self.assertNotIn("lance_upsert_many(", sql)
             self.assertNotIn("lance_create_table(", sql)
             self.assertEqual(summary["lance_index_consistency"], "eventual_after_commit")
-            self.assertEqual(summary["required_extension_version"], "0.1.21")
+            self.assertEqual(summary["required_extension_version"], "0.1.22")
         with self.assertRaisesRegex(SystemExit, "must not exceed 10000"):
             warc_importer.main(["unused.warc", "--lance-uri", "/tmp/outbox.lance", "--lance-mode", "outbox", "--batch-size", "10001"])
 

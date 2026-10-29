@@ -41,6 +41,10 @@ def _revision_fingerprint(row: dict[str, Any]) -> str | None:
         return None
     payload = {
         "doc_id": int(row["doc_id"]),
+        "target_uri": row.get("target_uri"),
+        "content_type": row.get("content_type"),
+        "http_status": row.get("http_status"),
+        "text_len": row.get("text_len"),
         "payload_digest": row.get("payload_digest"),
         "bm25_content_md5": row.get("bm25_content_md5"),
     }
@@ -69,11 +73,22 @@ def reconcile(pg_state: dict[str, Any], lance_state: dict[str, Any], max_rows: i
     else:
         raise DoctorError("database response has an invalid unfinished-job inventory")
 
-    complete = pg_count <= max_rows and lance_count <= max_rows and pending_count <= max_rows
+    revision_rows = _json_rows(pg_state.get("revision_rows", []), "document revisions")
+    revision_count = int(pg_state.get("revision_count", len(revision_rows)))
+    if revision_count < 0:
+        raise DoctorError("database response has an invalid document revision count")
+    complete = (
+        pg_count <= max_rows
+        and lance_count <= max_rows
+        and pending_count <= max_rows
+        and revision_count <= max_rows
+    )
     if complete and (pg_count != len(pg_rows) or lance_count != len(lance_rows)):
         raise DoctorError("database inventory row count does not match returned rows")
     if complete and pending_count != len(pending_rows):
         raise DoctorError("database unfinished-job count does not match returned rows")
+    if complete and revision_count != len(revision_rows):
+        raise DoctorError("database document revision count does not match returned rows")
 
     pg_by_id: dict[int, dict[str, Any]] = {}
     duplicate_pg_ids: set[int] = set()
@@ -98,18 +113,29 @@ def reconcile(pg_state: dict[str, Any], lance_state: dict[str, Any], max_rows: i
 
     pg_ids = set(pg_by_id)
     warc_ids = {doc_id for doc_id, row in pg_by_id.items() if row.get("has_warc")}
+    expected_revisions = {int(row["doc_id"]): str(row["expected_revision"]) for row in revision_rows}
     pending_ids = {
         int(doc_id)
         for job in pending_rows
         for doc_id in job.get("ids", [])
     }
-    expected_vector_ids = {
-        doc_id
-        for doc_id, row in pg_by_id.items()
-        if row.get("has_warc") and int(row.get("text_len") or 0) > 0
-    }
+    expected_vector_ids = set(expected_revisions)
     missing_vector_candidates = expected_vector_ids - lance_ids - pending_ids
     orphan_lance_ids = lance_ids - pg_ids
+    orphan_revision_ids = set(expected_revisions) - pg_ids
+    untracked_vector_ids = (lance_ids & pg_ids) - set(expected_revisions)
+    lance_revision_by_id = {
+        int(row["doc_id"]): row.get("revision") for row in lance_rows
+    }
+    stale_revision_ids = {
+        doc_id for doc_id, revision in expected_revisions.items()
+        if doc_id in lance_revision_by_id and lance_revision_by_id[doc_id] != revision
+    }
+    versioned_expected_ids = set(expected_revisions) & lance_ids
+    pg_revision_mismatch_ids = {
+        doc_id for doc_id, revision in expected_revisions.items()
+        if doc_id in pg_by_id and _revision_fingerprint(pg_by_id[doc_id]) != revision
+    }
     warc_without_bm25 = {
         doc_id for doc_id, row in pg_by_id.items()
         if row.get("has_warc") and not row.get("has_bm25")
@@ -122,6 +148,10 @@ def reconcile(pg_state: dict[str, Any], lance_state: dict[str, Any], max_rows: i
         "duplicate_lance_ids": len(duplicate_lance_ids),
         "missing_vector_candidates": len(missing_vector_candidates),
         "orphan_lance_ids": len(orphan_lance_ids),
+        "orphan_revision_ids": len(orphan_revision_ids),
+        "untracked_vector_ids": len(untracked_vector_ids),
+        "stale_vector_revisions": len(stale_revision_ids),
+        "postgres_revision_mismatches": len(pg_revision_mismatch_ids),
         "stale_label_ids": len(stale_label_ids),
         "warc_without_bm25": len(warc_without_bm25),
         "unfinished_outbox_jobs": pending_count,
@@ -139,6 +169,7 @@ def reconcile(pg_state: dict[str, Any], lance_state: dict[str, Any], max_rows: i
             "postgres_documents": pg_count,
             "lance_rows": lance_count,
             "unfinished_outbox_jobs": pending_count,
+            "expected_revision_documents": revision_count,
             "warc_documents": len(warc_ids) if complete else None,
             "pg_revision_fingerprints": revision_fingerprints if complete else None,
         },
@@ -147,14 +178,22 @@ def reconcile(pg_state: dict[str, Any], lance_state: dict[str, Any], max_rows: i
             "duplicate_lance": sorted(duplicate_lance_ids)[:20] if complete else [],
             "missing_vector_candidates": sorted(missing_vector_candidates)[:20] if complete else [],
             "orphan_lance": sorted(orphan_lance_ids)[:20] if complete else [],
+            "orphan_revision": sorted(orphan_revision_ids)[:20] if complete else [],
+            "untracked_vector": sorted(untracked_vector_ids)[:20] if complete else [],
+            "stale_vector_revision": sorted(stale_revision_ids)[:20] if complete else [],
+            "postgres_revision_mismatch": sorted(pg_revision_mismatch_ids)[:20] if complete else [],
             "stale_label": sorted(stale_label_ids)[:20] if complete else [],
             "unfinished_outbox": sorted(pending_ids)[:20] if complete else [],
         },
         "revision_check": {
-            "postgres_fingerprint": "sha256(doc_id,payload_digest,bm25_content_md5)",
-            "postgres_documents_scoped_to_lance_uri": False,
-            "lance_revision_persisted": False,
-            "exact_stale_vector_detection": "unavailable without an expected per-document vector revision",
+            "postgres_fingerprint": "sha256(doc_id,target_uri,content_type,http_status,text_len,payload_digest,bm25_content_md5)",
+            "postgres_documents_scoped_to_lance_uri": bool(expected_revisions),
+            "lance_revision_persisted": bool(versioned_expected_ids)
+            and all(lance_revision_by_id.get(doc_id) is not None for doc_id in versioned_expected_ids),
+            "exact_stale_vector_detection": (
+                "available by comparing URI-scoped expected revisions with each Lance row; "
+                "embedding-model identity is not part of this ingestion revision"
+            ),
             "label_mismatch_detection": "available when WARC metadata exists",
         },
         "snapshot": {
@@ -162,7 +201,7 @@ def reconcile(pg_state: dict[str, Any], lance_state: dict[str, Any], max_rows: i
             "lance": "one scan snapshot",
             "cross_store_atomic_snapshot": False,
         },
-        "missing_vector_semantics": "unscoped candidate only: PG documents are not durably mapped to this URI, and vector generation may be disabled",
+        "missing_vector_semantics": "URI-scoped expected documents from the revision map; pending IDs are excluded",
         "destructive_actions": [],
     }
 
@@ -180,14 +219,31 @@ SELECT 'pg' || E'\t' || jsonb_build_object(
         SELECT doc_id FROM pgwarc_lance.bm25_doc
         UNION SELECT doc_id FROM pgwarc_lance.warc_record
     ) AS ids),
+    'revision_count', (SELECT count(*) FROM pgwarc_lance.lance_document_revision
+        WHERE uri = convert_from(decode('__URI_B64__', 'base64'), 'UTF8')),
+    'revision_rows', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'doc_id', doc_id, 'expected_revision', expected_revision
+        ) ORDER BY doc_id)
+        FROM (
+            SELECT doc_id, expected_revision
+            FROM pgwarc_lance.lance_document_revision
+            WHERE uri = convert_from(decode('__URI_B64__', 'base64'), 'UTF8')
+            ORDER BY doc_id LIMIT __SCAN_LIMIT__
+        ) AS revisions
+    ), '[]'::jsonb),
     'rows', COALESCE((
         SELECT jsonb_agg(jsonb_build_object(
             'doc_id', ids.doc_id,
             'has_bm25', b.doc_id IS NOT NULL,
             'has_warc', w.doc_id IS NOT NULL,
             'text_len', w.text_len,
+            'target_uri', w.target_uri,
+            'content_type', w.content_type,
+            'http_status', w.http_status,
             'payload_digest', w.payload_digest,
-            'bm25_content_md5', CASE WHEN b.doc_id IS NULL THEN NULL ELSE md5(COALESCE(b.content, '')) END
+            'bm25_content_md5', CASE WHEN b.doc_id IS NULL THEN NULL ELSE md5(COALESCE(b.content, '')) END,
+            'expected_revision', r.expected_revision
         ) ORDER BY ids.doc_id)
         FROM (
             SELECT doc_id FROM pgwarc_lance.bm25_doc
@@ -196,20 +252,25 @@ SELECT 'pg' || E'\t' || jsonb_build_object(
         ) AS ids
         LEFT JOIN pgwarc_lance.bm25_doc AS b USING (doc_id)
         LEFT JOIN pgwarc_lance.warc_record AS w USING (doc_id)
+        LEFT JOIN pgwarc_lance.lance_document_revision AS r
+          ON r.doc_id = ids.doc_id
+         AND r.uri = convert_from(decode('__URI_B64__', 'base64'), 'UTF8')
     ), '[]'::jsonb)
 )::text;
 WITH lance_snapshot AS MATERIALIZED (
-    SELECT l.id AS doc_id,
+    SELECT l.doc_id,
+           l.revision,
            w.doc_id IS NOT NULL AS has_warc,
            CASE WHEN w.doc_id IS NULL THEN NULL
-                ELSE l.label IS NOT DISTINCT FROM COALESCE(w.target_uri, l.id::text) END AS label_matches_metadata
-    FROM lance_scan(convert_from(decode('__URI_B64__', 'base64'), 'UTF8'), __SCAN_LIMIT__) AS l
-    LEFT JOIN pgwarc_lance.warc_record AS w ON w.doc_id = l.id
+                ELSE l.label IS NOT DISTINCT FROM COALESCE(w.target_uri, l.doc_id::text) END AS label_matches_metadata
+    FROM lance_scan_document_state(convert_from(decode('__URI_B64__', 'base64'), 'UTF8'), __SCAN_LIMIT__) AS l
+    LEFT JOIN pgwarc_lance.warc_record AS w ON w.doc_id = l.doc_id
 )
 SELECT 'lance' || E'\t' || jsonb_build_object(
     'dataset_count', (SELECT count(*) FROM lance_snapshot),
     'rows', COALESCE((SELECT jsonb_agg(jsonb_build_object(
         'doc_id', doc_id,
+        'revision', revision,
         'has_warc', has_warc,
         'label_matches_metadata', label_matches_metadata
     ) ORDER BY doc_id) FROM lance_snapshot), '[]'::jsonb)

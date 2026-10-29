@@ -139,7 +139,18 @@ def main() -> int:
         sql(source_db, f"GRANT SELECT ON pgwarc_lance.bm25_long_term TO {role};")
         expect(sql(source_db, f"SET ROLE {role}; SELECT doc_id FROM bm25_search('{long_token}',10);"), "3", "long_token_search_works_for_reader")
         original_summary = json.loads(sql(source_db, summary_sql))
-        expect(sql(source_db, "SELECT cardinality(extconfig) FROM pg_extension WHERE extname='pgwarc_lance';"), "8", "all_tables_and_sequences_registered")
+        expect(
+            sql(
+                source_db,
+                "SELECT cardinality(extension.extconfig)::text || '|' || "
+                "EXISTS (SELECT 1 FROM unnest(extension.extconfig) AS config(oid) "
+                "JOIN pg_class AS relation ON relation.oid=config.oid "
+                "WHERE relation.relname='lance_document_revision')::text "
+                "FROM pg_extension AS extension WHERE extname='pgwarc_lance';",
+            ),
+            "9|true",
+            "revision_mapping_and_all_extension_tables_registered",
+        )
         # The fixture has no concurrent writers. Production must quiesce writers
         # before taking the SQL and filesystem snapshots as one backup set.
         dump = run(tool("pg_dump") + ["--no-owner", "-d", source_db])

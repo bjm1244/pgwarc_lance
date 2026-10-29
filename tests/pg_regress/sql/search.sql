@@ -15,6 +15,12 @@ SELECT lance_insert_many(
 
 SELECT lance_count('/tmp/pgwarc_lance_regress.lance') AS rows;
 
+COPY (
+    SELECT doc_id::text || '|' || label || '|' || (revision IS NULL)::text
+    FROM lance_scan_document_state('/tmp/pgwarc_lance_regress.lance', 10)
+    ORDER BY doc_id
+) TO STDOUT;
+
 SELECT id, label, distance < 0.0001 AS near
 FROM lance_vector_search('/tmp/pgwarc_lance_regress.lance', ARRAY[0,0,0,0]::float4[], 1);
 

@@ -1,6 +1,35 @@
 # Dependency notice review
 
-## Current 0.1.21 PG16 package notices and SBOM (2026-10-28)
+## Current 0.1.22 PG16 package notices and SBOM (2026-10-29)
+
+Strict target-filtered notices collected primary texts for all 436 reachable
+Cargo packages with no missing entries. The CycloneDX 1.6 SBOM contains 441
+components: 436 Cargo packages and five native/compiler environment components.
+It binds artifact SHA-256
+`0e67b2c8259a70c986223f51307c7cd56534d3659d4862e69ac49a961d26e25f`, Cargo.lock
+SHA-256
+`854a1cb98e529e7c5fa089741f68d39753e586c8e9da3b12df1688c7ab94a8a9`, native
+fingerprint
+`899c2cafbce2e705cb84a9f380619a07041b02da835b718935fb93a44dfa871c`, and the
+notice-bundle SHA-256
+`2086597c781294ef80235f125e5aec2bb0dbe62b474c91f806a44a654541ad0d`. The
+SBOM SHA-256 is
+`9c69075fd81fa46ec9da3729a4b4a6b36843d964b485920060f185a220d7f232`.
+
+The PG16.15 package used Rust 1.96.0 and cargo-pgrx 0.19.1. Its artifact was
+installed and exercised with isolated PG16 fixtures; the detailed issue #6
+scope and remaining limits are in [PUBLICATION.md](PUBLICATION.md).
+`cargo-audit` 0.22.2 checked 557 packages against RustSec database revision
+`40f5be6fb12ed93fc591bf4ab23b7d793b3f2239` (1,381 advisories). Vulnerabilities,
+unsound packages and yanked packages were zero. Three unmaintained warnings
+remain: `paste` 1.0.15, `proc-macro-error2` 2.0.1 and `serde_cbor` 0.11.2.
+
+This inventory is technical evidence for Linux x86_64 / PostgreSQL 16.15 on
+Debian Bookworm. It does not grant binary redistribution or production
+approval. Regenerate it whenever the lockfile, native fingerprint, artifact
+or target changes.
+
+## Historical 0.1.21 PG16 package notices and SBOM (2026-10-28)
 
 The Linux x86_64 / PostgreSQL 16.15 Bookworm candidate has strict target-filtered
 package-level notices for all 436 reachable Cargo dependencies, with no

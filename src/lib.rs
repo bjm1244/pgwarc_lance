@@ -209,6 +209,7 @@ struct OutboxJob {
     flat_vectors: Vec<f32>,
     vector_dim: i32,
     labels: Vec<String>,
+    revisions: Option<Vec<String>>,
     attempts: i32,
 }
 
@@ -221,7 +222,8 @@ fn take_outbox_job() -> Option<OutboxJob> {
             // declared VOLATILE.
             .update(
                 "SELECT job.id, job.uri, job.ids, job.flat_vectors, job.vector_dim, \
-                        job.labels, job.attempt_count \
+                        job.labels, COALESCE(job.revisions, ARRAY[]::text[]) AS revisions, \
+                        job.attempt_count \
                  FROM pgwarc_lance.lance_outbox AS job \
                  WHERE job.state = 'pending' \
                    AND (pg_current_xact_id_if_assigned() IS NULL \
@@ -242,6 +244,11 @@ fn take_outbox_job() -> Option<OutboxJob> {
             return None;
         }
         let row = rows.first();
+        let revisions = row
+            .get_by_name::<Vec<String>, _>("revisions")
+            .unwrap_or_report()
+            .unwrap();
+        let revisions = (!revisions.is_empty()).then_some(revisions);
         Some(OutboxJob {
             id: row.get_by_name::<i64, _>("id").unwrap_or_report().unwrap(),
             uri: row
@@ -264,6 +271,7 @@ fn take_outbox_job() -> Option<OutboxJob> {
                 .get_by_name::<Vec<String>, _>("labels")
                 .unwrap_or_report()
                 .unwrap(),
+            revisions,
             attempts: row
                 .get_by_name::<i32, _>("attempt_count")
                 .unwrap_or_report()
@@ -484,6 +492,7 @@ pgrx::extension_sql!(
         flat_vectors   real[] NOT NULL,
         vector_dim     integer NOT NULL CHECK (vector_dim > 0),
         labels         text[] NOT NULL,
+        revisions      text[],
         state          text NOT NULL DEFAULT 'pending'
                        CHECK (state IN ('pending', 'processing', 'completed', 'failed')),
         attempt_count  integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
@@ -500,6 +509,9 @@ pgrx::extension_sql!(
                 AND cardinality(ids) = cardinality(labels)
                 AND cardinality(flat_vectors) = cardinality(ids) * vector_dim)
         ),
+        CHECK (state = 'completed' OR revisions IS NULL
+               OR cardinality(revisions) = cardinality(ids)),
+        CHECK (revisions IS NULL OR cardinality(revisions) BETWEEN 1 AND 10000),
         CHECK ((state = 'completed') = (completed_at IS NOT NULL)),
         CHECK (state <> 'completed' OR applied_version IS NOT NULL)
     );
@@ -509,6 +521,16 @@ pgrx::extension_sql!(
     CREATE INDEX IF NOT EXISTS lance_outbox_available_idx
         ON pgwarc_lance.lance_outbox (available_at, id)
         WHERE state = 'pending';
+
+    -- URI-scoped mapping of expected document content revisions. The actual
+    -- applied revision is stored on the Lance row and inspected by the doctor.
+    CREATE TABLE IF NOT EXISTS pgwarc_lance.lance_document_revision (
+        uri               text NOT NULL,
+        doc_id            bigint NOT NULL,
+        expected_revision text NOT NULL CHECK (expected_revision ~ '^[0-9a-f]{64}$'),
+        updated_at        timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (uri, doc_id)
+    );
 
     CREATE OR REPLACE VIEW pgwarc_lance.lance_outbox_status AS
     SELECT uri,
@@ -541,6 +563,7 @@ pgrx::extension_sql!(
     SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.lance_write_log_id_seq', '');
     SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.lance_outbox', '');
     SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.lance_outbox_id_seq', '');
+    SELECT pg_catalog.pg_extension_config_dump('pgwarc_lance.lance_document_revision', '');
     "#,
     name = "bm25_tables",
 );
@@ -565,7 +588,8 @@ pgrx::extension_sql!(
              AND d.deptype = 'e'
             JOIN pg_extension AS e ON e.oid = d.refobjid
             WHERE e.extname = 'pgwarc_lance'
-              AND p.proname IN ('lance_outbox_enqueue', 'lance_outbox_process_next')
+              AND p.proname IN ('lance_outbox_enqueue', 'lance_outbox_enqueue_revision',
+                                'lance_outbox_process_next')
         LOOP
             EXECUTE format(
                 'ALTER FUNCTION %s SECURITY DEFINER SET search_path = pg_catalog, pg_temp',
@@ -791,10 +815,11 @@ fn lance_upsert_many(
     record_write(uri, "upsert_many", row_count);
     if let Err(error) = lance_store::upsert_flat_rows(
         uri,
-        ids,
+        ids.clone(),
         flat_vectors,
         vector_dim,
         labels.into_iter().map(Some).collect(),
+        vec![None; ids.len()],
     ) {
         fail_operation("lance_upsert_many", error);
     }
@@ -810,6 +835,31 @@ fn lance_outbox_enqueue(
     flat_vectors: Vec<f32>,
     vector_dim: i32,
     labels: Vec<String>,
+) -> i64 {
+    enqueue_outbox(uri, ids, flat_vectors, vector_dim, labels, None)
+}
+
+/// Persist importer vectors and their expected document revisions atomically.
+/// This is separate from the original unversioned API to preserve compatibility.
+#[pg_extern]
+fn lance_outbox_enqueue_revision(
+    uri: &str,
+    ids: Vec<i64>,
+    flat_vectors: Vec<f32>,
+    vector_dim: i32,
+    labels: Vec<String>,
+    revisions: Vec<String>,
+) -> i64 {
+    enqueue_outbox(uri, ids, flat_vectors, vector_dim, labels, Some(revisions))
+}
+
+fn enqueue_outbox(
+    uri: &str,
+    ids: Vec<i64>,
+    flat_vectors: Vec<f32>,
+    vector_dim: i32,
+    labels: Vec<String>,
+    revisions: Option<Vec<String>>,
 ) -> i64 {
     let vector_dim = positive_i32(vector_dim, "vector_dim");
     let expected_values = ids.len().checked_mul(vector_dim as usize);
@@ -830,22 +880,38 @@ fn lance_outbox_enqueue(
             "outbox enqueue requires unique document IDs",
         );
     }
+    if let Some(revisions) = &revisions {
+        if revisions.len() != ids.len()
+            || revisions.iter().any(|revision| {
+                revision.len() != 64
+                    || !revision
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+        {
+            fail(
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                "revision enqueue requires one 64-character hexadecimal revision per document ID",
+            );
+        }
+    }
     require_finite_vector(&flat_vectors);
     let authorized_uri = authorize_uri(uri);
     let uri = authorized_uri.as_ref();
     // Serializing enqueue transactions gives each dataset a stable committed
     // order and prevents mixing an in-flight direct Lance write with a new job.
     lock_dataset(uri);
-    Spi::get_one_with_args::<i64>(
+    let job_id = Spi::get_one_with_args::<i64>(
         "INSERT INTO pgwarc_lance.lance_outbox \
-         (uri, ids, flat_vectors, vector_dim, labels) \
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+         (uri, ids, flat_vectors, vector_dim, labels, revisions) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         &[
             DatumWithOid::from(uri),
-            DatumWithOid::from(ids),
+            DatumWithOid::from(ids.clone()),
             DatumWithOid::from(flat_vectors),
             DatumWithOid::from(vector_dim),
             DatumWithOid::from(labels),
+            DatumWithOid::from(revisions.clone()),
         ],
     )
     .unwrap_or_report()
@@ -854,7 +920,24 @@ fn lance_outbox_enqueue(
             PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
             "outbox insert returned no job ID",
         )
-    })
+    });
+    if let Some(revisions) = revisions {
+        Spi::run_with_args(
+            "INSERT INTO pgwarc_lance.lance_document_revision \
+             (uri, doc_id, expected_revision) \
+             SELECT $1, items.doc_id, items.revision \
+             FROM unnest($2::bigint[], $3::text[]) AS items(doc_id, revision) \
+             ON CONFLICT (uri, doc_id) DO UPDATE \
+             SET expected_revision = EXCLUDED.expected_revision, updated_at = clock_timestamp()",
+            &[
+                DatumWithOid::from(uri),
+                DatumWithOid::from(ids),
+                DatumWithOid::from(revisions),
+            ],
+        )
+        .unwrap_or_report();
+    }
+    job_id
 }
 
 /// Apply the oldest committed outbox event whose predecessor is complete.
@@ -897,6 +980,10 @@ fn lance_outbox_process_next() -> TableIterator<
         job.flat_vectors.clone(),
         job.vector_dim,
         job.labels.iter().cloned().map(Some).collect(),
+        job.revisions
+            .as_ref()
+            .map(|revisions| revisions.iter().cloned().map(Some).collect())
+            .unwrap_or_else(|| vec![None; job.ids.len()]),
     ) {
         Ok(row_count) => match lance_store::versions(&uri) {
             Ok(versions) => match versions.iter().map(|version| version.version).max() {
@@ -1008,6 +1095,36 @@ fn lance_scan(
     match lance_store::scan_rows(uri, limit) {
         Ok(rows) => TableIterator::new(rows.into_iter().map(|r| (r.id, r.vector, r.label))),
         Err(e) => fail_operation("lance_scan", e),
+    }
+}
+
+/// Returns document IDs and ingestion revisions for read-only reconciliation.
+/// Older Lance datasets expose a NULL revision until a revision-aware upsert.
+#[pg_extern]
+fn lance_scan_document_state(
+    uri: &str,
+    limit: default!(i32, 100),
+) -> TableIterator<
+    'static,
+    (
+        name!(doc_id, i64),
+        name!(label, Option<String>),
+        name!(revision, Option<String>),
+    ),
+> {
+    let limit = nonnegative_i64(limit, "limit");
+    let authorized_uri = authorize_uri(uri);
+    let uri = authorized_uri.as_ref();
+    let limit = enforce_scan_limit(limit);
+    if limit == 0 {
+        return TableIterator::new(std::iter::empty::<(i64, Option<String>, Option<String>)>());
+    }
+    match lance_store::scan_document_states(uri, limit) {
+        Ok(rows) => TableIterator::new(
+            rows.into_iter()
+                .map(|row| (row.id, row.label, row.revision)),
+        ),
+        Err(error) => fail_operation("lance_scan_document_state", error),
     }
 }
 

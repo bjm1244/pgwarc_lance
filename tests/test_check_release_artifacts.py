@@ -108,6 +108,29 @@ class ReleaseArtifactCheckTests(unittest.TestCase):
 
         self.assertTrue(any("missing expected symbol" in error for error in errors))
 
+    def test_explicit_legacy_symbols_do_not_weaken_current_default(self):
+        legacy_symbols = ["hello_pgwarc_lance", "lance_outbox_enqueue"]
+        with tempfile.TemporaryDirectory() as tmp:
+            dist_dir = Path(tmp) / "pgwarc_lance-0.1.0-pg16"
+            write_artifacts(dist_dir, sql_symbols=legacy_symbols)
+
+            legacy_errors = check_release_artifacts.validate_artifacts(
+                dist_dir,
+                version="0.1.0",
+                pg_major=16,
+                required_sql_symbols=legacy_symbols,
+            )
+            current_errors = check_release_artifacts.validate_artifacts(
+                dist_dir,
+                version="0.1.0",
+                pg_major=16,
+            )
+
+        self.assertEqual(legacy_errors, [])
+        self.assertTrue(
+            any("lance_scan_document_state" in error for error in current_errors)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

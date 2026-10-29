@@ -49,7 +49,7 @@ def run_command(
 
 
 def remove_container(container: str) -> None:
-    run_command(["docker", "rm", "-f", container], quiet=True, check=False)
+    run_command(["docker", "rm", "-f", "-v", container], quiet=True, check=False)
 
 
 def wait_until_ready(
@@ -171,6 +171,10 @@ def smoke(args: argparse.Namespace) -> None:
                 "-d",
                 "--name",
                 container,
+                "--network",
+                "none",
+                "--tmpfs",
+                "/var/lib/postgresql/data:rw,nosuid,nodev,size=268435456",
                 "-e",
                 f"POSTGRES_USER={args.user}",
                 "-e",

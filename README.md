@@ -1,6 +1,6 @@
 # pgwarc_lance
 
-> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 개발 후보는 **0.1.21**이다. 기존 BM25·제한형 문서 추출과 레코드별 charset 보정에 durable vector outbox/worker 경로를 추가했다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며, outbox 경로의 반영은 commit 뒤 eventual consistency를 제공한다. Linux x86_64 / PostgreSQL 16.15 artifact의 실제 설치·upgrade·SQL·importer·runtime·backup 검증과 남은 한계는 [PUBLICATION.md](PUBLICATION.md)에 기록한다. strict 의존성 고지와 CycloneDX SBOM은 현재 0.1.21 PG16 artifact에 checksum으로 결합했지만 binary 재배포·프로덕션 승인을 뜻하지 않는다.
+> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 개발 후보는 **0.1.22**이다. URI별 문서 revision mapping과 Lance 행 revision을 durable vector outbox에 기록하고, read-only PG–Lance doctor가 ID/revision 불일치를 보고한다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며 outbox 갱신은 commit 뒤 eventual consistency를 제공한다. Linux x86_64 / PostgreSQL 16.15 artifact의 실제 설치·upgrade·SQL·importer·runtime·backup 검증과 artifact-bound 의존성 고지는 [PUBLICATION.md](PUBLICATION.md), [THIRD_PARTY.md](THIRD_PARTY.md)에 기록한다. 이 검증은 binary 재배포·프로덕션 승인을 뜻하지 않는다.
 >
 > 라이선스: Apache-2.0 ([LICENSE](LICENSE)). 기여 전 [CONTRIBUTING.md](CONTRIBUTING.md)·[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)를 참고하라.
 
@@ -151,9 +151,11 @@ pgwarc_lance/
 | `lance_create_table(uri, vector_dim=3, overwrite=false)` | Lance dataset 생성 |
 | `lance_insert(uri, id, vector, label)` | Lance dataset에 벡터 row 삽입 |
 | `lance_insert_many(uri, ids, flat_vectors, vector_dim, labels)` | Lance dataset에 여러 벡터 row를 한 번의 batch append로 삽입 |
-| `lance_outbox_enqueue(uri, ids, flat_vectors, vector_dim, labels)` | caller transaction에 재시도 안전한 벡터 upsert 작업을 저장 |
+| `lance_outbox_enqueue(uri, ids, flat_vectors, vector_dim, labels)` | caller transaction에 재시도 안전한 비버전 벡터 upsert 작업을 저장 |
+| `lance_outbox_enqueue_revision(uri, ids, flat_vectors, vector_dim, labels, revisions)` | URI별 예상 문서 revision mapping과 벡터 작업을 같은 caller transaction에 저장 |
 | `lance_outbox_process_next()` | 독립 transaction에서 가장 오래된 완료 가능 작업을 Lance에 반영하고 결과 버전/지연을 반환 |
 | `lance_scan(uri, limit=100)` | Lance row 스캔 |
+| `lance_scan_document_state(uri, limit=100)` | Lance row의 document ID, label, 실제 저장 revision을 읽기 전용으로 조회 |
 | `lance_vector_dim(uri)` | Lance dataset의 vector 차원 반환 |
 | `lance_vector_search(uri, query, k=10)` | Lance nearest-neighbor 검색 |
 | `hybrid_search(query, vector_query, lance_uri, k=10)` | BM25와 벡터 검색을 RRF로 결합 |
@@ -161,7 +163,7 @@ pgwarc_lance/
 | `lance_dataset_versions(uri)` | dataset 버전 목록 `(version, created_ms)` 반환 (오래된 순) |
 | `lance_restore_version(uri, version)` | 지정 버전을 최신 상태로 재승격 (롤백 보상 경로) |
 
-`pgwarc_lance.lance_outbox`는 importer가 같은 PostgreSQL transaction에 저장한 vector payload, 대기/실패 상태, 재시도 수와 완료 Lance 버전을 보관한다. 성공적으로 반영된 행은 완료와 applied version을 커밋할 때 큰 vector payload를 비우고, 작은 완료 영수증은 상태 모니터링용으로 유지한다. `lance_outbox_status`는 URI별 ready/pending/failed 작업 수, 가장 오래 기다린 지연, 마지막 완료 시각과 outbox 반영 버전을 요약한다.
+`pgwarc_lance.lance_outbox`는 importer가 같은 PostgreSQL transaction에 저장한 vector payload, 대기/실패 상태, 재시도 수, 문서 revision과 완료 Lance 버전을 보관한다. 성공적으로 반영된 행은 완료와 applied version을 커밋할 때 큰 vector payload를 비우지만 작은 revision 영수증은 유지한다. `lance_document_revision`은 URI/document별 기대 revision을 기록하고 Lance의 `revision` 열에는 실제 upsert한 revision이 저장된다. `lance_outbox_status`는 URI별 ready/pending/failed 작업 수, 가장 오래 기다린 지연, 마지막 완료 시각과 outbox 반영 버전을 요약한다.
 
 `lance_create_table()`은 기존 1-argument 호출 호환성을 위해 기본 차원을 3으로 둔다. 실제 embedding 연동에서는 모델 차원에 맞춰 `vector_dim`을 명시한다. 테스트처럼 반복 실행이 필요한 경우에만 `overwrite=true`로 dataset을 재생성한다.
 
@@ -184,19 +186,27 @@ Lance dataset은 PostgreSQL이 관리하지 않는 파일이다. 기본 direct �
 ### PG–Lance read-only doctor (Issue #6 progress)
 
 `tools/doctor_pg_lance.py`는 PostgreSQL read-only transaction에서 BM25/WARC ID,
-Lance ID/label, 미완료 outbox를 대사한다. 중복 Lance ID, WARC 문서 중 벡터 누락
-후보, PG에 없는 Lance ID, WARC metadata와 다른 label, 대기/실패 outbox를 보고한다.
+URI별 기대 document revision, Lance ID/label/실제 revision, 미완료 outbox를 대사한다.
+중복 Lance ID, revision mapping이 기대하는 벡터 중 누락·오래된 revision, PG에 없는
+Lance/revision 행, mapping이 없는 벡터, WARC metadata와 다른 label, 대기/실패 outbox를 보고한다.
 `--max-rows`는 기본 100,000행이고 250,000행을 넘길 수 없다. Lance scan은 벡터 배열을
 backend에서 물질화하므로 행 제한을 넘긴 corpus는 `incomplete`로 보고하고 합격 판정을
 내리지 않는다. 전체 corpus 대규모 대사에는 paged scanner가 필요하다.
 
-현재 PG metadata/BM25 행은 Lance URI와 영구 연결되지 않고, Lance row에는 document
-revision이 저장되지 않으며 완료 outbox payload는 비워진다. 따라서 doctor는 PG의
-`doc_id`, payload digest, BM25 content checksum에서 source-side fingerprint만 만들며
-완료된 Lance vector의 정확한 revision/내용상 stale 여부는 확인하지 못한다. label 불일치는
-stale metadata 후보일 뿐이고, 벡터 누락은 URI 소속이나 vector 생성을 끈 적재와 구분할 수
-없는 후보이다. `reconciliation_complete`는 이 구조적 한계 때문에 항상 `false`다. 이 도구는
-read-only 점검이며 자동 복구 명령을 제공하지 않는다.
+revision은 안정 ID, target URI, content type, HTTP status, 추출 text 길이, WARC payload
+digest와 BM25 content checksum을 결합한 입력 revision이다. embedding model/version
+identity는 포함하지 않는다. 기존 Lance dataset은
+읽기 전용 doctor가 수정하지 않으며, 첫 upsert가 nullable `revision` 열을 추가한 뒤 해당
+row의 revision을 기록한다. 직접 revision 없는 Lance API를 쓰면 이 문서 mapping의 벡터는
+unversioned/stale로 표시된다. `reconciliation_complete`는 PostgreSQL과 Lance 사이에
+공통 원자 snapshot이 없으므로 계속 `false`다. 이 도구는 read-only 점검이며 자동 복구
+명령을 제공하지 않는다. 출력은 변경 전 dry-run 진단으로 취급한다. source 변경을
+확인한 뒤에는 같은 trusted embedding 입력으로 importer의 `outbox` 모드를 다시 실행하고,
+PG commit 뒤 worker가 revisioned ID upsert를 적용하게 한다. Lance 쓰기 뒤 PG
+acknowledgment가 실패해 job이 `pending`으로 돌아온 경우, 오류 원인과 doctor 결과를
+검토한 다음 `python3 tools/lance_outbox_worker.py --once --psql "$WORKER_PSQL"`로
+명시적으로 재생하고 doctor를 다시 실행한다. doctor 자체는 `--repair` 옵션이나 행 삭제를
+수행하지 않는다.
 Exit code `0`은 관측 mismatch가 없다는 뜻이지 대사 완료가 아니다. `1`은 관측된
 mismatch, `2`는 조회 실패, `3`은 row limit 초과, `4`는 관측 mismatch는 없지만 구조적
 검증 한계가 남았음을 뜻한다.

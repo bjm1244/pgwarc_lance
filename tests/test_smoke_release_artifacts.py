@@ -97,9 +97,12 @@ class SmokeReleaseArtifactTests(unittest.TestCase):
         ):
             smoke_release_artifacts.smoke(args)
 
-        self.assertEqual(commands[0][:4], ["docker", "rm", "-f", "pg-smoke"])
+        self.assertEqual(commands[0][:5], ["docker", "rm", "-f", "-v", "pg-smoke"])
         self.assertIn(["docker", "run", "-d", "--name", "pg-smoke"], [commands[1][:5]])
-        self.assertEqual(commands[-1][:4], ["docker", "rm", "-f", "pg-smoke"])
+        self.assertIn("--network", commands[1])
+        self.assertIn("none", commands[1])
+        self.assertIn("/var/lib/postgresql/data:rw,nosuid,nodev,size=268435456", commands[1])
+        self.assertEqual(commands[-1][:5], ["docker", "rm", "-f", "-v", "pg-smoke"])
 
     def test_smoke_rejects_invalid_artifacts_before_docker_run(self):
         commands = []

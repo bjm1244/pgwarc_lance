@@ -43,7 +43,7 @@ DEFAULT_PSQL = (
     "-d pgwarc_lance_test -v ON_ERROR_STOP=1"
 )
 LANCE_MODES = ("create", "overwrite", "append", "upsert", "outbox")
-OUTBOX_MIN_EXTENSION_VERSION = "0.1.21"
+OUTBOX_MIN_EXTENSION_VERSION = "0.1.22"
 BM25_MODES = ("function", "bulk", "copy")
 APPEND_DUPLICATE_WARNING = (
     "lance append mode does not deduplicate by doc_id; repeated imports can "
@@ -893,6 +893,7 @@ def record_to_json(record: ImportRecord) -> dict[str, Any]:
         "content_type": record.content_type,
         "http_status": record.http_status,
         "payload_digest": record.payload_digest,
+        "revision": record_revision(record),
         "text_len": len(record.text),
         "source_file": record.source_file,
         "text": record.text,
@@ -901,6 +902,21 @@ def record_to_json(record: ImportRecord) -> dict[str, Any]:
     if record.extraction_status != "text":
         data["extraction_status"] = record.extraction_status
     return data
+
+
+def record_revision(record: ImportRecord) -> str:
+    """Fingerprint imported metadata and BM25 content without exposing text."""
+    payload = {
+        "doc_id": record.doc_id,
+        "target_uri": record.target_uri,
+        "content_type": record.content_type,
+        "http_status": record.http_status,
+        "text_len": len(record.text),
+        "payload_digest": record.payload_digest,
+        "bm25_content_md5": hashlib.md5(record.text.encode("utf-8")).hexdigest(),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def records_jsonl(records: Iterable[ImportRecord]) -> str:
@@ -1257,6 +1273,7 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
         lance_ids: list[int] = []
         lance_flat_vectors: list[float] = []
         lance_labels: list[str] = []
+        lance_revisions: list[str] = []
         for record in batch_records:
             lines.append(
                 """
@@ -1301,15 +1318,18 @@ INSERT INTO pgwarc_lance.warc_record (
                 lance_ids.append(record.doc_id)
                 lance_flat_vectors.extend(vector)
                 lance_labels.append(record.target_uri or str(record.doc_id))
+                if lance_mode == "outbox":
+                    lance_revisions.append(record_revision(record))
         if bm25_mode == "bulk":
             lines.extend(emit_bm25_bulk_sql(batch_records))
         elif bm25_mode == "copy":
             lines.extend(emit_bm25_copy_sql(batch_records))
         if lance_uri and lance_ids:
             lines.append(
-                f"SELECT {'lance_outbox_enqueue' if lance_mode == 'outbox' else 'lance_upsert_many' if lance_mode == 'upsert' else 'lance_insert_many'}("
+                f"SELECT {'lance_outbox_enqueue_revision' if lance_mode == 'outbox' else 'lance_upsert_many' if lance_mode == 'upsert' else 'lance_insert_many'}("
                 f"{sql_string(lance_uri)}, {sql_bigint_array(lance_ids)}, "
                 f"{sql_vector(lance_flat_vectors)}, {vector_dim}, {sql_text_array(lance_labels)}"
+                f"{', ' + sql_text_array(lance_revisions) if lance_mode == 'outbox' else ''}"
                 ");"
             )
         lines.append("COMMIT;")
@@ -1509,9 +1529,9 @@ BEGIN
     WHERE extname = 'pgwarc_lance';
 
     IF installed_version IS NULL
-       OR string_to_array(installed_version, '.')::integer[] < ARRAY[0, 1, 21] THEN
+       OR string_to_array(installed_version, '.')::integer[] < ARRAY[0, 1, 22] THEN
         RAISE EXCEPTION
-            'Lance outbox requires pgwarc_lance 0.1.21 or newer (found %)',
+            'revisioned Lance outbox requires pgwarc_lance 0.1.22 or newer (found %)',
             COALESCE(installed_version, 'not installed')
             USING ERRCODE = '0A000';
     END IF;

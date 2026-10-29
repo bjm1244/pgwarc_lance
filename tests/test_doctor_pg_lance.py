@@ -17,6 +17,18 @@ class DoctorPgLanceTests(unittest.TestCase):
     def test_reports_duplicates_missing_orphans_stale_label_and_pending_outbox(self):
         pg = {
             "row_count": 4,
+            "revision_count": 3,
+            "revision_rows": [
+                {"doc_id": 1, "expected_revision": doctor_pg_lance._revision_fingerprint({
+                    "doc_id": 1, "has_warc": True, "text_len": 5, "payload_digest": "sha1:a", "bm25_content_md5": "content-a"
+                })},
+                {"doc_id": 2, "expected_revision": doctor_pg_lance._revision_fingerprint({
+                    "doc_id": 2, "has_warc": True, "text_len": 0, "payload_digest": "sha1:b", "bm25_content_md5": "content-b"
+                })},
+                {"doc_id": 3, "expected_revision": doctor_pg_lance._revision_fingerprint({
+                    "doc_id": 3, "has_warc": True, "text_len": 8, "payload_digest": "sha1:c", "bm25_content_md5": None
+                })},
+            ],
             "rows": [
                 {"doc_id": 1, "has_bm25": True, "has_warc": True, "text_len": 5,
                  "payload_digest": "sha1:a", "bm25_content_md5": "content-a"},
@@ -32,10 +44,12 @@ class DoctorPgLanceTests(unittest.TestCase):
         lance = {
             "dataset_count": 4,
             "rows": [
-                {"doc_id": 1, "has_warc": True, "label_matches_metadata": True},
-                {"doc_id": 2, "has_warc": True, "label_matches_metadata": False},
-                {"doc_id": 5, "has_warc": False, "label_matches_metadata": None},
-                {"doc_id": 5, "has_warc": False, "label_matches_metadata": None},
+                {"doc_id": 1, "revision": doctor_pg_lance._revision_fingerprint({
+                    "doc_id": 1, "has_warc": True, "text_len": 5, "payload_digest": "sha1:a", "bm25_content_md5": "content-a"
+                }), "has_warc": True, "label_matches_metadata": True},
+                {"doc_id": 2, "revision": "0" * 64, "has_warc": True, "label_matches_metadata": False},
+                {"doc_id": 5, "revision": None, "has_warc": False, "label_matches_metadata": None},
+                {"doc_id": 5, "revision": None, "has_warc": False, "label_matches_metadata": None},
             ],
         }
 
@@ -49,12 +63,16 @@ class DoctorPgLanceTests(unittest.TestCase):
             "duplicate_lance_ids": 1,
             "missing_vector_candidates": 1,
             "orphan_lance_ids": 1,
+            "orphan_revision_ids": 0,
+            "untracked_vector_ids": 0,
+            "stale_vector_revisions": 1,
+            "postgres_revision_mismatches": 0,
             "stale_label_ids": 1,
             "warc_without_bm25": 1,
             "unfinished_outbox_jobs": 1,
             "unfinished_outbox_document_ids": 1,
         })
-        self.assertFalse(report["revision_check"]["lance_revision_persisted"])
+        self.assertTrue(report["revision_check"]["lance_revision_persisted"])
         self.assertEqual(report["sample_doc_ids"]["duplicate_lance"], [5])
 
     def test_does_not_claim_a_partial_inventory_is_clean(self):
@@ -97,7 +115,8 @@ class DoctorPgLanceTests(unittest.TestCase):
         self.assertIn("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY", kwargs["input"])
         self.assertIn("ROLLBACK", kwargs["input"])
         self.assertIn("decode('L3ByaXZhdGUvcGF0aC90ZXN0LmxhbmNl', 'base64')", kwargs["input"])
-        self.assertEqual(kwargs["input"].count("lance_scan("), 1)
+        self.assertEqual(kwargs["input"].count("lance_scan_document_state("), 1)
+        self.assertIn("lance_document_revision", kwargs["input"])
         self.assertIn("MATERIALIZED", kwargs["input"])
         self.assertEqual(pg["unfinished_jobs"]["rows"], [])
         self.assertEqual(lance["rows"], [])

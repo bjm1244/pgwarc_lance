@@ -13,6 +13,15 @@ import smoke_release_artifacts
 
 EXTENSION_NAME = check_release_artifacts.EXTENSION_NAME
 SmokeError = smoke_release_artifacts.SmokeError
+UPGRADE_BASELINE_SQL_SYMBOLS = [
+    "hello_pgwarc_lance",
+    "bm25_index_document",
+    "bm25_search",
+    "lance_create_table",
+    "lance_insert_many",
+    "lance_outbox_enqueue",
+    "hybrid_warc_search",
+]
 
 
 def sql_literal(value: str) -> str:
@@ -41,6 +50,7 @@ def validate_upgrade_artifacts(
             old_dist_dir,
             version=old_version,
             pg_major=pg_major,
+            required_sql_symbols=UPGRADE_BASELINE_SQL_SYMBOLS,
         )
     )
     errors.extend(
@@ -169,6 +179,52 @@ def run_update_smoke(
         capture=True,
     )
 
+    # The old Lance dataset has no revision column. Confirm the read-only API
+    # exposes that gap, then let the first revisioned outbox upsert evolve the
+    # nullable Lance schema and retain existing IDs/labels.
+    def run_sql(statement: str) -> str:
+        return smoke_release_artifacts.run_command(
+            [
+                "docker", "exec", container, "psql", "-U", user, "-d", database,
+                "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", statement,
+            ],
+            capture=True,
+        ).strip()
+
+    legacy_revision_count = run_sql(
+        "SELECT count(*) FROM lance_scan_document_state('/tmp/pgwarc_artifact_upgrade.lance',10) "
+        "WHERE revision IS NULL;"
+    )
+    if legacy_revision_count != "2":
+        raise SmokeError(
+            "legacy Lance rows were not reported without revisions "
+            f"(expected 2, got {legacy_revision_count!r})"
+        )
+    revision = "a" * 64
+    run_sql(
+        "SELECT lance_outbox_enqueue_revision("
+        "'/tmp/pgwarc_artifact_upgrade.lance',ARRAY[-101]::bigint[],"
+        "ARRAY[0,0,0,0]::real[],4,ARRAY['first']::text[],ARRAY['" + revision + "']::text[]);"
+    )
+    delivery = run_sql("SELECT status FROM lance_outbox_process_next();")
+    if delivery != "completed":
+        failure = run_sql(
+            "SELECT coalesce(last_error, 'no error recorded') "
+            "FROM pgwarc_lance.lance_outbox ORDER BY id DESC LIMIT 1;"
+        )
+        raise SmokeError(
+            "legacy dataset revision upsert did not complete "
+            f"({delivery!r}; {failure!r})"
+        )
+    resulting_revision = run_sql(
+        "SELECT revision FROM lance_scan_document_state('/tmp/pgwarc_artifact_upgrade.lance',10) "
+        "WHERE doc_id=-101;"
+    )
+    if resulting_revision != revision:
+        raise SmokeError("revisioned upsert did not evolve and update the legacy Lance row")
+    if run_sql("SELECT lance_count('/tmp/pgwarc_artifact_upgrade.lance');") != "2":
+        raise SmokeError("revisioned upsert changed the populated Lance row count")
+
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     version = check_release_artifacts.cargo_version()
@@ -219,8 +275,12 @@ def smoke(args: argparse.Namespace) -> None:
                 "docker",
                 "run",
                 "-d",
+                "--network",
+                "none",
                 "--name",
                 container,
+                "--tmpfs",
+                "/var/lib/postgresql/data:rw,nosuid,nodev,size=268435456",
                 "-e",
                 f"POSTGRES_USER={args.user}",
                 "-e",

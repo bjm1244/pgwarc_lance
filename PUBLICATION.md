@@ -1,6 +1,48 @@
 # Source publication review — updated 2026-10-29
 
-## Current source and distribution review: 0.1.21 (2026-10-28)
+## Current source and distribution review: 0.1.22 (2026-10-29)
+
+Issue #6 adds a URI-scoped document revision mapping, revision-bearing Lance
+rows, and a read-only PG–Lance doctor. Re-imports enqueue the content revision
+in PostgreSQL's transactional vector outbox; the supervised worker applies
+retries idempotently and records the applied revision. The doctor compares
+stable IDs and revisions and reports duplicate, missing, orphan, stale and
+unfinished-outbox findings without changing either store.
+
+The locked Linux x86_64 package was built for PostgreSQL 16.15 using Rust
+1.96.0 and cargo-pgrx 0.19.1. Artifact SHA-256 is
+`0e67b2c8259a70c986223f51307c7cd56534d3659d4862e69ac49a961d26e25f`, Cargo.lock
+SHA-256 is
+`854a1cb98e529e7c5fa089741f68d39753e586c8e9da3b12df1688c7ab94a8a9`, and the
+native fingerprint is
+`899c2cafbce2e705cb84a9f380619a07041b02da835b718935fb93a44dfa871c`. Fresh
+installation, the SQL smoke test, all four SQL regressions, the importer and
+reconciliation database run, runtime-safety checks, populated 0.1.21-to-0.1.22
+upgrade and backup/restore checks passed. The isolated reconciliation run
+passed 100 checks on PostgreSQL 16.6; the package artifact targets PostgreSQL
+16.15.
+
+Strict target-filtered notices cover 436 Cargo packages with no missing primary
+texts. The artifact-bound CycloneDX 1.6 SBOM contains 441 components (436 Cargo
+packages and five native/compiler environment components). Its SHA-256 is
+`9c69075fd81fa46ec9da3729a4b4a6b36843d964b485920060f185a220d7f232`; the
+complete notice-bundle SHA-256 is
+`2086597c781294ef80235f125e5aec2bb0dbe62b474c91f806a44a654541ad0d`. RustSec
+audit found zero vulnerabilities, unsound or yanked packages; three
+unmaintained warnings remain. Full hashes and audit scope are in
+[THIRD_PARTY.md](THIRD_PARTY.md).
+
+Issue #6's C1-C3 checks passed for the recorded Linux x86_64 / PG16 build and
+isolated fixtures. PostgreSQL and Lance still lack a distributed atomic
+commit; reconciliation is a point-in-time observation and operators should
+pause writers for a meaningful scan. The content revision does not include
+embedding-model identity, and legacy rows gain a known revision only after an
+upsert. No independent retrieval labels, production SLA, multi-host Lance
+coordination, full raw-WARC re-import, binary redistribution right or
+production approval is established. Public source publication remains a
+separate reviewed fast-forward operation.
+
+## Historical 0.1.21 PG16 package checkpoint (2026-10-28)
 
 Issue #4's package notice and RustSec criteria were rechecked against the
 corrected 0.1.21 Linux x86_64 / PostgreSQL 16.15 artifact. Strict collection

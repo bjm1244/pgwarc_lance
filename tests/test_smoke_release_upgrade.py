@@ -18,7 +18,12 @@ assert SPEC and SPEC.loader
 SPEC.loader.exec_module(smoke_release_upgrade)
 
 
-def write_artifacts(dist_dir: Path, *, version: str) -> None:
+def write_artifacts(
+    dist_dir: Path,
+    *,
+    version: str,
+    sql_symbols: list[str] | None = None,
+) -> None:
     dist_dir.mkdir(parents=True, exist_ok=True)
     (dist_dir / "pgwarc_lance.so").write_bytes(b"\x7fELFfake-shared-object")
     (dist_dir / "pgwarc_lance.control").write_text(
@@ -36,7 +41,10 @@ def write_artifacts(dist_dir: Path, *, version: str) -> None:
     (dist_dir / f"pgwarc_lance--{version}.sql").write_text(
         "\n".join(
             f"-- {symbol}"
-            for symbol in smoke_release_upgrade.check_release_artifacts.REQUIRED_SQL_SYMBOLS
+            for symbol in (
+                sql_symbols
+                or smoke_release_upgrade.check_release_artifacts.REQUIRED_SQL_SYMBOLS
+            )
         )
         + "\n",
         encoding="utf-8",
@@ -86,6 +94,41 @@ class SmokeReleaseUpgradeTests(unittest.TestCase):
             )
 
         self.assertEqual(errors, [])
+
+    def test_upgrade_accepts_legacy_api_but_requires_current_api_after_upgrade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_dist = root / "old"
+            new_dist = root / "new"
+            legacy_symbols = smoke_release_upgrade.UPGRADE_BASELINE_SQL_SYMBOLS
+            write_artifacts(
+                old_dist,
+                version="0.1.21",
+                sql_symbols=legacy_symbols,
+            )
+            write_artifacts(
+                new_dist,
+                version="0.1.22",
+                sql_symbols=[
+                    symbol
+                    for symbol in legacy_symbols
+                    if symbol != "lance_outbox_enqueue"
+                ],
+            )
+            (new_dist / "pgwarc_lance--0.1.21--0.1.22.sql").write_text(
+                "-- upgrade\n",
+                encoding="utf-8",
+            )
+
+            errors = smoke_release_upgrade.validate_upgrade_artifacts(
+                old_dist_dir=old_dist,
+                old_version="0.1.21",
+                new_dist_dir=new_dist,
+                new_version="0.1.22",
+                pg_major=16,
+            )
+
+        self.assertTrue(any("lance_outbox_enqueue_revision" in error for error in errors))
 
     def test_install_upgrade_script_uses_runtime_extension_dir(self):
         commands = []
@@ -142,6 +185,15 @@ class SmokeReleaseUpgradeTests(unittest.TestCase):
 
         def fake_run(command, *, capture=False, quiet=False, check=True):
             commands.append(command)
+            sql = command[-1]
+            if "WHERE revision IS NULL" in sql:
+                return "2"
+            if "lance_outbox_process_next" in sql:
+                return "completed"
+            if "WHERE doc_id=-101" in sql:
+                return "a" * 64
+            if "SELECT lance_count" in sql:
+                return "2"
             return ""
 
         with mock.patch.object(
@@ -159,6 +211,39 @@ class SmokeReleaseUpgradeTests(unittest.TestCase):
         sql = commands[0][-1]
         self.assertIn("ALTER EXTENSION pgwarc_lance UPDATE TO '0.2.0'", sql)
         self.assertIn("SELECT hello_pgwarc_lance()", sql)
+        self.assertTrue(any("lance_scan_document_state" in command[-1] for command in commands[1:]))
+        self.assertTrue(any("lance_outbox_enqueue_revision" in command[-1] for command in commands[1:]))
+        self.assertTrue(any("lance_outbox_process_next" in command[-1] for command in commands[1:]))
+
+    def test_run_update_smoke_includes_outbox_failure_reason(self):
+        commands = []
+
+        def fake_run(command, *, capture=False, quiet=False, check=True):
+            commands.append(command)
+            sql = command[-1]
+            if "WHERE revision IS NULL" in sql:
+                return "2"
+            if "lance_outbox_process_next" in sql:
+                return "pending"
+            if "last_error" in sql:
+                return "injected Lance failure"
+            return ""
+
+        with mock.patch.object(
+            smoke_release_upgrade.smoke_release_artifacts,
+            "run_command",
+            fake_run,
+        ):
+            with self.assertRaisesRegex(
+                smoke_release_upgrade.SmokeError,
+                "injected Lance failure",
+            ):
+                smoke_release_upgrade.run_update_smoke(
+                    container="pg-upgrade",
+                    user="pgwarc_lance",
+                    database="pgwarc_lance_test",
+                    new_version="0.2.0",
+                )
 
     def test_smoke_rejects_invalid_artifacts_before_docker_run(self):
         commands = []
@@ -248,14 +333,17 @@ class SmokeReleaseUpgradeTests(unittest.TestCase):
             smoke_release_upgrade.smoke(args)
 
         self.assertEqual(calls[0][0], "run")
-        self.assertEqual(calls[0][1][:4], ["docker", "rm", "-f", "pg-upgrade"])
+        self.assertEqual(calls[0][1][:5], ["docker", "rm", "-f", "-v", "pg-upgrade"])
+        self.assertIn("--network", calls[1][1])
+        self.assertIn("none", calls[1][1])
+        self.assertIn("/var/lib/postgresql/data:rw,nosuid,nodev,size=268435456", calls[1][1])
         self.assertEqual(calls[2][0], "ready")
         self.assertEqual(calls[3][1]["dist_dir"], Path("/tmp/old"))
         self.assertEqual(calls[4][0], "create_old")
         self.assertEqual(calls[5][1]["dist_dir"], Path("/tmp/new"))
         self.assertEqual(calls[6][0], "upgrade_script")
         self.assertEqual(calls[7][0], "update_smoke")
-        self.assertEqual(calls[-1][1][:4], ["docker", "rm", "-f", "pg-upgrade"])
+        self.assertEqual(calls[-1][1][:5], ["docker", "rm", "-f", "-v", "pg-upgrade"])
 
 
 if __name__ == "__main__":

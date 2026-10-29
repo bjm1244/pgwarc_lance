@@ -1,6 +1,50 @@
 # Development log
 
-## Issue #6 progress — read-only PG–Lance doctor baseline (2026-10-29)
+## Issue #6 — revision reconciliation, idempotent updates and recovery (2026-10-29)
+
+- The selected P0 issue #6 was completed on the canonical `development` line;
+  native implementation commit: `4f60d06cef95f2f160c993d37f29e348228bafbd`.
+- C1: stable URI/document/revision mappings and Lance row revisions let the
+  read-only doctor detect duplicate PostgreSQL/Lance IDs, missing vectors,
+  orphan rows, stale revisions/labels and unfinished outbox work. The doctor
+  performs no repair and reports the limit of cross-store point-in-time reads.
+- C2: repeated and concurrent importer updates are ordered by committed
+  revisions. The isolated PostgreSQL 16 reconciliation run passed 100 checks,
+  including convergence of BM25, metadata and Lance to the expected revision,
+  duplicate replay idempotence and delayed outbox delivery.
+- C3: an injected failure after the external Lance write left the SQL event
+  retryable. The doctor reported the mismatch without changing either store;
+  an explicit worker retry reconciled the expected revision without adding a
+  duplicate vector. No destructive repair runs by default.
+- A locked Rust 1.96.0 / cargo-pgrx 0.19.1 package build for Linux x86_64 / PG
+  16.15 passed. The artifact passed fresh installation, SQL smoke, all four SQL
+  regressions, importer/reconciliation DB, 18 runtime-safety checks, populated
+  0.1.21-to-0.1.22 upgrade and 15 backup/restore checks. The complete Python
+  suite passed 496 tests; documentation and Rust formatting checks passed.
+- Artifact SHA-256 is
+  `0e67b2c8259a70c986223f51307c7cd56534d3659d4862e69ac49a961d26e25f`; Cargo.lock
+  SHA-256 is
+  `854a1cb98e529e7c5fa089741f68d39753e586c8e9da3b12df1688c7ab94a8a9`; native
+  fingerprint is
+  `899c2cafbce2e705cb84a9f380619a07041b02da835b718935fb93a44dfa871c`. Strict
+  notices cover 436 Cargo packages. The 441-component CycloneDX SBOM SHA-256 is
+  `9c69075fd81fa46ec9da3729a4b4a6b36843d964b485920060f185a220d7f232`; the
+  complete notice bundle SHA-256 is
+  `2086597c781294ef80235f125e5aec2bb0dbe62b474c91f806a44a654541ad0d`.
+  `cargo-audit` found zero vulnerabilities, unsound or yanked packages; three
+  unmaintained warnings remain. Full target and license scope is in
+  [THIRD_PARTY.md](../THIRD_PARTY.md).
+- Remaining limits: PostgreSQL and Lance have no distributed atomic commit;
+  the revision omits embedding-model identity; legacy rows acquire a known
+  revision after upsert. This does not establish independent retrieval
+  relevance, production SLA, multi-host Lance coordination, fresh raw-WARC
+  ingestion, binary redistribution rights or production approval. Public
+  GitHub publication remains with the separate reviewed publisher.
+- Private command logs and DB evidence are retained outside the public source.
+  The runner selects the next issue after publication; no unrelated issue was
+  started in this cycle.
+
+## Issue #6 initial progress — read-only PG–Lance doctor baseline (2026-10-29)
 
 - The issue queue selected P0 issue #6 after issue #5's published outbox
   prerequisite. Work continued on the clean canonical `development` branch

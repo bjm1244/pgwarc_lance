@@ -24,12 +24,22 @@ import smoke_release_artifacts
 import warc_importer
 
 
-def fixture_warc(uri: str) -> bytes:
-    body = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\r\noutbox consistency fixture\r\n"
+def fixture_warc(
+    uri: str,
+    text: str = "outbox consistency fixture",
+    payload_digest: str | None = None,
+    content_type: str = "text/plain",
+) -> bytes:
+    body = (
+        f"HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\r\n"
+        + text + "\r\n"
+    ).encode("utf-8")
+    digest_header = f"WARC-Payload-Digest: {payload_digest}\r\n" if payload_digest else ""
     header = (
         "WARC/1.1\r\nWARC-Type: response\r\n"
         f"WARC-Target-URI: {uri}\r\nWARC-Date: 2026-10-28T00:00:00Z\r\n"
         f"WARC-Record-ID: <urn:uuid:{uuid.uuid4()}>\r\n"
+        f"{digest_header}"
         "Content-Type: application/http; msgtype=response\r\n"
         f"Content-Length: {len(body)}\r\n\r\n"
     ).encode("ascii")
@@ -41,6 +51,7 @@ def main() -> int:
     parser.add_argument("--dist-dir", type=Path, required=True)
     parser.add_argument("--version", default=check_release_artifacts.cargo_version())
     parser.add_argument("--postgres-image", default="postgres:16")
+    parser.add_argument("--postgres-data-dir", type=Path)
     parser.add_argument("--json-output", type=Path)
     args = parser.parse_args()
     errors = check_release_artifacts.validate_artifacts(args.dist_dir, version=args.version, pg_major=16)
@@ -66,6 +77,17 @@ def main() -> int:
         "scope": "isolated PostgreSQL 16 and disposable Lance datasets; synthetic importer fixture; no production data",
         "checks": {},
     }
+    data_mount: list[str] = []
+    if args.postgres_data_dir is not None:
+        data_dir = args.postgres_data_dir.resolve()
+        data_dir.mkdir(parents=True, exist_ok=True)
+        if any(data_dir.iterdir()):
+            raise ValueError(f"PostgreSQL data directory must be empty: {data_dir}")
+        report["postgres_data_dir"] = str(data_dir)
+        data_mount = [
+            "--mount",
+            f"type=bind,src={data_dir},dst=/var/lib/postgresql/data",
+        ]
     checks = report["checks"]
     created = False
     writer: subprocess.Popen[str] | None = None
@@ -155,7 +177,8 @@ def main() -> int:
     try:
         run([
             "docker", "run", "-d", "--name", container, "--network", "none",
-            "--cpus", "2", "--memory", "3g", "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
+            "--cpus", "2", "--memory", "3g", *data_mount,
+            "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
             args.postgres_image,
         ])
         created = True
@@ -165,7 +188,7 @@ def main() -> int:
         expect(sql("SELECT extversion FROM pg_extension WHERE extname='pgwarc_lance';"), args.version, "fresh_pg16_extension_install")
         report["postgres_version"] = sql("SHOW server_version;")
         expect(
-            sql("SELECT count(*)=2 FROM pg_proc WHERE proname IN ('lance_outbox_enqueue','lance_outbox_process_next') "
+            sql("SELECT count(*)=3 FROM pg_proc WHERE proname IN ('lance_outbox_enqueue','lance_outbox_enqueue_revision','lance_outbox_process_next') "
                 "AND prosecdef AND proconfig @> ARRAY['search_path=pg_catalog, pg_temp']::text[];"),
             "t",
             "outbox_functions_use_locked_security_definer_search_path",
@@ -177,6 +200,8 @@ def main() -> int:
             GRANT USAGE ON SCHEMA public, pgwarc_lance
                 TO pgwarc_outbox_ingest, pgwarc_outbox_worker, pgwarc_outbox_unprivileged;
             GRANT EXECUTE ON FUNCTION public.lance_outbox_enqueue(text,bigint[],real[],integer,text[])
+                TO pgwarc_outbox_ingest;
+            GRANT EXECUTE ON FUNCTION public.lance_outbox_enqueue_revision(text,bigint[],real[],integer,text[],text[])
                 TO pgwarc_outbox_ingest;
             GRANT SELECT ON pgwarc_lance.lance_outbox_status,
                 pgwarc_lance.lance_outbox_failures TO pgwarc_outbox_worker;
@@ -340,6 +365,17 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
         expect(sql(f"SELECT state||'|'||applied_version::text||'|'||(completed_at IS NOT NULL)::text FROM pgwarc_lance.lance_outbox WHERE id={imported_event_id};"), f"completed|{version}|true", "completion_persists_applied_version")
         expect(sql(f"SELECT cardinality(ids)||'|'||cardinality(flat_vectors)||'|'||cardinality(labels) FROM pgwarc_lance.lance_outbox WHERE id={imported_event_id};"), "0|0|0", "completed_event_releases_vector_payload")
         expect(sql(f"SELECT id||'|'||label FROM lance_scan('{uri}',10) WHERE id={doc_id};"), f"{doc_id}|{warc_uri}", "vector_visible_after_outbox_completion")
+        expected_revision = warc_importer.record_revision(imported)
+        expect(
+            sql(f"SELECT revision FROM lance_scan_document_state('{uri}',10) WHERE doc_id={doc_id};"),
+            expected_revision,
+            "lance_persists_import_document_revision",
+        )
+        expect(
+            sql(f"SELECT expected_revision FROM pgwarc_lance.lance_document_revision WHERE uri='{uri}' AND doc_id={doc_id};"),
+            expected_revision,
+            "postgres_persists_uri_document_revision_mapping",
+        )
         bm25_after = sql(f"SELECT string_agg(doc_id::text||':'||score::text,',' ORDER BY doc_id) FROM bm25_search('outbox',10) WHERE doc_id={doc_id};")
         expect(bm25_after, bm25_before, "same_fixture_bm25_fingerprint_unchanged_after_vector_delivery")
         expect(sql(f"SELECT max(latest_applied_version)||'|'||bool_or(last_completed_at IS NOT NULL)::text FROM pgwarc_lance.lance_outbox_status WHERE uri='{uri}';"), f"{version}|true", "dataset_status_reports_version_and_completion")
@@ -350,6 +386,197 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
             sql(f"SELECT count(*) FROM pgwarc_lance.lance_write_log WHERE uri='{uri}' AND op='outbox_upsert_many';"),
             str(write_log_before + 1),
             "successful_delivery_logged",
+        )
+
+        # Race two importer transactions for one stable ID with distinct content
+        # revisions. Queue order must leave the last committed input on Lance.
+        revision_uri = f"/tmp/pgwarc_revision_{suffix}.lance"
+        sql(f"SELECT lance_create_table('{revision_uri}',4,false);")
+        with tempfile.TemporaryDirectory(prefix="pgwarc-concurrent-revision-") as tmp:
+            root = Path(tmp)
+            paths = [root / "alpha.warc", root / "beta.warc"]
+            texts = ["revision alpha body", "revision beta body"]
+            for path, text, content_type in zip(
+                paths, texts, ["text/plain;variant=alpha", "text/plain;variant=beta"], strict=True
+            ):
+                path.write_bytes(fixture_warc(
+                    f"https://example.test/revision/{suffix}", text, "sha1:stable-capture", content_type
+                ))
+            records = [next(warc_importer.iter_import_records([path], None, 1)) for path in paths]
+            if records[0].doc_id != records[1].doc_id:
+                raise AssertionError("same capture identity produced different document IDs")
+            if warc_importer.record_revision(records[0]) == warc_importer.record_revision(records[1]):
+                raise AssertionError("changed indexed content did not produce a new revision")
+
+            def start_import(path: Path, index: int) -> subprocess.Popen[str]:
+                return subprocess.Popen(
+                    [
+                        sys.executable, str(Path(__file__).resolve().parents[1] / "tools" / "warc_importer.py"),
+                        str(path), "--execute", "--skip-schema", "--psql", shlex.join(sql_command),
+                        "--lance-uri", revision_uri, "--lance-mode", "outbox", "--vector-dim", "4",
+                        "--summary-json", str(root / f"summary-{index}.json"),
+                    ],
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+
+            imports = [start_import(path, index) for index, path in enumerate(paths)]
+            for process in imports:
+                stdout, stderr = process.communicate(timeout=180)
+                if process.returncode:
+                    raise AssertionError(f"concurrent importer failed: {stdout[-1000:]} {stderr[-2000:]}")
+        revision_doc_id = records[0].doc_id
+        expect(
+            sql(f"SELECT count(*) FROM pgwarc_lance.lance_outbox WHERE uri='{revision_uri}' AND ids=ARRAY[{revision_doc_id}]::bigint[] AND state='pending';"),
+            "2",
+            "concurrent_revision_updates_commit_two_ordered_jobs",
+        )
+        expect(
+            sql(
+                f"SELECT expected_revision=(SELECT revisions[1] FROM pgwarc_lance.lance_outbox "
+                f"WHERE uri='{revision_uri}' ORDER BY id DESC LIMIT 1) FROM pgwarc_lance.lance_document_revision "
+                f"WHERE uri='{revision_uri}' AND doc_id={revision_doc_id};"
+            ),
+            "t",
+            "latest_committed_revision_is_the_expected_revision",
+        )
+        latest_revision = sql(
+            f"SELECT revisions[1] FROM pgwarc_lance.lance_outbox WHERE uri='{revision_uri}' ORDER BY id DESC LIMIT 1;"
+        )
+        latest_record = next(record for record in records if warc_importer.record_revision(record) == latest_revision)
+        expect(
+            sql(f"SELECT content FROM pgwarc_lance.bm25_doc WHERE doc_id={revision_doc_id};"),
+            latest_record.text,
+            "concurrent_bm25_state_matches_latest_document_revision",
+        )
+        expect(
+            sql(f"SELECT content_type FROM pgwarc_lance.warc_record WHERE doc_id={revision_doc_id};"),
+            latest_record.content_type or "",
+            "concurrent_metadata_matches_latest_document_revision",
+        )
+        first_revision_delivery = worker_once()
+        assert first_revision_delivery is not None
+        partial_revision_doctor = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parents[1] / "tools" / "doctor_pg_lance.py"),
+             "--uri", revision_uri, "--psql", shlex.join(sql_command), "--max-rows", "20"],
+            text=True, capture_output=True, timeout=90,
+        )
+        if partial_revision_doctor.returncode != 1:
+            raise AssertionError(f"doctor did not detect the queued stale revision: {partial_revision_doctor.stderr[-2000:]}")
+        partial_report = json.loads(partial_revision_doctor.stdout)
+        expect(str(partial_report["findings"]["stale_vector_revisions"]), "1", "doctor_finds_concurrent_update_revision_lag")
+        expect(sql(f"SELECT lance_count('{revision_uri}');"), "1", "same_document_concurrent_updates_keep_one_vector_row")
+        final_revision_delivery = worker_once()
+        assert final_revision_delivery is not None
+        expected_revision = sql(
+            f"SELECT expected_revision FROM pgwarc_lance.lance_document_revision WHERE uri='{revision_uri}' AND doc_id={revision_doc_id};"
+        )
+        expect(
+            sql(f"SELECT revision FROM lance_scan_document_state('{revision_uri}',10) WHERE doc_id={revision_doc_id};"),
+            expected_revision,
+            "concurrent_revisions_converge_to_latest_expected_revision",
+        )
+        expect(sql(f"SELECT lance_count('{revision_uri}');"), "1", "concurrent_revision_replay_is_idempotent")
+
+        role_uri = f"/tmp/pgwarc_revision_role_{suffix}.lance"
+        role_revision = "d" * 64
+        sql(f"SELECT lance_create_table('{role_uri}',4,false);")
+        role_job = sql(
+            f"SET ROLE pgwarc_outbox_ingest; SELECT lance_outbox_enqueue_revision('{role_uri}',"
+            f"ARRAY[-839001]::bigint[],ARRAY[5,0,0,0]::real[],4,ARRAY['writer-role']::text[],"
+            f"ARRAY['{role_revision}']::text[]); RESET ROLE;"
+        )
+        if not role_job.isdecimal():
+            raise AssertionError(f"scoped writer role did not enqueue a job: {role_job!r}")
+        checks["revisioned_enqueue_accepts_only_the_granted_writer_role"] = True
+        expect(
+            sql(f"SELECT expected_revision FROM pgwarc_lance.lance_document_revision WHERE uri='{role_uri}' AND doc_id=-839001;"),
+            role_revision,
+            "revisioned_enqueue_maintains_mapping_for_scoped_writer_role",
+        )
+        expect(sql("SELECT status FROM lance_outbox_process_next();"), "completed", "scoped_writer_job_delivered")
+        expect(
+            sql(f"SELECT revision FROM lance_scan_document_state('{role_uri}',10) WHERE doc_id=-839001;"),
+            role_revision,
+            "scoped_writer_revision_reaches_lance",
+        )
+
+        # Simulate the cross-store crash window: Lance has accepted the upsert,
+        # but PostgreSQL cannot acknowledge the job. The read-only doctor must
+        # leave both stores unchanged, and an explicit worker retry must
+        # converge to the same single row without destructive repair.
+        recovery_uri = f"/tmp/pgwarc_recovery_{suffix}.lance"
+        recovery_revision = "c" * 64
+        sql(f"SELECT lance_create_table('{recovery_uri}',4,false);")
+        recovery_id = sql(
+            f"SELECT lance_outbox_enqueue_revision('{recovery_uri}',ARRAY[-840001]::bigint[],"
+            f"ARRAY[4,0,0,0]::real[],4,ARRAY['recoverable']::text[],"
+            f"ARRAY['{recovery_revision}']::text[]);"
+        )
+        sql("""
+            CREATE FUNCTION public.issue6_fail_outbox_ack() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.state = 'completed' THEN
+                    RAISE EXCEPTION 'injected PostgreSQL acknowledgment failure'
+                        USING ERRCODE = 'P0001';
+                END IF;
+                RETURN NEW;
+            END $$;
+            CREATE TRIGGER issue6_fail_outbox_ack
+                BEFORE UPDATE OF state ON pgwarc_lance.lance_outbox
+                FOR EACH ROW EXECUTE FUNCTION public.issue6_fail_outbox_ack();
+        """)
+        partial_failure = subprocess.run(
+            sql_command,
+            input="SELECT * FROM lance_outbox_process_next();",
+            text=True,
+            capture_output=True,
+            timeout=90,
+        )
+        if partial_failure.returncode == 0 or "P0001" not in partial_failure.stderr or "injected PostgreSQL acknowledgment failure" not in partial_failure.stderr:
+            raise AssertionError(
+                f"injected cross-store acknowledgment failure was not observed: "
+                f"{partial_failure.stdout} {partial_failure.stderr}"
+            )
+        checks["partial_external_write_database_ack_failure_injected"] = True
+        expect(sql(f"SELECT lance_count('{recovery_uri}');"), "1", "partial_failure_left_one_external_vector")
+        expect(
+            sql(f"SELECT state||'|'||attempt_count::text FROM pgwarc_lance.lance_outbox WHERE id={recovery_id};"),
+            "pending|0",
+            "partial_failure_kept_database_job_retryable",
+        )
+        recovery_before_doctor = sql(
+            f"SELECT lance_count('{recovery_uri}')||'|'||"
+            f"(SELECT count(*) FROM lance_dataset_versions('{recovery_uri}'))||'|'||"
+            f"(SELECT state FROM pgwarc_lance.lance_outbox WHERE id={recovery_id})||'|'||"
+            f"(SELECT count(*) FROM pgwarc_lance.lance_write_log WHERE uri='{recovery_uri}');"
+        )
+        recovery_doctor = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parents[1] / "tools" / "doctor_pg_lance.py"),
+             "--uri", recovery_uri, "--psql", shlex.join(sql_command), "--max-rows", "20"],
+            text=True,
+            capture_output=True,
+            timeout=90,
+        )
+        if recovery_doctor.returncode != 1:
+            raise AssertionError(f"doctor did not report retryable partial failure: {recovery_doctor.stderr[-2000:]}")
+        recovery_report = json.loads(recovery_doctor.stdout)
+        expect(str(recovery_report["findings"]["unfinished_outbox_jobs"]), "1", "doctor_reports_partial_failure_for_operator")
+        recovery_after_doctor = sql(
+            f"SELECT lance_count('{recovery_uri}')||'|'||"
+            f"(SELECT count(*) FROM lance_dataset_versions('{recovery_uri}'))||'|'||"
+            f"(SELECT state FROM pgwarc_lance.lance_outbox WHERE id={recovery_id})||'|'||"
+            f"(SELECT count(*) FROM pgwarc_lance.lance_write_log WHERE uri='{recovery_uri}');"
+        )
+        expect(recovery_after_doctor, recovery_before_doctor, "partial_failure_doctor_is_read_only")
+        sql("DROP TRIGGER issue6_fail_outbox_ack ON pgwarc_lance.lance_outbox; DROP FUNCTION public.issue6_fail_outbox_ack();")
+        recovery_delivery = sql("SELECT status FROM lance_outbox_process_next();")
+        expect(recovery_delivery, "completed", "explicit_retry_recovers_partial_cross_store_write")
+        expect(sql(f"SELECT lance_count('{recovery_uri}');"), "1", "explicit_retry_does_not_duplicate_vector")
+        expect(
+            sql(f"SELECT revision FROM lance_scan_document_state('{recovery_uri}',10) WHERE doc_id=-840001;"),
+            recovery_revision,
+            "explicit_retry_converges_to_expected_revision",
         )
 
         # Dimension mismatch is a real Lance-side failure: the worker records it,
@@ -384,6 +611,27 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
             SELECT bm25_index_document(-851004,'stale label content');
             SELECT bm25_index_document(-851005,'pending vector content');
         """)
+        doctor_revisions = []
+        for doc_id, digest, content, target_uri, text_len in [
+            (-851001, "sha1:ok", "doctor expected content", "https://example.test/doctor/ok", 5),
+            (-851003, "sha1:missing", "missing vector content", "https://example.test/doctor/missing", 7),
+            (-851004, "sha1:stale", "stale label content", "https://example.test/doctor/stale", 4),
+            (-851005, "sha1:pending", "pending vector content", "https://example.test/doctor/pending", 6),
+        ]:
+            rev = hashlib.sha256(json.dumps({
+                "doc_id": doc_id,
+                "target_uri": target_uri,
+                "content_type": None,
+                "http_status": None,
+                "text_len": text_len,
+                "payload_digest": digest,
+                "bm25_content_md5": hashlib.md5(content.encode("utf-8")).hexdigest(),
+            }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            doctor_revisions.append(f"('{doctor_uri}',{doc_id},'{rev}')")
+        sql(
+            "INSERT INTO pgwarc_lance.lance_document_revision(uri,doc_id,expected_revision) VALUES "
+            + ",".join(doctor_revisions) + ";"
+        )
         sql(
             f"SELECT lance_insert_many('{doctor_uri}',ARRAY[-851001,-851004,-851006]::bigint[],"
             "ARRAY[1,0,0,1,1,1]::real[],2,"
@@ -394,6 +642,21 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
             f"SELECT lance_outbox_enqueue('{doctor_uri}',ARRAY[-851005]::bigint[],"
             "ARRAY[3,3]::real[],2,ARRAY['https://example.test/doctor/pending']::text[]);"
         )
+        doctor_role = f"pgwarc_doctor_{suffix}"
+        sql(f"""
+            CREATE ROLE {doctor_role} NOLOGIN;
+            GRANT USAGE ON SCHEMA public, pgwarc_lance TO {doctor_role};
+            GRANT SELECT ON pgwarc_lance.bm25_doc, pgwarc_lance.warc_record TO {doctor_role};
+            GRANT SELECT (uri, doc_id, expected_revision)
+                ON pgwarc_lance.lance_document_revision TO {doctor_role};
+            GRANT SELECT (id, uri, state, ids) ON pgwarc_lance.lance_outbox TO {doctor_role};
+            GRANT EXECUTE ON FUNCTION public.lance_scan_document_state(text,integer) TO {doctor_role};
+        """)
+        doctor_sql_command = [
+            "docker", "exec", "-i", "-e", f"PGOPTIONS=-c role={doctor_role}", container,
+            "psql", "-X", "-q", "-A", "-t", "-F", "|", "-v", "ON_ERROR_STOP=1",
+            "-v", "VERBOSITY=verbose", "-U", "postgres", "-d", "postgres",
+        ]
         doctor_before = sql(
             f"SELECT lance_count('{doctor_uri}')||'|'||"
             f"(SELECT count(*) FROM lance_dataset_versions('{doctor_uri}'))||'|'||"
@@ -402,7 +665,7 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
         )
         doctor = subprocess.run(
             [sys.executable, str(Path(__file__).resolve().parents[1] / "tools" / "doctor_pg_lance.py"),
-             "--uri", doctor_uri, "--psql", shlex.join(sql_command), "--max-rows", "20"],
+             "--uri", doctor_uri, "--psql", shlex.join(doctor_sql_command), "--max-rows", "20"],
             text=True, capture_output=True, timeout=90,
         )
         if doctor.returncode != 1:
@@ -413,15 +676,17 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
         expect(doctor_report["status"], "findings", "doctor_reports_reconciliation_findings")
         expect(str(doctor_report["read_only"]), "True", "doctor_marks_read_only_mode")
         expect(str(doctor_report["findings"]["duplicate_lance_ids"]), "1", "doctor_detects_duplicate_lance_id")
-        expect(str(doctor_report["findings"]["missing_vector_candidates"]), "2", "doctor_detects_missing_vector_candidates")
+        expect(str(doctor_report["findings"]["missing_vector_candidates"]), "1", "doctor_detects_missing_vector_candidates")
         expect(str(doctor_report["findings"]["orphan_lance_ids"]), "1", "doctor_detects_orphan_lance_id")
+        expect(str(doctor_report["findings"]["stale_vector_revisions"]), "2", "doctor_detects_stale_vector_revisions")
         expect(str(doctor_report["findings"]["stale_label_ids"]), "1", "doctor_detects_stale_metadata_label")
         expect(str(doctor_report["findings"]["unfinished_outbox_jobs"]), "1", "doctor_detects_unfinished_outbox")
         expect(str(doctor_report["findings"]["unfinished_outbox_document_ids"]), "1", "doctor_counts_pending_document_ids")
         expect(str(doctor_report["reconciliation_complete"]), "False", "doctor_does_not_claim_complete_reconciliation")
-        expect(str(doctor_report["revision_check"]["postgres_documents_scoped_to_lance_uri"]), "False", "doctor_discloses_missing_uri_mapping")
+        expect(str(doctor_report["revision_check"]["postgres_documents_scoped_to_lance_uri"]), "True", "doctor_uses_uri_document_revision_mapping")
         expect(str(doctor_report["revision_check"]["lance_revision_persisted"]), "False", "doctor_discloses_missing_lance_revision")
         expect(str(doctor_report["snapshot"]["cross_store_atomic_snapshot"]), "False", "doctor_discloses_cross_store_snapshot_limit")
+        checks["read_only_doctor_runs_with_column_scoped_reader_grants"] = True
         doctor_after = sql(
             f"SELECT lance_count('{doctor_uri}')||'|'||"
             f"(SELECT count(*) FROM lance_dataset_versions('{doctor_uri}'))||'|'||"

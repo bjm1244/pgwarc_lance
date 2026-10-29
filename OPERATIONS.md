@@ -49,7 +49,13 @@ GRANT USAGE ON SCHEMA public, pgwarc_lance TO pgwarc_reader, pgwarc_writer;
 
 GRANT SELECT ON pgwarc_lance.bm25_doc, pgwarc_lance.bm25_term,
     pgwarc_lance.bm25_long_term, pgwarc_lance.warc_record TO pgwarc_reader;
+GRANT SELECT (uri, doc_id, expected_revision)
+    ON pgwarc_lance.lance_document_revision TO pgwarc_reader;
+GRANT SELECT (id, uri, state, ids)
+    ON pgwarc_lance.lance_outbox TO pgwarc_reader;
 GRANT EXECUTE ON FUNCTION public.hybrid_warc_search(text,real[],text,integer)
+    TO pgwarc_reader;
+GRANT EXECUTE ON FUNCTION public.lance_scan_document_state(text,integer)
     TO pgwarc_reader;
 
 GRANT SELECT, INSERT, UPDATE ON pgwarc_lance.bm25_doc,
@@ -62,7 +68,9 @@ GRANT SELECT (uri, state) ON pgwarc_lance.lance_outbox TO pgwarc_writer;
 GRANT SELECT ON pgwarc_lance.lance_outbox_status TO pgwarc_reader, pgwarc_writer;
 GRANT EXECUTE ON FUNCTION public.bm25_index_document(bigint,text),
     public.lance_upsert_many(text,bigint[],real[],integer,text[]),
-    public.lance_outbox_enqueue(text,bigint[],real[],integer,text[]) TO pgwarc_writer;
+    public.lance_outbox_enqueue(text,bigint[],real[],integer,text[]),
+    public.lance_outbox_enqueue_revision(text,bigint[],real[],integer,text[],text[])
+    TO pgwarc_writer;
 
 CREATE ROLE pgwarc_outbox_worker NOLOGIN;
 GRANT USAGE ON SCHEMA public, pgwarc_lance TO pgwarc_outbox_worker;
@@ -112,6 +120,15 @@ python3 tools/warc_importer.py input.warc.gz --skip-schema \
 python3 tools/lance_outbox_worker.py --psql "$WORKER_PSQL" --poll-interval-ms 1000
 ```
 
+Revision-aware `outbox` imports require extension 0.1.22 or newer. The importer
+records a content revision in PostgreSQL and the worker writes the same value to
+the Lance row. The revision combines the stable document ID, WARC target URI,
+content type, HTTP status, extracted text length, payload digest and BM25 content
+checksum; it does not identify the embedding model. Existing
+Lance rows acquire a nullable `revision` column on their first upsert, and stay
+unversioned until such an update. Do not grant the writer direct access to
+`lance_document_revision`; the security-definer enqueue function maintains it.
+
 Run one worker instance per deployment unless the workload needs parallelism;
 multiple workers are safe, and PostgreSQL row/advisory locks preserve the event
 order for each URI. A failed earlier event blocks later work for that URI.
@@ -127,8 +144,18 @@ FROM pgwarc_lance.lance_outbox_failures
 ORDER BY id;
 ```
 
-After resolving a permanent failure and confirming an ID-upsert replay is safe,
-an administrator may return that event to the retry queue:
+If PostgreSQL rolled back its acknowledgment after a Lance upsert, the event
+remains `pending`. Run the worker explicitly to replay that ID-upsert; it
+converges on the same Lance row and does not delete or overwrite the dataset:
+
+```bash
+python3 tools/lance_outbox_worker.py --once --psql "$WORKER_PSQL"
+```
+
+For a terminal `failed` event, first inspect `last_error` and compare PostgreSQL
+with Lance using the read-only doctor. After resolving the cause and confirming
+an ID-upsert replay is safe, an administrator may return that event to the retry
+queue:
 
 ```sql
 UPDATE pgwarc_lance.lance_outbox

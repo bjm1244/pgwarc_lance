@@ -11,7 +11,8 @@ use arrow::datatypes::{DataType, Field, FieldRef, Schema};
 use futures::StreamExt;
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::{
-    Dataset, MergeInsertBuilder, WhenMatched, WhenNotMatched, WriteMode, WriteParams,
+    Dataset, MergeInsertBuilder, NewColumnTransform, WhenMatched, WhenNotMatched, WriteMode,
+    WriteParams,
 };
 use pgrx::check_for_interrupts;
 use std::sync::Arc;
@@ -58,6 +59,12 @@ pub struct ScanRow {
 pub struct DatasetVersion {
     pub version: i64,
     pub created_ms: i64,
+}
+
+pub struct DocumentState {
+    pub id: i64,
+    pub label: Option<String>,
+    pub revision: Option<String>,
 }
 
 /// Runtime used to drive Lance futures.
@@ -109,6 +116,7 @@ fn schema(vector_dim: i32) -> Arc<Schema> {
             false,
         ),
         Field::new("label", DataType::Utf8, true),
+        Field::new("revision", DataType::Utf8, true),
     ]))
 }
 
@@ -136,16 +144,18 @@ fn make_batch(
     ids: Vec<i64>,
     flat_vectors: Vec<f32>,
     labels: Vec<Option<String>>,
+    revisions: Vec<Option<String>>,
     vector_dim: i32,
 ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
     if vector_dim <= 0 {
         return Err(format!("vector_dim must be positive: {vector_dim}").into());
     }
-    if ids.len() != labels.len() {
+    if ids.len() != labels.len() || ids.len() != revisions.len() {
         return Err(format!(
-            "row count mismatch: {} ids but {} labels",
+            "row count mismatch: {} ids, {} labels, and {} revisions",
             ids.len(),
-            labels.len()
+            labels.len(),
+            revisions.len()
         )
         .into());
     }
@@ -168,6 +178,7 @@ fn make_batch(
     let id_array = Int64Array::from(ids);
     let vector_array = to_fixed_size_list(flat_vectors, vector_dim)?;
     let label_array = StringArray::from(labels);
+    let revision_array = StringArray::from(revisions);
 
     let batch = RecordBatch::try_new(
         schema(vector_dim),
@@ -175,9 +186,32 @@ fn make_batch(
             Arc::new(id_array),
             Arc::new(vector_array),
             Arc::new(label_array),
+            Arc::new(revision_array),
         ],
     )?;
     Ok(batch)
+}
+
+fn ensure_revision_column(dataset: &mut Dataset) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(field) = dataset.schema().field("revision") {
+        if field.data_type() != DataType::Utf8 {
+            return Err("Lance revision column must be UTF-8".into());
+        }
+        return Ok(());
+    }
+    block_on(async {
+        dataset
+            .add_columns(
+                NewColumnTransform::SqlExpressions(vec![(
+                    "revision".to_string(),
+                    "CAST(NULL AS STRING)".to_string(),
+                )]),
+                None,
+                None,
+            )
+            .await
+    })?;
+    Ok(())
 }
 
 fn dataset_vector_dim(dataset: &Dataset) -> Result<i32, Box<dyn std::error::Error>> {
@@ -196,7 +230,7 @@ pub fn create_dataset(
     vector_dim: i32,
     overwrite: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let batch = make_batch(vec![], vec![], vec![], vector_dim)?;
+    let batch = make_batch(vec![], vec![], vec![], vec![], vector_dim)?;
     let params = WriteParams {
         mode: if overwrite {
             WriteMode::Overwrite
@@ -219,6 +253,7 @@ pub fn insert_rows(
     labels: Vec<Option<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut dataset = open_dataset(uri)?;
+    ensure_revision_column(&mut dataset)?;
     let vector_dim = dataset_vector_dim(&dataset)?;
 
     let mut flat = Vec::with_capacity(vectors.len() * vector_dim as usize);
@@ -234,7 +269,8 @@ pub fn insert_rows(
         flat.extend_from_slice(v);
     }
 
-    let batch = make_batch(ids, flat, labels, vector_dim)?;
+    let row_count = ids.len();
+    let batch = make_batch(ids, flat, labels, vec![None; row_count], vector_dim)?;
     let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema(vector_dim));
 
     block_on(async { dataset.append(reader, None).await })?;
@@ -251,6 +287,7 @@ pub fn insert_flat_rows(
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let row_count = ids.len();
     let mut dataset = open_dataset(uri)?;
+    ensure_revision_column(&mut dataset)?;
     let dataset_dim = dataset_vector_dim(&dataset)?;
     if vector_dim != dataset_dim {
         return Err(format!(
@@ -260,7 +297,7 @@ pub fn insert_flat_rows(
         .into());
     }
 
-    let batch = make_batch(ids, flat_vectors, labels, vector_dim)?;
+    let batch = make_batch(ids, flat_vectors, labels, vec![None; row_count], vector_dim)?;
     let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema(vector_dim));
 
     block_on(async { dataset.append(reader, None).await })?;
@@ -276,12 +313,18 @@ pub fn upsert_flat_rows(
     flat_vectors: Vec<f32>,
     vector_dim: i32,
     labels: Vec<Option<String>>,
+    revisions: Vec<Option<String>>,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let row_count = ids.len();
     if row_count == 0 {
         return Ok(0);
     }
+    if ids.len() != labels.len() || ids.len() != revisions.len() {
+        return Err("upsert requires matching ID, label, and revision counts".into());
+    }
     let dataset = open_dataset(uri)?;
+    let mut dataset = dataset;
+    ensure_revision_column(&mut dataset)?;
     if dataset_vector_dim(&dataset)? != vector_dim {
         return Err("vector dimension mismatch in upsert".into());
     }
@@ -310,7 +353,7 @@ pub fn upsert_flat_rows(
             }
         }
     }
-    let batch = make_batch(ids, flat_vectors, labels, vector_dim)?;
+    let batch = make_batch(ids, flat_vectors, labels, revisions, vector_dim)?;
     let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema(vector_dim));
     let mut builder = MergeInsertBuilder::try_new(Arc::new(dataset), vec!["id".to_string()])?;
     builder
@@ -320,6 +363,68 @@ pub fn upsert_flat_rows(
     block_on(async { job.execute_reader(reader).await })?;
     check_for_interrupts!();
     Ok(row_count)
+}
+
+pub fn scan_document_states(
+    uri: &str,
+    limit: i64,
+) -> Result<Vec<DocumentState>, Box<dyn std::error::Error>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let dataset = open_dataset(uri)?;
+    let has_revision = dataset.schema().field("revision").is_some();
+    let columns: Vec<&str> = if has_revision {
+        vec!["id", "label", "revision"]
+    } else {
+        vec!["id", "label"]
+    };
+    let mut scanner = dataset.scan();
+    scanner.project(&columns)?;
+    if limit > 0 {
+        scanner.limit(Some(limit), None)?;
+    }
+    let stream = block_on(async { scanner.try_into_stream().await })?;
+    let batches = collect_batches(&mut Box::pin(stream))?;
+    let mut rows = Vec::new();
+    for batch in batches {
+        check_for_interrupts!();
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or("id column not Int64")?;
+        let labels = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("label column not Utf8")?;
+        let revisions = if has_revision {
+            Some(
+                batch
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or("revision column not Utf8")?,
+            )
+        } else {
+            None
+        };
+        for index in 0..batch.num_rows() {
+            rows.push(DocumentState {
+                id: ids.value(index),
+                label: (!labels.is_null(index)).then(|| labels.value(index).to_string()),
+                revision: revisions.and_then(|values| {
+                    (!values.is_null(index)).then(|| values.value(index).to_string())
+                }),
+            });
+        }
+        if limit > 0 && rows.len() as i64 >= limit {
+            rows.truncate(limit as usize);
+            break;
+        }
+    }
+    Ok(rows)
 }
 
 pub fn count_rows(uri: &str) -> Result<usize, Box<dyn std::error::Error>> {

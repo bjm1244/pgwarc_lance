@@ -18,6 +18,8 @@ REQUIRED_SQL_SYMBOLS = [
     "bm25_search",
     "lance_create_table",
     "lance_insert_many",
+    "lance_outbox_enqueue_revision",
+    "lance_scan_document_state",
     "hybrid_warc_search",
 ]
 
@@ -58,6 +60,7 @@ def validate_artifacts(
     *,
     version: str,
     pg_major: int | None = None,
+    required_sql_symbols: list[str] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     if not dist_dir.is_dir():
@@ -94,7 +97,7 @@ def validate_artifacts(
         sql_text = sql_path.read_text(encoding="utf-8")
         if "@CARGO_VERSION@" in sql_text:
             errors.append(f"extension SQL still contains @CARGO_VERSION@: {sql_path}")
-        for symbol in REQUIRED_SQL_SYMBOLS:
+        for symbol in required_sql_symbols or REQUIRED_SQL_SYMBOLS:
             if symbol not in sql_text:
                 errors.append(f"extension SQL missing expected symbol {symbol!r}: {sql_path}")
 
