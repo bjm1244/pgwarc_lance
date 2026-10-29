@@ -1,5 +1,60 @@
 # Development log
 
+## Issue #8 — document deletion, tombstones and vector cleanup (complete, 2026-10-30)
+
+- The runner selected P0 issue #8 after prerequisites #6 and #7 on the canonical
+  `development` line. Version 0.1.23 adds a compare-by-current-revision delete
+  API, a durable ordered delete event and an `is_deleted` tombstone. The delete
+  transaction removes WARC metadata and BM25 documents/postings, records the
+  tombstone and queues the Lance delete together. Repeating the same delete is
+  idempotent; a stale revision is rejected. A new revision-aware outbox upsert
+  clears the tombstone on recreation. Revision-tracked IDs cannot bypass the
+  mapping through legacy direct insert/upsert or unversioned outbox APIs.
+- C1 passed: PostgreSQL 16.15 integration checks confirmed tombstone creation,
+  BM25/vector/hybrid exclusion before asynchronous Lance delivery, stale delete
+  rejection after recreation and stale physical vector filtering. The doctor
+  reports a pending tombstone vector as deleted while retaining a separate
+  pre-existing untracked-vector finding.
+- C2 passed: an injected SQL acknowledgment failure after the external Lance
+  delete left the same job retryable; retry completed without resurrecting a
+  vector. A concurrent delete/upsert test confirmed shared URI locking, ordered
+  `delete,upsert` delivery, one final vector/metadata/BM25 row and the latest
+  expected revision. The outbox integration passed 143 checks.
+- C3 passed: deletion retained the older Lance version. Restoring that version
+  reintroduced its physical row but the PostgreSQL tombstone kept it out of
+  vector search. The README and operations guide state that prior versions are
+  preserved, the extension does not compact or garbage-collect them, and an
+  old Lance restore does not restore SQL metadata or clear tombstones. Operators
+  must retain a matching PostgreSQL/Lance backup set; logical recovery rebuilds
+  from authoritative input.
+- A first locked package compile exposed nullable SPI result handling errors;
+  those were corrected before the final PG16 build. The final artifact passed
+  release inspection, fresh install, all four SQL regressions, populated
+  0.1.22-to-0.1.23 upgrade, importer DB (18 checks), runtime safety (18),
+  storage-corruption/recovery (36) and backup/restore (15). The initial outbox
+  fixture also had an unrelated untracked vector and a pending-event ordering
+  assumption; the fixture now explicitly checks that the tombstone is absent
+  from the orphan sample and checks legacy-write rejection after delivery.
+- The full Python suite passed 505 tests; documentation and Rust-format checks
+  passed. Strict target-filtered license notices covered 436 Cargo packages
+  with no missing primary texts. The artifact-bound CycloneDX SBOM and complete
+  notice bundle are recorded in [THIRD_PARTY.md](../THIRD_PARTY.md). Current
+  RustSec audit checked 1,386 advisories: zero vulnerabilities, unsound or
+  yanked packages; three unmaintained warnings remain visible.
+- Artifact SHA-256 is
+  `42045ec4de13487786015698ad9a871f02f96aefe07eacd289d14d66a4df61ec`; Cargo.lock
+  SHA-256 is
+  `147e894f1e41a2fa9c5cddf16feb68f9346661efbc450e4b895e92bdef2863ed`; native
+  fingerprint is
+  `b659227e940cfe9c4f44eabb4aaf31d4fcc390c973d6ee8e34a4f7926da934a5`.
+- Limits: PostgreSQL and Lance have no distributed atomic commit. Older Lance
+  versions consume storage until an operator applies an approved retention and
+  backup policy. No raw WARC was reimported; Common Crawl performance, independent
+  retrieval labels, multi-host Lance coordination, production SLA, binary
+  redistribution and production approval were not evaluated. The validated
+  source is committed locally for the separate reviewed publisher; no direct
+  push or issue closure was performed.
+
 ## Issue #7 — resumable WARC import checkpoints (complete, 2026-10-29)
 
 - The runner selected P0 issue #7 after prerequisites #2, #5 and #6. Work stayed

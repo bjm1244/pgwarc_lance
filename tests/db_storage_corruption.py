@@ -130,6 +130,7 @@ def main() -> int:
             CREATE ROLE {reader} NOLOGIN;
             GRANT USAGE ON SCHEMA public,pgwarc_lance TO {reader};
             GRANT SELECT ON pgwarc_lance.bm25_doc,pgwarc_lance.bm25_term,pgwarc_lance.bm25_long_term,pgwarc_lance.warc_record TO {reader};
+            GRANT SELECT (uri,doc_id,expected_revision,is_deleted) ON pgwarc_lance.lance_document_revision TO {reader};
             GRANT EXECUTE ON FUNCTION bm25_search(text,integer),lance_count(text),
                 lance_scan(text,integer),lance_vector_search(text,real[],integer),
                 hybrid_warc_search(text,real[],text,integer) TO {reader};""")

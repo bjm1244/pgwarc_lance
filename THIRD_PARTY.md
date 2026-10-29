@@ -1,6 +1,31 @@
 # Dependency notice review
 
-## Current 0.1.22 PG16 package notices and SBOM (2026-10-29)
+## Current 0.1.23 PG16 validation artifact notices and SBOM (2026-10-30)
+
+Strict target-filtered notices collected primary texts for all 436 reachable
+Cargo packages with no missing entries against Cargo.lock SHA-256
+`147e894f1e41a2fa9c5cddf16feb68f9346661efbc450e4b895e92bdef2863ed`. The
+CycloneDX 1.6 SBOM contains 441 components and binds the 0.1.23 PG16 validation
+artifact SHA-256
+`42045ec4de13487786015698ad9a871f02f96aefe07eacd289d14d66a4df61ec`, native
+fingerprint
+`b659227e940cfe9c4f44eabb4aaf31d4fcc390c973d6ee8e34a4f7926da934a5`, and the
+full notice-bundle SHA-256
+`b1a6eea300c87fb3787ce478b797be039a463aec0cc1f654dd9761b49d9c909b`; SBOM
+SHA-256 is
+`520c3b3d50135a8e6f603d71804a8a9015ed9c3a5026f0ce05314a8086f49228`.
+
+The Linux x86_64 / PostgreSQL 16.15 validation package used Rust 1.96.0 and
+cargo-pgrx 0.19.1. Its strict notice inventory is complete for the target Cargo
+graph, and the native/compiler inventory records the matching PG16.15 host and
+runtime libraries. This is a private validation artifact for source review;
+the notices and SBOM do not grant binary redistribution rights or production
+approval. The current RustSec audit checked the same lock graph against database
+revision `ee1a49a2769a24a596afc1c20cb33748d2769586` (1,386 advisories): zero
+vulnerabilities, unsound or yanked packages, with three unmaintained warnings
+remaining.
+
+## Previous 0.1.22 PG16 package notices and SBOM (2026-10-29)
 
 Strict target-filtered notices collected primary texts for all 436 reachable
 Cargo packages with no missing entries. The CycloneDX 1.6 SBOM contains 441

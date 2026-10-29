@@ -557,11 +557,15 @@ class WarcImporterTests(unittest.TestCase):
     def test_upsert_cli_never_recreates_the_existing_dataset(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            path, output = root / "input.warc", root / "import.sql"
+            path, output, summary_path = root / "input.warc", root / "import.sql", root / "summary.json"
             path.write_bytes(warc_response("https://example.test/replay", "2026-10-01T00:00:00Z", "body"))
-            warc_importer.main([str(path), "--output", str(output), "--lance-uri", "/tmp/replay.lance", "--lance-mode", "upsert"])
+            warc_importer.main([str(path), "--output", str(output), "--summary-json", str(summary_path), "--lance-uri", "/tmp/replay.lance", "--lance-mode", "upsert"])
             sql = output.read_text()
+            summary = json.loads(summary_path.read_text())
             self.assertIn("SELECT lance_upsert_many(", sql)
+            self.assertIn("SELECT lance_dataset_write_lock('/tmp/replay.lance');", sql)
+            self.assertIn("serialized document lifecycle requires pgwarc_lance 0.1.23", sql)
+            self.assertEqual(summary["required_extension_version"], "0.1.23")
             self.assertNotIn("SELECT lance_create_table(", sql)
             self.assertNotIn("SELECT lance_insert_many(", sql)
             self.assertNotIn("WARNING:", sql)
@@ -581,13 +585,14 @@ class WarcImporterTests(unittest.TestCase):
             sql = output.read_text()
             summary = json.loads(summary_path.read_text())
             self.assertIn("lance_outbox_version_guard", sql)
+            self.assertIn("SELECT lance_dataset_write_lock('/tmp/outbox.lance');", sql)
             self.assertIn("SELECT lance_outbox_enqueue_revision(", sql)
             imported = next(warc_importer.iter_import_records([path], None, 1))
             self.assertIn(warc_importer.record_revision(imported), sql)
             self.assertNotIn("lance_upsert_many(", sql)
             self.assertNotIn("lance_create_table(", sql)
             self.assertEqual(summary["lance_index_consistency"], "eventual_after_commit")
-            self.assertEqual(summary["required_extension_version"], "0.1.22")
+            self.assertEqual(summary["required_extension_version"], "0.1.23")
         with self.assertRaisesRegex(SystemExit, "must not exceed 10000"):
             warc_importer.main(["unused.warc", "--lance-uri", "/tmp/outbox.lance", "--lance-mode", "outbox", "--batch-size", "10001"])
 

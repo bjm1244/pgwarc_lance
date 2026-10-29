@@ -58,8 +58,8 @@ pub extern "C-unwind" fn _PG_init() {
     );
     GucRegistry::define_bool_guc(
         c"pgwarc_lance.allow_destructive_ops",
-        c"Allow operations that overwrite or restore Lance dataset history",
-        c"When off, lance_create_table(overwrite => true) and lance_restore_version() \
+        c"Allow operations that delete documents or restore/overwrite Lance dataset history",
+        c"When off, lance_document_delete(), lance_create_table(overwrite => true) and lance_restore_version() \
               are rejected. PostgreSQL transactions cannot undo these operations, so keeping \
               them off is recommended once a dataset holds production data.",
         &ALLOW_DESTRUCTIVE_OPS,
@@ -204,6 +204,7 @@ fn lock_dataset(uri: &str) {
 
 struct OutboxJob {
     id: i64,
+    operation: String,
     uri: String,
     ids: Vec<i64>,
     flat_vectors: Vec<f32>,
@@ -221,7 +222,7 @@ fn take_outbox_job() -> Option<OutboxJob> {
             // `FOR UPDATE SKIP LOCKED` clause even though this C function is
             // declared VOLATILE.
             .update(
-                "SELECT job.id, job.uri, job.ids, job.flat_vectors, job.vector_dim, \
+                "SELECT job.id, job.operation, job.uri, job.ids, job.flat_vectors, job.vector_dim, \
                         job.labels, COALESCE(job.revisions, ARRAY[]::text[]) AS revisions, \
                         job.attempt_count \
                  FROM pgwarc_lance.lance_outbox AS job \
@@ -251,6 +252,10 @@ fn take_outbox_job() -> Option<OutboxJob> {
         let revisions = (!revisions.is_empty()).then_some(revisions);
         Some(OutboxJob {
             id: row.get_by_name::<i64, _>("id").unwrap_or_report().unwrap(),
+            operation: row
+                .get_by_name::<String, _>("operation")
+                .unwrap_or_report()
+                .unwrap(),
             uri: row
                 .get_by_name::<String, _>("uri")
                 .unwrap_or_report()
@@ -336,6 +341,90 @@ fn record_write(uri: &str, operation: &str, row_count: i64) {
         ],
     )
     .unwrap_or_report();
+}
+
+fn is_hex_revision(revision: &str) -> bool {
+    revision.len() == 64
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn ensure_documents_untracked(uri: &str, ids: &[i64]) {
+    if ids.is_empty() {
+        return;
+    }
+    let tracked = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pgwarc_lance.lance_document_revision \
+         WHERE uri = $1 AND doc_id = ANY($2::bigint[]))",
+        &[DatumWithOid::from(uri), DatumWithOid::from(ids.to_vec())],
+    )
+    .unwrap_or_report()
+    .unwrap_or(false);
+    if tracked {
+        fail(
+            PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "revision-tracked document IDs require revision-aware outbox operations",
+        );
+    }
+}
+
+/// Filter Lance candidates against the PostgreSQL revision/tombstone state.
+/// Rows without a revision mapping remain visible for legacy datasets.
+pub(crate) fn filter_vector_results(
+    uri: &str,
+    results: Vec<lance_store::SearchResult>,
+) -> Vec<lance_store::SearchResult> {
+    if results.is_empty() {
+        return results;
+    }
+    let ids = results.iter().map(|result| result.id).collect::<Vec<_>>();
+    let mut tracked = HashMap::<i64, (Option<String>, bool)>::new();
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT requested.doc_id, state.expected_revision, state.is_deleted, \
+                        state.doc_id IS NOT NULL AS tracked \
+                 FROM unnest($1::bigint[]) AS requested(doc_id) \
+                 LEFT JOIN pgwarc_lance.lance_document_revision AS state \
+                   ON state.uri = $2 AND state.doc_id = requested.doc_id",
+                None,
+                &[DatumWithOid::from(ids), DatumWithOid::from(uri)],
+            )
+            .unwrap_or_report();
+        for row in rows {
+            if row
+                .get_by_name::<bool, _>("tracked")
+                .unwrap_or_report()
+                .unwrap_or(false)
+            {
+                let id = row
+                    .get_by_name::<i64, _>("doc_id")
+                    .unwrap_or_report()
+                    .unwrap();
+                let expected = row
+                    .get_by_name::<String, _>("expected_revision")
+                    .unwrap_or_report();
+                let deleted = row
+                    .get_by_name::<bool, _>("is_deleted")
+                    .unwrap_or_report()
+                    .unwrap_or(true);
+                tracked.insert(id, (expected, deleted));
+            }
+        }
+        Ok::<(), pgrx::spi::SpiError>(())
+    })
+    .unwrap_or_report();
+
+    results
+        .into_iter()
+        .filter(|result| match tracked.get(&result.id) {
+            None => true,
+            Some((expected, deleted)) => {
+                !deleted && expected.as_deref() == result.revision.as_deref()
+            }
+        })
+        .collect()
 }
 
 fn enforce_scan_limit(limit: i64) -> i64 {
@@ -487,6 +576,8 @@ pgrx::extension_sql!(
     -- worker later applies them to Lance using retry-safe ID upserts.
     CREATE TABLE IF NOT EXISTS pgwarc_lance.lance_outbox (
         id             bigserial PRIMARY KEY,
+        operation      text NOT NULL DEFAULT 'upsert'
+                       CHECK (operation IN ('upsert', 'delete')),
         uri            text NOT NULL,
         ids            bigint[] NOT NULL,
         flat_vectors   real[] NOT NULL,
@@ -506,8 +597,14 @@ pgrx::extension_sql!(
             (state = 'completed' AND cardinality(ids) = 0
              AND cardinality(flat_vectors) = 0 AND cardinality(labels) = 0)
             OR (state <> 'completed' AND cardinality(ids) BETWEEN 1 AND 10000
-                AND cardinality(ids) = cardinality(labels)
-                AND cardinality(flat_vectors) = cardinality(ids) * vector_dim)
+                AND ((operation = 'upsert'
+                      AND cardinality(ids) = cardinality(labels)
+                      AND cardinality(flat_vectors) = cardinality(ids) * vector_dim)
+                     OR (operation = 'delete'
+                         AND cardinality(flat_vectors) = 0
+                         AND cardinality(labels) = 0
+                         AND revisions IS NOT NULL
+                         AND cardinality(revisions) = cardinality(ids))))
         ),
         CHECK (state = 'completed' OR revisions IS NULL
                OR cardinality(revisions) = cardinality(ids)),
@@ -528,6 +625,7 @@ pgrx::extension_sql!(
         uri               text NOT NULL,
         doc_id            bigint NOT NULL,
         expected_revision text NOT NULL CHECK (expected_revision ~ '^[0-9a-f]{64}$'),
+        is_deleted        boolean NOT NULL DEFAULT false,
         updated_at        timestamptz NOT NULL DEFAULT clock_timestamp(),
         PRIMARY KEY (uri, doc_id)
     );
@@ -544,12 +642,14 @@ pgrx::extension_sql!(
                0
            ) AS oldest_unfinished_ms,
            max(applied_version) FILTER (WHERE state = 'completed') AS latest_applied_version,
-           max(completed_at) FILTER (WHERE state = 'completed') AS last_completed_at
+           max(completed_at) FILTER (WHERE state = 'completed') AS last_completed_at,
+           count(*) FILTER (WHERE operation = 'delete' AND state = 'pending') AS pending_delete_jobs,
+           count(*) FILTER (WHERE operation = 'delete' AND state = 'failed') AS failed_delete_jobs
     FROM pgwarc_lance.lance_outbox
     GROUP BY uri;
 
     CREATE OR REPLACE VIEW pgwarc_lance.lance_outbox_failures AS
-    SELECT id, uri, attempt_count, last_attempt_at, available_at, last_error
+    SELECT id, uri, attempt_count, last_attempt_at, available_at, last_error, operation
     FROM pgwarc_lance.lance_outbox
     WHERE state = 'failed';
 
@@ -589,7 +689,7 @@ pgrx::extension_sql!(
             JOIN pg_extension AS e ON e.oid = d.refobjid
             WHERE e.extname = 'pgwarc_lance'
               AND p.proname IN ('lance_outbox_enqueue', 'lance_outbox_enqueue_revision',
-                                'lance_outbox_process_next')
+                                'lance_outbox_process_next', 'lance_document_delete')
         LOOP
             EXECUTE format(
                 'ALTER FUNCTION %s SECURITY DEFINER SET search_path = pg_catalog, pg_temp',
@@ -743,6 +843,7 @@ fn lance_insert(uri: &str, id: i64, vector: Vec<f32>, label: Option<String>) {
     let uri = authorized_uri.as_ref();
     lock_dataset(uri);
     ensure_no_pending_outbox(uri);
+    ensure_documents_untracked(uri, &[id]);
     record_write(uri, "insert", 1);
     if let Err(e) = lance_store::insert_rows(uri, vec![id], vec![vector], vec![label]) {
         fail_operation("lance_insert", e);
@@ -773,6 +874,7 @@ fn lance_insert_many(
             ),
         );
     }
+    ensure_documents_untracked(uri, &ids);
     let row_count = ids.len() as i64;
     let labels = labels.into_iter().map(Some).collect();
     record_write(uri, "insert_many", row_count);
@@ -811,6 +913,7 @@ fn lance_upsert_many(
     let uri = authorized_uri.as_ref();
     lock_dataset(uri);
     ensure_no_pending_outbox(uri);
+    ensure_documents_untracked(uri, &ids);
     let row_count = ids.len() as i64;
     record_write(uri, "upsert_many", row_count);
     if let Err(error) = lance_store::upsert_flat_rows(
@@ -824,6 +927,14 @@ fn lance_upsert_many(
         fail_operation("lance_upsert_many", error);
     }
     row_count
+}
+
+/// Acquire the dataset writer lock before importer metadata/BM25 mutations.
+/// Call it first in every transaction that changes one document set.
+#[pg_extern]
+fn lance_dataset_write_lock(uri: &str) {
+    let authorized_uri = authorize_uri(uri);
+    lock_dataset(authorized_uri.as_ref());
 }
 
 /// Persist a retry-safe vector upsert in PostgreSQL. This row commits or rolls
@@ -881,14 +992,7 @@ fn enqueue_outbox(
         );
     }
     if let Some(revisions) = &revisions {
-        if revisions.len() != ids.len()
-            || revisions.iter().any(|revision| {
-                revision.len() != 64
-                    || !revision
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            })
-        {
+        if revisions.len() != ids.len() || revisions.iter().any(|r| !is_hex_revision(r)) {
             fail(
                 PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
                 "revision enqueue requires one 64-character hexadecimal revision per document ID",
@@ -901,6 +1005,9 @@ fn enqueue_outbox(
     // Serializing enqueue transactions gives each dataset a stable committed
     // order and prevents mixing an in-flight direct Lance write with a new job.
     lock_dataset(uri);
+    if revisions.is_none() {
+        ensure_documents_untracked(uri, &ids);
+    }
     let job_id = Spi::get_one_with_args::<i64>(
         "INSERT INTO pgwarc_lance.lance_outbox \
          (uri, ids, flat_vectors, vector_dim, labels, revisions) \
@@ -928,7 +1035,8 @@ fn enqueue_outbox(
              SELECT $1, items.doc_id, items.revision \
              FROM unnest($2::bigint[], $3::text[]) AS items(doc_id, revision) \
              ON CONFLICT (uri, doc_id) DO UPDATE \
-             SET expected_revision = EXCLUDED.expected_revision, updated_at = clock_timestamp()",
+             SET expected_revision = EXCLUDED.expected_revision, is_deleted = false, \
+                 updated_at = clock_timestamp()",
             &[
                 DatumWithOid::from(uri),
                 DatumWithOid::from(ids),
@@ -940,8 +1048,159 @@ fn enqueue_outbox(
     job_id
 }
 
+/// Delete one or more documents by their current content revisions.
+/// Metadata/BM25 removal, a durable Lance delete event, and the tombstone commit
+/// together. The tombstone keeps the last content revision and sets is_deleted;
+/// repeating the same request for it is a no-op.
+#[pg_extern]
+fn lance_document_delete(uri: &str, ids: Vec<i64>, expected_revisions: Vec<String>) -> i64 {
+    if ids.is_empty()
+        || ids.len() > 10_000
+        || ids.len() != expected_revisions.len()
+        || expected_revisions
+            .iter()
+            .any(|revision| !is_hex_revision(revision))
+    {
+        fail(
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "document delete requires 1..10000 unique IDs and one 64-character lowercase hexadecimal content revision per ID",
+        );
+    }
+    let unique: std::collections::HashSet<i64> = ids.iter().copied().collect();
+    if unique.len() != ids.len() {
+        fail(
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "document delete requires unique document IDs",
+        );
+    }
+    let authorized_uri = authorize_uri(uri);
+    let uri = authorized_uri.as_ref();
+    require_destructive_op("lance_document_delete");
+    lock_dataset(uri);
+
+    let other_uri_has_ids = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pgwarc_lance.lance_document_revision \
+         WHERE uri <> $1 AND doc_id = ANY($2::bigint[]))",
+        &[DatumWithOid::from(uri), DatumWithOid::from(ids.clone())],
+    )
+    .unwrap_or_report()
+    .unwrap_or(false);
+    if other_uri_has_ids {
+        fail(
+            PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "document IDs are globally scoped and cannot be deleted through a different Lance URI",
+        );
+    }
+
+    let mut current = HashMap::<i64, (String, bool)>::new();
+    Spi::connect(|client| {
+        let rows = client
+            .select(
+                "SELECT doc_id, expected_revision, is_deleted \
+                 FROM pgwarc_lance.lance_document_revision \
+                 WHERE uri = $1 AND doc_id = ANY($2::bigint[])",
+                None,
+                &[DatumWithOid::from(uri), DatumWithOid::from(ids.clone())],
+            )
+            .unwrap_or_report();
+        for row in rows {
+            current.insert(
+                row.get_by_name::<i64, _>("doc_id")
+                    .unwrap_or_report()
+                    .unwrap(),
+                (
+                    row.get_by_name::<String, _>("expected_revision")
+                        .unwrap_or_report()
+                        .unwrap(),
+                    row.get_by_name::<bool, _>("is_deleted")
+                        .unwrap_or_report()
+                        .unwrap(),
+                ),
+            );
+        }
+        Ok::<(), pgrx::spi::SpiError>(())
+    })
+    .unwrap_or_report();
+
+    let mut delete_ids = Vec::with_capacity(ids.len());
+    let mut delete_revisions = Vec::with_capacity(ids.len());
+    for (doc_id, content_revision) in ids.iter().zip(expected_revisions.iter()) {
+        match current.get(doc_id) {
+            Some((current_revision, true)) if current_revision == content_revision => continue,
+            Some((_, true)) => {
+                fail(
+                    PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                    &format!("document {doc_id} is already deleted at a different revision"),
+                );
+            }
+            Some((current_revision, false)) if current_revision != content_revision => {
+                fail(
+                    PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                    &format!("document {doc_id} revision changed before delete"),
+                );
+            }
+            None => {
+                fail(
+                    PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                    &format!("document {doc_id} has no tracked revision; perform a revisioned outbox upsert before delete"),
+                );
+            }
+            Some(_) => {}
+        }
+        delete_ids.push(*doc_id);
+        delete_revisions.push(content_revision.clone());
+    }
+    if delete_ids.is_empty() {
+        return 0;
+    }
+
+    Spi::run_with_args(
+        "DELETE FROM pgwarc_lance.bm25_doc WHERE doc_id = ANY($1::bigint[])",
+        &[DatumWithOid::from(delete_ids.clone())],
+    )
+    .unwrap_or_report();
+    Spi::run_with_args(
+        "DELETE FROM pgwarc_lance.warc_record WHERE doc_id = ANY($1::bigint[])",
+        &[DatumWithOid::from(delete_ids.clone())],
+    )
+    .unwrap_or_report();
+    Spi::run_with_args(
+        "INSERT INTO pgwarc_lance.lance_document_revision \
+         (uri, doc_id, expected_revision, is_deleted) \
+         SELECT $1, items.doc_id, items.revision, true \
+         FROM unnest($2::bigint[], $3::text[]) AS items(doc_id, revision) \
+         ON CONFLICT (uri, doc_id) DO UPDATE \
+         SET expected_revision = EXCLUDED.expected_revision, is_deleted = true, \
+             updated_at = clock_timestamp()",
+        &[
+            DatumWithOid::from(uri),
+            DatumWithOid::from(delete_ids.clone()),
+            DatumWithOid::from(delete_revisions.clone()),
+        ],
+    )
+    .unwrap_or_report();
+    Spi::get_one_with_args::<i64>(
+        "INSERT INTO pgwarc_lance.lance_outbox \
+         (operation, uri, ids, flat_vectors, vector_dim, labels, revisions) \
+         VALUES ('delete', $1, $2, ARRAY[]::real[], 1, ARRAY[]::text[], $3) \
+         RETURNING id",
+        &[
+            DatumWithOid::from(uri),
+            DatumWithOid::from(delete_ids),
+            DatumWithOid::from(delete_revisions),
+        ],
+    )
+    .unwrap_or_report()
+    .unwrap_or_else(|| {
+        fail(
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+            "document delete outbox insert returned no job ID",
+        )
+    })
+}
+
 /// Apply the oldest committed outbox event whose predecessor is complete.
-/// The event lock, Lance upsert and completion update share one SQL transaction;
+/// The event lock, Lance mutation and completion update share one SQL transaction;
 /// a crash after the Lance commit causes an idempotent replay, never a lost job.
 #[pg_extern]
 fn lance_outbox_process_next() -> TableIterator<
@@ -974,21 +1233,31 @@ fn lance_outbox_process_next() -> TableIterator<
     )
     .unwrap_or_report();
 
-    match lance_store::upsert_flat_rows(
-        &uri,
-        job.ids.clone(),
-        job.flat_vectors.clone(),
-        job.vector_dim,
-        job.labels.iter().cloned().map(Some).collect(),
-        job.revisions
-            .as_ref()
-            .map(|revisions| revisions.iter().cloned().map(Some).collect())
-            .unwrap_or_else(|| vec![None; job.ids.len()]),
-    ) {
-        Ok(row_count) => match lance_store::versions(&uri) {
+    let delivery = match job.operation.as_str() {
+        "upsert" => lance_store::upsert_flat_rows(
+            &uri,
+            job.ids.clone(),
+            job.flat_vectors.clone(),
+            job.vector_dim,
+            job.labels.iter().cloned().map(Some).collect(),
+            job.revisions
+                .as_ref()
+                .map(|revisions| revisions.iter().cloned().map(Some).collect())
+                .unwrap_or_else(|| vec![None; job.ids.len()]),
+        )
+        .map(|row_count| (row_count, "outbox_upsert_many")),
+        "delete" => {
+            lance_store::delete_rows(&uri, &job.ids).map(|row_count| (row_count, "outbox_delete"))
+        }
+        other => Err(Box::new(std::io::Error::other(format!(
+            "unsupported Lance outbox operation: {other}"
+        ))) as Box<dyn std::error::Error>),
+    };
+    match delivery {
+        Ok((row_count, operation)) => match lance_store::versions(&uri) {
             Ok(versions) => match versions.iter().map(|version| version.version).max() {
                 Some(applied_version) => {
-                    record_write(&uri, "outbox_upsert_many", row_count as i64);
+                    record_write(&uri, operation, row_count as i64);
                     Spi::run_with_args(
                         "UPDATE pgwarc_lance.lance_outbox \
                          SET state = 'completed', completed_at = clock_timestamp(), \
@@ -1008,7 +1277,7 @@ fn lance_outbox_process_next() -> TableIterator<
                 None => {
                     let result = fail_outbox_attempt(
                         &job,
-                        "Lance returned no dataset versions after upsert",
+                        "Lance returned no dataset versions after applying the outbox operation",
                     );
                     TableIterator::new(std::iter::once(result))
                 }
@@ -1068,7 +1337,11 @@ fn lance_vector_search(
         return TableIterator::new(std::iter::empty::<(i64, Option<String>, f32)>());
     }
     match lance_store::vector_search(uri, query, k) {
-        Ok(results) => TableIterator::new(results.into_iter().map(|r| (r.id, r.label, r.distance))),
+        Ok(results) => TableIterator::new(
+            filter_vector_results(uri, results)
+                .into_iter()
+                .map(|r| (r.id, r.label, r.distance)),
+        ),
         Err(e) => fail_operation("lance_vector_search", e),
     }
 }

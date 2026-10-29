@@ -20,7 +20,7 @@ pub fn search(
 ) -> Result<Vec<HybridHit>, Box<dyn std::error::Error>> {
     let mut vector_task = lance_store::spawn_vector_search(lance_uri, vector_query, k);
     let bm25_hits = bm25::search(query, k);
-    let vec_hits = vector_task.wait()?;
+    let vec_hits = crate::filter_vector_results(lance_uri, vector_task.wait()?);
 
     let bm25_rank: HashMap<i64, usize> = bm25_hits
         .iter()

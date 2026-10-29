@@ -113,7 +113,13 @@ def reconcile(pg_state: dict[str, Any], lance_state: dict[str, Any], max_rows: i
 
     pg_ids = set(pg_by_id)
     warc_ids = {doc_id for doc_id, row in pg_by_id.items() if row.get("has_warc")}
-    expected_revisions = {int(row["doc_id"]): str(row["expected_revision"]) for row in revision_rows}
+    tombstone_ids = {
+        int(row["doc_id"]) for row in revision_rows if row.get("is_deleted") is True
+    }
+    expected_revisions = {
+        int(row["doc_id"]): str(row["expected_revision"])
+        for row in revision_rows if row.get("is_deleted") is not True
+    }
     pending_ids = {
         int(doc_id)
         for job in pending_rows
@@ -121,7 +127,9 @@ def reconcile(pg_state: dict[str, Any], lance_state: dict[str, Any], max_rows: i
     }
     expected_vector_ids = set(expected_revisions)
     missing_vector_candidates = expected_vector_ids - lance_ids - pending_ids
-    orphan_lance_ids = lance_ids - pg_ids
+    deleted_vector_ids = lance_ids & tombstone_ids
+    deleted_metadata_ids = pg_ids & tombstone_ids
+    orphan_lance_ids = lance_ids - pg_ids - tombstone_ids
     orphan_revision_ids = set(expected_revisions) - pg_ids
     untracked_vector_ids = (lance_ids & pg_ids) - set(expected_revisions)
     lance_revision_by_id = {
@@ -149,6 +157,8 @@ def reconcile(pg_state: dict[str, Any], lance_state: dict[str, Any], max_rows: i
         "missing_vector_candidates": len(missing_vector_candidates),
         "orphan_lance_ids": len(orphan_lance_ids),
         "orphan_revision_ids": len(orphan_revision_ids),
+        "deleted_vector_ids": len(deleted_vector_ids),
+        "deleted_metadata_ids": len(deleted_metadata_ids),
         "untracked_vector_ids": len(untracked_vector_ids),
         "stale_vector_revisions": len(stale_revision_ids),
         "postgres_revision_mismatches": len(pg_revision_mismatch_ids),
@@ -169,7 +179,8 @@ def reconcile(pg_state: dict[str, Any], lance_state: dict[str, Any], max_rows: i
             "postgres_documents": pg_count,
             "lance_rows": lance_count,
             "unfinished_outbox_jobs": pending_count,
-            "expected_revision_documents": revision_count,
+            "expected_revision_documents": len(expected_revisions),
+            "tombstone_documents": len(tombstone_ids),
             "warc_documents": len(warc_ids) if complete else None,
             "pg_revision_fingerprints": revision_fingerprints if complete else None,
         },
@@ -179,6 +190,8 @@ def reconcile(pg_state: dict[str, Any], lance_state: dict[str, Any], max_rows: i
             "missing_vector_candidates": sorted(missing_vector_candidates)[:20] if complete else [],
             "orphan_lance": sorted(orphan_lance_ids)[:20] if complete else [],
             "orphan_revision": sorted(orphan_revision_ids)[:20] if complete else [],
+            "deleted_vector": sorted(deleted_vector_ids)[:20] if complete else [],
+            "deleted_metadata": sorted(deleted_metadata_ids)[:20] if complete else [],
             "untracked_vector": sorted(untracked_vector_ids)[:20] if complete else [],
             "stale_vector_revision": sorted(stale_revision_ids)[:20] if complete else [],
             "postgres_revision_mismatch": sorted(pg_revision_mismatch_ids)[:20] if complete else [],
@@ -201,7 +214,7 @@ def reconcile(pg_state: dict[str, Any], lance_state: dict[str, Any], max_rows: i
             "lance": "one scan snapshot",
             "cross_store_atomic_snapshot": False,
         },
-        "missing_vector_semantics": "URI-scoped expected documents from the revision map; pending IDs are excluded",
+        "missing_vector_semantics": "active URI-scoped expected documents from the revision map; pending IDs and tombstones are excluded",
         "destructive_actions": [],
     }
 
@@ -223,10 +236,11 @@ SELECT 'pg' || E'\t' || jsonb_build_object(
         WHERE uri = convert_from(decode('__URI_B64__', 'base64'), 'UTF8')),
     'revision_rows', COALESCE((
         SELECT jsonb_agg(jsonb_build_object(
-            'doc_id', doc_id, 'expected_revision', expected_revision
+            'doc_id', doc_id, 'expected_revision', expected_revision,
+            'is_deleted', is_deleted
         ) ORDER BY doc_id)
         FROM (
-            SELECT doc_id, expected_revision
+            SELECT doc_id, expected_revision, is_deleted
             FROM pgwarc_lance.lance_document_revision
             WHERE uri = convert_from(decode('__URI_B64__', 'base64'), 'UTF8')
             ORDER BY doc_id LIMIT __SCAN_LIMIT__
@@ -243,7 +257,8 @@ SELECT 'pg' || E'\t' || jsonb_build_object(
             'http_status', w.http_status,
             'payload_digest', w.payload_digest,
             'bm25_content_md5', CASE WHEN b.doc_id IS NULL THEN NULL ELSE md5(COALESCE(b.content, '')) END,
-            'expected_revision', r.expected_revision
+            'expected_revision', r.expected_revision,
+            'is_deleted', r.is_deleted
         ) ORDER BY ids.doc_id)
         FROM (
             SELECT doc_id FROM pgwarc_lance.bm25_doc

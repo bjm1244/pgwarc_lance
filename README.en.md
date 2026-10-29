@@ -2,7 +2,7 @@
 
 PostgreSQL extension (built with [pgrx](https://github.com/pgcentralfoundation/pgrx)) that adds table-backed BM25 search, Lance-based vector search, and RRF hybrid search for WARC / web-archive records — all callable from SQL. Korean documentation is in [README.md](README.md).
 
-> **Status: research prototype — not production-ready.** The current source development candidate is **0.1.22**. It records URI-scoped document revisions in the committed vector outbox and Lance rows, and provides a read-only PG–Lance doctor. PostgreSQL and Lance still have no distributed atomic commit, and embedding-model identity is not included in the content revision. The Linux x86_64 / PostgreSQL 16 artifact, importer/reconciliation checks, upgrade, backup/restore, dependency notices and SBOM have been validated; see [PUBLICATION.md](PUBLICATION.md) and [THIRD_PARTY.md](THIRD_PARTY.md) for scope and remaining limits. Binary redistribution and production approval remain open. Independent relevance evaluation, operational SLA and full raw-WARC ingestion also remain open. Read [SECURITY.md](SECURITY.md) for security and transaction boundaries.
+> **Status: research prototype — not production-ready.** The current source development candidate is **0.1.23**. URI-scoped revisions, tombstones, and an ordered vector upsert/delete outbox prevent stale vectors from resurfacing during deletion and recreation. PostgreSQL and Lance still have no distributed atomic commit. See [PUBLICATION.md](PUBLICATION.md) for the candidate's actual PG16 validation and limitations, and [THIRD_PARTY.md](THIRD_PARTY.md) for the retained 0.1.22 artifact's dependency notices and SBOM. Binary redistribution and production approval remain open. Independent relevance evaluation, operational SLA and full raw-WARC ingestion also remain open. Read [SECURITY.md](SECURITY.md) for security and transaction boundaries.
 
 Production acceptance gates are recorded in [PRODUCTION.md](PRODUCTION.md).
 Earlier 0.1.18 posting-window and IDF trials are recorded separately in the development log. The 0.1.19 term-frequency-index candidate reduces work in the q6 document-frequency scan, while its end-to-end latency and write costs remain inconclusive. Result fingerprints matched, but no independent qrels were available. See the [development log](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), and [THIRD_PARTY.md](THIRD_PARTY.md) for scope and limitations.
@@ -77,13 +77,14 @@ trusted roles. Compose requires a password and binds only to `127.0.0.1` by defa
 | `lance_scan(uri, limit => 100)` | Scan rows |
 | `lance_scan_document_state(uri, limit => 100)` | Read document IDs and persisted revisions for reconciliation |
 | `lance_outbox_enqueue_revision(uri, ids, flat_vectors, vector_dim, labels, revisions)` | Commit revisioned vectors and URI/document expectations in the caller's transaction |
+| `lance_document_delete(uri, ids, expected_revisions)` | Commit metadata/BM25 removal, a tombstone and an ordered Lance delete event |
 | `lance_outbox_process_next()` | Apply the oldest eligible committed outbox event |
 | `lance_dataset_versions(uri)` | Dataset versions `(version, created_ms)` |
 | `lance_restore_version(uri, version)` | Promote a past version back to the tip |
 | `hybrid_search(query, vector_query, lance_uri, k => 10)` | RRF fusion of BM25 and vector search |
 | `hybrid_warc_search(...)` | Hybrid hits joined with `pgwarc_lance.warc_record` metadata |
 
-Revision-aware outbox imports require extension 0.1.22 or newer. The revision
+Revision-aware outbox imports require extension 0.1.23 or newer. The revision
 combines document ID, target URI, content type, HTTP status, extracted text
 length, WARC payload digest and BM25 content checksum. Existing Lance rows gain
 a nullable revision column on their first upsert. `tools/doctor_pg_lance.py`
@@ -95,7 +96,12 @@ source change, rerun the importer with the same trusted embedding input in
 `outbox` mode. If a Lance write succeeded but its PostgreSQL acknowledgment
 rolled back, inspect the pending event and explicitly replay it with
 `python3 tools/lance_outbox_worker.py --once --psql "$WORKER_PSQL"`, then run
-the doctor again. No vector deletion is performed by this workflow.
+the doctor again. For deletion, pass the active expected revision to
+`lance_document_delete`. This commits WARC/BM25 removal, a tombstone and an
+ordered Lance delete event; vector and hybrid search hide the tombstoned row
+while the worker is pending. Recreate through a revision-aware outbox upsert.
+Earlier Lance versions remain preserved, and the extension does not run
+compaction or version garbage collection.
 
 ### Example
 

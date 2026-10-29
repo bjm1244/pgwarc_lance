@@ -1,17 +1,17 @@
 # Production readiness
 
 This is still a source preview. Passing unit tests is not a production approval.
-The current source candidate is 0.1.21. It adds a transactionally stored vector
-outbox and standalone delivery worker; PostgreSQL and Lance do not share an
-atomic commit. The corrected .21 PG16 package, strict Cargo notices and
-CycloneDX SBOM are bound to the current native fingerprint. Fresh install, SQL
-regressions, importer/runtime checks, populated upgrade and backup/restore
-passed for Linux x86_64 / PostgreSQL 16.15. The issue #5 outbox integration
-run also passed commit/rollback, delivery, replay, concurrency and PostgreSQL
-restart checks against that matching artifact. See [PACKAGING.md](PACKAGING.md),
+The current source candidate is 0.1.23. It adds revision-checked deletion,
+tombstones and an ordered Lance delete event to the transactionally stored
+vector outbox. PostgreSQL and Lance do not share an atomic commit. The locked
+PG16.15 candidate passed fresh installation, four SQL regressions, 143 outbox
+lifecycle checks, 18 importer database checks, 18 runtime-safety checks, a
+populated 0.1.22-to-0.1.23 upgrade and 15 backup/restore checks. Strict Cargo
+notices, a matching CycloneDX SBOM and current RustSec audit are recorded for
+the validation artifact. See [PACKAGING.md](PACKAGING.md),
 [PUBLICATION.md](PUBLICATION.md) and [THIRD_PARTY.md](THIRD_PARTY.md) for the
-verified scope and unverified checks. Neither package verification nor notice
-collection grants binary redistribution or production approval.
+verified scope and remaining gaps. Package verification and notice collection
+do not grant binary redistribution or production approval.
 Install the complete consecutive upgrade chain and reconnect existing backends.
 See [PUBLICATION.md](PUBLICATION.md) for current evidence and limitations.
 The initial validation profile is PostgreSQL 16, a single instance, local Lance
@@ -189,7 +189,7 @@ candidate is not production approved.
 
 PostgreSQL backups do not contain Lance files. Treat the SQL dump and the entire
 dataset directories as one backup set, including their version manifests and
-data files. Version 0.1.21 registers six extension tables and two sequences
+data files. Version 0.1.23 registers seven extension tables and two sequences
 with `pg_extension_config_dump`; ordinary `pg_dump` includes their contents.
 
 1. Stop new imports, all outbox workers, and all SQL/external Lance writers. Wait for active write
@@ -247,7 +247,7 @@ covered by PostgreSQL advisory locks.
 Use an existing local dataset directory for `pgwarc_lance.allowed_uri_prefix`.
 Only trusted OS users may change that directory and its parents. Apply a positive
 administrator-controlled `max_scan_rows` limit and disable `allow_destructive_ops`
-when ordinary workloads do not need overwrite/restore. Grant only individual
+when ordinary workloads do not need delete/overwrite/restore. Grant only individual
 functions and required table/sequence privileges to trusted roles.
 
 The importer CLI spools records, duplicate IDs, embeddings and generated SQL to

@@ -38,8 +38,8 @@ workers. Existing role grants must be reviewed before altering shared schemas.
 
 The following roles intentionally have no login or superuser rights. Grant
 them to existing managed service identities. Passwords are not stored in this
-file. The writer supports function-mode BM25 and upsert ingestion; it cannot
-create/overwrite/restore datasets. These grants passed an actual PostgreSQL 16
+file. The writer supports function-mode BM25, upsert ingestion and revision-aware
+document deletion; it cannot create/overwrite/restore datasets. These grants passed an actual PostgreSQL 16
 test using `SET ROLE` and importer startup with the selected role.
 
 ```sql
@@ -49,7 +49,7 @@ GRANT USAGE ON SCHEMA public, pgwarc_lance TO pgwarc_reader, pgwarc_writer;
 
 GRANT SELECT ON pgwarc_lance.bm25_doc, pgwarc_lance.bm25_term,
     pgwarc_lance.bm25_long_term, pgwarc_lance.warc_record TO pgwarc_reader;
-GRANT SELECT (uri, doc_id, expected_revision)
+GRANT SELECT (uri, doc_id, expected_revision, is_deleted)
     ON pgwarc_lance.lance_document_revision TO pgwarc_reader;
 GRANT SELECT (id, uri, state, ids)
     ON pgwarc_lance.lance_outbox TO pgwarc_reader;
@@ -69,7 +69,9 @@ GRANT SELECT ON pgwarc_lance.lance_outbox_status TO pgwarc_reader, pgwarc_writer
 GRANT EXECUTE ON FUNCTION public.bm25_index_document(bigint,text),
     public.lance_upsert_many(text,bigint[],real[],integer,text[]),
     public.lance_outbox_enqueue(text,bigint[],real[],integer,text[]),
-    public.lance_outbox_enqueue_revision(text,bigint[],real[],integer,text[],text[])
+    public.lance_outbox_enqueue_revision(text,bigint[],real[],integer,text[],text[]),
+    public.lance_dataset_write_lock(text),
+    public.lance_document_delete(text,bigint[],text[])
     TO pgwarc_writer;
 
 CREATE ROLE pgwarc_outbox_worker NOLOGIN;
@@ -120,7 +122,7 @@ python3 tools/warc_importer.py input.warc.gz --skip-schema \
 python3 tools/lance_outbox_worker.py --psql "$WORKER_PSQL" --poll-interval-ms 1000
 ```
 
-Revision-aware `outbox` imports require extension 0.1.22 or newer. The importer
+Revision-aware `outbox` imports require extension 0.1.23 or newer. The importer
 records a content revision in PostgreSQL and the worker writes the same value to
 the Lance row. The revision combines the stable document ID, WARC target URI,
 content type, HTTP status, extracted text length, payload digest and BM25 content
@@ -128,6 +130,35 @@ checksum; it does not identify the embedding model. Existing
 Lance rows acquire a nullable `revision` column on their first upsert, and stay
 unversioned until such an update. Do not grant the writer direct access to
 `lance_document_revision`; the security-definer enqueue function maintains it.
+Custom import transactions must call `lance_dataset_write_lock(uri)` before the
+first WARC/BM25 write, then queue the revisioned upsert in that same transaction.
+
+### Delete and recreate a document
+
+The writer may call `lance_document_delete(text,bigint[],text[])` only when
+`pgwarc_lance.allow_destructive_ops` is on. Pass the active expected revision
+with the stable document ID. A missing or changed revision is rejected; first
+import an untracked legacy row through revision-aware `outbox`. The delete
+transaction takes the dataset writer lock, removes WARC metadata and BM25
+content, stores the last content revision with `is_deleted=true`, and queues
+the physical Lance delete. The tombstone
+filters vector and hybrid candidates immediately while the worker is pending.
+Repeating the same delete is a no-op; recreate through a new revision-aware
+`outbox` upsert.
+
+```sql
+SELECT lance_document_delete(uri, ARRAY[doc_id], ARRAY[expected_revision])
+FROM pgwarc_lance.lance_document_revision
+WHERE uri = '/srv/pgwarc/archive.lance' AND doc_id = 123 AND NOT is_deleted;
+```
+
+The extension does not run Lance compaction or version garbage collection.
+Older dataset versions remain until an operator explicitly manages them under a
+separate backup/restore plan. Do not run compaction or version cleanup until the
+retention policy confirms which preserved snapshots must remain and a matching
+PostgreSQL/Lance restore set is available. Promoting an old Lance version does not clear
+PostgreSQL tombstones or restore deleted metadata/BM25. A logical restore must
+rebuild metadata, BM25, revision and vector from authoritative input.
 
 For a long-running source, preserve a durable importer checkpoint across
 worker restarts:
@@ -167,18 +198,19 @@ order for each URI. A failed earlier event blocks later work for that URI.
 Check backlog and failure status with:
 
 ```sql
-SELECT uri, pending_jobs, failed_jobs,
+SELECT uri, pending_jobs, failed_jobs, pending_delete_jobs, failed_delete_jobs,
        oldest_unfinished_ms, latest_applied_version, last_completed_at
 FROM pgwarc_lance.lance_outbox_status;
 
-SELECT id, uri, attempt_count, last_attempt_at, last_error
+SELECT id, uri, operation, attempt_count, last_attempt_at, last_error
 FROM pgwarc_lance.lance_outbox_failures
 ORDER BY id;
 ```
 
-If PostgreSQL rolled back its acknowledgment after a Lance upsert, the event
-remains `pending`. Run the worker explicitly to replay that ID-upsert; it
-converges on the same Lance row and does not delete or overwrite the dataset:
+If PostgreSQL rolled back its acknowledgment after a Lance upsert or delete, the
+event remains `pending`. Run the worker explicitly to retry the same event. An
+upsert converges on the same Lance row; repeating a delete for an absent ID is
+safe and does not remove another document:
 
 ```bash
 python3 tools/lance_outbox_worker.py --once --psql "$WORKER_PSQL"
@@ -186,8 +218,8 @@ python3 tools/lance_outbox_worker.py --once --psql "$WORKER_PSQL"
 
 For a terminal `failed` event, first inspect `last_error` and compare PostgreSQL
 with Lance using the read-only doctor. After resolving the cause and confirming
-an ID-upsert replay is safe, an administrator may return that event to the retry
-queue:
+that the stored operation remains safe to replay, an administrator may return
+that event to the retry queue:
 
 ```sql
 UPDATE pgwarc_lance.lance_outbox
@@ -198,9 +230,9 @@ WHERE id = 123 AND state = 'failed';
 ```
 
 Do not set a row to `completed` manually. PostgreSQL and Lance have no shared
-atomic commit: if Lance upsert succeeds but its SQL acknowledgment rolls back,
-the worker replays the same IDs. Completed rows clear their vector arrays after
-the success acknowledgment commits; failed rows retain their payload for a
+atomic commit: if a Lance mutation succeeds but its SQL acknowledgment rolls
+back, the worker replays the same event. Completed rows clear their vector
+payload and ID list after the success acknowledgment commits; failed rows retain their payload for a
 reviewed retry. Read-after-write for vector/hybrid queries is
 available after the relevant outbox event is `completed`; BM25 and WARC metadata
 are visible immediately after the importer transaction commits. For backups,

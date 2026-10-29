@@ -26,6 +26,7 @@ const INTERRUPT_POLL: Duration = Duration::from_millis(50);
 pub struct SearchResult {
     pub id: i64,
     pub label: Option<String>,
+    pub revision: Option<String>,
     pub distance: f32,
 }
 
@@ -365,6 +366,23 @@ pub fn upsert_flat_rows(
     Ok(row_count)
 }
 
+/// Physically remove every stored row with one of the supplied document IDs.
+/// Lance commits a new dataset version; older versions remain available until
+/// an operator explicitly runs version cleanup outside this extension.
+pub fn delete_rows(uri: &str, ids: &[i64]) -> Result<usize, Box<dyn std::error::Error>> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut dataset = open_dataset(uri)?;
+    let predicate = format!(
+        "id IN ({})",
+        ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+    );
+    let result = block_on(async { dataset.delete(&predicate).await })?;
+    check_for_interrupts!();
+    Ok(result.num_deleted_rows as usize)
+}
+
 pub fn scan_document_states(
     uri: &str,
     limit: i64,
@@ -496,9 +514,13 @@ pub fn vector_search(
     let query_ref: &dyn arrow::array::Array = &query_array;
 
     let mut scanner = dataset.scan();
-    scanner
-        .nearest("vector", query_ref, k)?
-        .project(&["id", "label", "_distance"])?;
+    let has_revision = dataset.schema().field("revision").is_some();
+    scanner.nearest("vector", query_ref, k)?;
+    if has_revision {
+        scanner.project(&["id", "label", "revision", "_distance"])?;
+    } else {
+        scanner.project(&["id", "label", "_distance"])?;
+    }
 
     let stream = block_on(async { scanner.try_into_stream().await })?;
     let batches = collect_batches(&mut Box::pin(stream))?;
@@ -553,11 +575,19 @@ async fn vector_search_async(
     let query_array = Float32Array::from(query);
     let query_ref: &dyn arrow::array::Array = &query_array;
     let mut scanner = dataset.scan();
+    let has_revision = dataset.schema().field("revision").is_some();
     scanner
         .nearest("vector", query_ref, k)
-        .map_err(|error| error.to_string())?
-        .project(&["id", "label", "_distance"])
         .map_err(|error| error.to_string())?;
+    if has_revision {
+        scanner
+            .project(&["id", "label", "revision", "_distance"])
+            .map_err(|error| error.to_string())?;
+    } else {
+        scanner
+            .project(&["id", "label", "_distance"])
+            .map_err(|error| error.to_string())?;
+    }
 
     let mut stream = Box::pin(
         scanner
@@ -584,21 +614,35 @@ fn append_vector_batch(
     batch: &RecordBatch,
     results: &mut Vec<SearchResult>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let schema = batch.schema();
+    let id_index = schema.index_of("id")?;
+    let label_index = schema.index_of("label")?;
+    let distance_index = schema.index_of("_distance")?;
+    let revision_index = schema.index_of("revision").ok();
     let id_array = batch
-        .column(0)
+        .column(id_index)
         .as_any()
         .downcast_ref::<Int64Array>()
         .ok_or("id column not Int64")?;
     let label_array = batch
-        .column(1)
+        .column(label_index)
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or("label column not Utf8")?;
     let dist_array = batch
-        .column(2)
+        .column(distance_index)
         .as_any()
         .downcast_ref::<Float32Array>()
         .ok_or("_distance column not Float32")?;
+    let revision_array = revision_index
+        .map(|index| {
+            batch
+                .column(index)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("revision column not Utf8")
+        })
+        .transpose()?;
 
     for i in 0..batch.num_rows() {
         let label = if label_array.is_null(i) {
@@ -609,6 +653,8 @@ fn append_vector_batch(
         results.push(SearchResult {
             id: id_array.value(i),
             label,
+            revision: revision_array
+                .and_then(|values| (!values.is_null(i)).then(|| values.value(i).to_string())),
             distance: dist_array.value(i),
         });
     }

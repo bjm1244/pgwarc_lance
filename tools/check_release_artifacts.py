@@ -18,6 +18,8 @@ REQUIRED_SQL_SYMBOLS = [
     "bm25_search",
     "lance_create_table",
     "lance_insert_many",
+    "lance_dataset_write_lock",
+    "lance_document_delete",
     "lance_outbox_enqueue_revision",
     "lance_scan_document_state",
     "hybrid_warc_search",

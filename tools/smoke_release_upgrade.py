@@ -225,6 +225,54 @@ def run_update_smoke(
     if run_sql("SELECT lance_count('/tmp/pgwarc_artifact_upgrade.lance');") != "2":
         raise SmokeError("revisioned upsert changed the populated Lance row count")
 
+    # Exercise the new .22 -> .23 lifecycle columns and delete payload check on
+    # the already-populated upgrade database, not only on a fresh extension.
+    uri = "/tmp/pgwarc_artifact_upgrade.lance"
+    before_delete_version = run_sql(
+        f"SELECT max(version) FROM lance_dataset_versions('{uri}');"
+    )
+    delete_job_id = run_sql(
+        f"SELECT lance_document_delete('{uri}',ARRAY[-101]::bigint[],"
+        f"ARRAY['{revision}']::text[]);"
+    )
+    if not delete_job_id.isdecimal():
+        raise SmokeError(f"upgraded populated delete did not enqueue: {delete_job_id!r}")
+    if run_sql(
+        f"SELECT operation||'|'||state FROM pgwarc_lance.lance_outbox WHERE id={delete_job_id};"
+    ) != "delete|pending":
+        raise SmokeError("upgraded delete did not satisfy the migrated outbox payload shape")
+    if run_sql(
+        "SELECT is_deleted::text FROM pgwarc_lance.lance_document_revision "
+        f"WHERE uri='{uri}' AND doc_id=-101;"
+    ) != "true":
+        raise SmokeError("populated upgrade did not retain the deletion tombstone")
+    if run_sql("SELECT count(*) FROM pgwarc_lance.warc_record WHERE doc_id=-101;") != "0":
+        raise SmokeError("populated upgrade delete retained WARC metadata")
+    if run_sql("SELECT count(*) FROM bm25_search('first',10) WHERE doc_id=-101;") != "0":
+        raise SmokeError("populated upgrade delete retained BM25 results")
+    if run_sql(
+        f"SELECT count(*) FROM lance_vector_search('{uri}',ARRAY[1,0,0,0]::real[],10) WHERE id=-101;"
+    ) != "0":
+        raise SmokeError("populated upgrade tombstone did not filter vector search")
+    delete_delivery = run_sql("SELECT status FROM lance_outbox_process_next();")
+    if delete_delivery != "completed":
+        failure = run_sql(
+            f"SELECT coalesce(last_error, 'no error recorded') FROM pgwarc_lance.lance_outbox WHERE id={delete_job_id};"
+        )
+        raise SmokeError(f"populated upgrade delete delivery did not complete ({delete_delivery!r}; {failure!r})")
+    if run_sql(
+        f"SELECT count(*) FROM lance_dataset_versions('{uri}') WHERE version={before_delete_version};"
+    ) != "1":
+        raise SmokeError("populated upgrade delete removed its previous dataset version")
+    if run_sql(
+        f"SELECT count(*) FROM lance_scan('{uri}',10) WHERE id=-101;"
+    ) != "0":
+        raise SmokeError("populated upgrade worker did not remove the current Lance row")
+    if run_sql(
+        f"SELECT lance_document_delete('{uri}',ARRAY[-101]::bigint[],ARRAY['{revision}']::text[]);"
+    ) != "0":
+        raise SmokeError("repeated delete was not an idempotent no-op after populated upgrade")
+
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     version = check_release_artifacts.cargo_version()

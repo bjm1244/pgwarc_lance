@@ -43,7 +43,7 @@ DEFAULT_PSQL = (
     "-d pgwarc_lance_test -v ON_ERROR_STOP=1"
 )
 LANCE_MODES = ("create", "overwrite", "append", "upsert", "outbox")
-OUTBOX_MIN_EXTENSION_VERSION = "0.1.22"
+OUTBOX_MIN_EXTENSION_VERSION = "0.1.23"
 BM25_MODES = ("function", "bulk", "copy")
 APPEND_DUPLICATE_WARNING = (
     "lance append mode does not deduplicate by doc_id; repeated imports can "
@@ -1213,6 +1213,9 @@ def iter_sql_chunks(
     if bm25_mode not in BM25_MODES:
         raise ValueError(f"bm25_mode must be one of: {', '.join(BM25_MODES)}")
 
+    has_lance_vectors = bool(lance_uri) and (include_hash_vectors or vectors_by_doc_id is not None)
+    requires_dataset_lock = has_lance_vectors and lance_mode in {"upsert", "outbox"}
+
     lines: list[str] = [
         "SET standard_conforming_strings = on;",
         "CREATE SCHEMA IF NOT EXISTS pgwarc_lance;",
@@ -1241,11 +1244,10 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
     guards = []
     if requires_long_term_storage:
         guards.append(long_term_version_guard_sql())
-    if requires_outbox:
+    if requires_outbox or requires_dataset_lock:
         guards.append(lance_outbox_version_guard_sql())
     if guards:
         lines = ["BEGIN;", *guards, *lines]
-    has_lance_vectors = bool(lance_uri) and (include_hash_vectors or vectors_by_doc_id is not None)
     if lance_uri and has_lance_vectors and lance_mode in {"create", "overwrite"}:
         overwrite = "true" if lance_mode == "overwrite" else "false"
         lines.append(
@@ -1270,6 +1272,8 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
         )
         lines.append("BEGIN;")
         lines.extend(guards)
+        if requires_dataset_lock:
+            lines.append(f"SELECT lance_dataset_write_lock({sql_string(lance_uri)});")
         lance_ids: list[int] = []
         lance_flat_vectors: list[float] = []
         lance_labels: list[str] = []
@@ -1394,6 +1398,8 @@ def summary_data(
     if oversized_count:
         required_versions.append(LONG_TERM_STORAGE_MIN_VERSION)
     if lance_uri and lance_mode == "outbox":
+        required_versions.append(OUTBOX_MIN_EXTENSION_VERSION)
+    elif lance_uri and lance_mode == "upsert" and vectors != 0:
         required_versions.append(OUTBOX_MIN_EXTENSION_VERSION)
     required_version = max(required_versions, key=lambda value: tuple(map(int, value.split(".")))) if required_versions else None
     return {
@@ -1529,9 +1535,9 @@ BEGIN
     WHERE extname = 'pgwarc_lance';
 
     IF installed_version IS NULL
-       OR string_to_array(installed_version, '.')::integer[] < ARRAY[0, 1, 22] THEN
+       OR string_to_array(installed_version, '.')::integer[] < ARRAY[0, 1, 23] THEN
         RAISE EXCEPTION
-            'revisioned Lance outbox requires pgwarc_lance 0.1.22 or newer (found %)',
+            'serialized document lifecycle requires pgwarc_lance 0.1.23 or newer (found %)',
             COALESCE(installed_version, 'not installed')
             USING ERRCODE = '0A000';
     END IF;
@@ -1991,7 +1997,9 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                 "max_oversized_ascii_term_bytes": spool.max_oversized_ascii_term_bytes,
                 "required_extension_version": max(
                     ([LONG_TERM_STORAGE_MIN_VERSION] if spool.oversized_ascii_terms else [])
-                    + ([OUTBOX_MIN_EXTENSION_VERSION] if args.lance_uri and lance_mode == "outbox" else []),
+                    + ([OUTBOX_MIN_EXTENSION_VERSION] if args.lance_uri and (
+                        lance_mode == "outbox" or (lance_mode == "upsert" and vector_count != 0)
+                    ) else []),
                     key=lambda value: tuple(map(int, value.split("."))),
                     default=None,
                 ),

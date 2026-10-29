@@ -64,6 +64,8 @@ class DoctorPgLanceTests(unittest.TestCase):
             "missing_vector_candidates": 1,
             "orphan_lance_ids": 1,
             "orphan_revision_ids": 0,
+            "deleted_vector_ids": 0,
+            "deleted_metadata_ids": 0,
             "untracked_vector_ids": 0,
             "stale_vector_revisions": 1,
             "postgres_revision_mismatches": 0,
@@ -74,6 +76,29 @@ class DoctorPgLanceTests(unittest.TestCase):
         })
         self.assertTrue(report["revision_check"]["lance_revision_persisted"])
         self.assertEqual(report["sample_doc_ids"]["duplicate_lance"], [5])
+
+    def test_tombstones_are_expected_absence_but_stale_vectors_are_reported(self):
+        pg = {
+            "row_count": 0,
+            "revision_count": 1,
+            "revision_rows": [
+                {"doc_id": 8, "expected_revision": "f" * 64, "is_deleted": True}
+            ],
+            "rows": [],
+            "unfinished_jobs": [],
+        }
+        absent = doctor_pg_lance.reconcile(pg, {"dataset_count": 0, "rows": []}, 10)
+        self.assertEqual(absent["status"], "no_observed_mismatch")
+        self.assertEqual(absent["counts"]["tombstone_documents"], 1)
+        self.assertEqual(absent["findings"]["deleted_vector_ids"], 0)
+
+        stale = doctor_pg_lance.reconcile(pg, {
+            "dataset_count": 1,
+            "rows": [{"doc_id": 8, "revision": "a" * 64,
+                      "has_warc": False, "label_matches_metadata": None}],
+        }, 10)
+        self.assertEqual(stale["findings"]["deleted_vector_ids"], 1)
+        self.assertEqual(stale["findings"]["orphan_lance_ids"], 0)
 
     def test_does_not_claim_a_partial_inventory_is_clean(self):
         pg = {"row_count": 3, "rows": [], "unfinished_jobs": []}

@@ -85,8 +85,10 @@ def main() -> int:
             GRANT SELECT, INSERT, DELETE ON pgwarc_lance.bm25_long_term TO {writer_role};
             GRANT INSERT ON pgwarc_lance.lance_write_log TO {writer_role};
             GRANT USAGE ON SEQUENCE pgwarc_lance.lance_write_log_id_seq TO {writer_role};
-            GRANT EXECUTE ON FUNCTION bm25_index_document(bigint,text), lance_upsert_many(text,bigint[],real[],integer,text[]) TO {writer_role};
+            GRANT EXECUTE ON FUNCTION bm25_index_document(bigint,text), lance_upsert_many(text,bigint[],real[],integer,text[]),
+                lance_dataset_write_lock(text) TO {writer_role};
             GRANT SELECT ON pgwarc_lance.bm25_doc, pgwarc_lance.bm25_term, pgwarc_lance.bm25_long_term, pgwarc_lance.warc_record TO {reader_role};
+            GRANT SELECT (uri, doc_id, expected_revision, is_deleted) ON pgwarc_lance.lance_document_revision TO {reader_role};
             GRANT EXECUTE ON FUNCTION hybrid_warc_search(text,real[],text,integer) TO {reader_role};
         """)
         with tempfile.TemporaryDirectory() as directory:

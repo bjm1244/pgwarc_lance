@@ -182,10 +182,31 @@ class SmokeReleaseUpgradeTests(unittest.TestCase):
 
     def test_run_update_smoke_alters_to_new_version(self):
         commands = []
+        delete_calls = 0
 
         def fake_run(command, *, capture=False, quiet=False, check=True):
+            nonlocal delete_calls
             commands.append(command)
             sql = command[-1]
+            if "SELECT lance_document_delete" in sql:
+                delete_calls += 1
+                return "1" if delete_calls == 1 else "0"
+            if "SELECT max(version)" in sql:
+                return "7"
+            if "operation||'|'||state" in sql:
+                return "delete|pending"
+            if "is_deleted::text" in sql:
+                return "true"
+            if "count(*) FROM pgwarc_lance.warc_record WHERE doc_id=-101" in sql:
+                return "0"
+            if "FROM bm25_search('first',10)" in sql:
+                return "0"
+            if "FROM lance_vector_search" in sql:
+                return "0"
+            if "WHERE version=7" in sql:
+                return "1"
+            if "FROM lance_scan(" in sql:
+                return "0"
             if "WHERE revision IS NULL" in sql:
                 return "2"
             if "lance_outbox_process_next" in sql:
@@ -214,6 +235,7 @@ class SmokeReleaseUpgradeTests(unittest.TestCase):
         self.assertTrue(any("lance_scan_document_state" in command[-1] for command in commands[1:]))
         self.assertTrue(any("lance_outbox_enqueue_revision" in command[-1] for command in commands[1:]))
         self.assertTrue(any("lance_outbox_process_next" in command[-1] for command in commands[1:]))
+        self.assertTrue(any("lance_document_delete" in command[-1] for command in commands[1:]))
 
     def test_run_update_smoke_includes_outbox_failure_reason(self):
         commands = []

@@ -1,6 +1,48 @@
-# Source publication review — updated 2026-10-29
+# Source publication review — updated 2026-10-30
 
-## Current source and distribution review: 0.1.22 (2026-10-29)
+## Latest source and distribution review: 0.1.23 (2026-10-30)
+
+Issue #8 adds a revision-checked document delete API. It atomically removes WARC
+metadata and BM25 rows, records an `is_deleted` tombstone and queues a durable
+Lance delete. Vector and hybrid search filter tombstones and stale row revisions
+as soon as the PostgreSQL transaction commits. Recreate requires a new
+revision-aware outbox upsert. URI writer locks serialize importer metadata
+updates, deletes and outbox delivery. The delete retry and concurrent delete /
+upsert paths passed actual isolated PG16 tests.
+
+The locked Linux x86_64 package targets PostgreSQL 16.15, Rust 1.96.0 and
+cargo-pgrx 0.19.1. Artifact SHA-256 is
+`42045ec4de13487786015698ad9a871f02f96aefe07eacd289d14d66a4df61ec`, Cargo.lock
+SHA-256 is
+`147e894f1e41a2fa9c5cddf16feb68f9346661efbc450e4b895e92bdef2863ed`, and its
+native fingerprint is
+`b659227e940cfe9c4f44eabb4aaf31d4fcc390c973d6ee8e34a4f7926da934a5`. Fresh
+installation, all four SQL regressions, the issue #8 outbox integration (143
+checks), importer database (18), runtime safety (18), storage recovery (36),
+populated 0.1.22-to-0.1.23 upgrade and backup/restore (15 checks) passed on
+PostgreSQL 16.15.
+
+Strict target-filtered notices cover 436 Cargo packages with no missing primary
+texts. The artifact-bound CycloneDX 1.6 SBOM contains 441 components; its SHA-256
+is `520c3b3d50135a8e6f603d71804a8a9015ed9c3a5026f0ce05314a8086f49228` and the
+complete notice-bundle SHA-256 is
+`b1a6eea300c87fb3787ce478b797be039a463aec0cc1f654dd9761b49d9c909b`. Current
+RustSec database revision `ee1a49a2769a24a596afc1c20cb33748d2769586` (1,386
+advisories) found zero vulnerabilities, unsound or yanked packages; three
+unmaintained warnings remain. Artifact-bound hashes and target scope are
+recorded in [THIRD_PARTY.md](THIRD_PARTY.md).
+
+Issue #8 C1-C3 are verified for this PG16 target and disposable fixtures.
+PostgreSQL and Lance still lack a distributed atomic commit. Lance keeps older
+dataset versions; the extension does not compact or garbage-collect them.
+Restoring an old Lance version does not clear PostgreSQL tombstones, so logical
+recovery must rebuild metadata, BM25, revision state and vectors from
+authoritative input. No independent retrieval labels, production SLA,
+multi-host Lance coordination, binary redistribution right or production
+approval is established. This source preview is committed locally for the
+separate reviewed fast-forward publisher; no direct push was made.
+
+## Previous package and distribution review: 0.1.22 (2026-10-29)
 
 Issue #6 adds a URI-scoped document revision mapping, revision-bearing Lance
 rows, and a read-only PG–Lance doctor. Re-imports enqueue the content revision

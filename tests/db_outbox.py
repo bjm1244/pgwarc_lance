@@ -7,6 +7,7 @@ container. The fixture contains no source corpus or embedding material.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import shlex
@@ -91,6 +92,8 @@ def main() -> int:
     checks = report["checks"]
     created = False
     writer: subprocess.Popen[str] | None = None
+    race_processes: list[subprocess.Popen[str]] = []
+    race_app_names: list[str] = []
     base_psql = ["docker", "exec", "-i", container, "psql", "-U", "postgres", "-d", "postgres"]
     sql_command = base_psql + ["-X", "-q", "-A", "-t", "-F", "|", "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose"]
     worker_script = Path(__file__).resolve().parents[1] / "tools" / "lance_outbox_worker.py"
@@ -188,7 +191,7 @@ def main() -> int:
         expect(sql("SELECT extversion FROM pg_extension WHERE extname='pgwarc_lance';"), args.version, "fresh_pg16_extension_install")
         report["postgres_version"] = sql("SHOW server_version;")
         expect(
-            sql("SELECT count(*)=3 FROM pg_proc WHERE proname IN ('lance_outbox_enqueue','lance_outbox_enqueue_revision','lance_outbox_process_next') "
+            sql("SELECT count(*)=4 FROM pg_proc WHERE proname IN ('lance_outbox_enqueue','lance_outbox_enqueue_revision','lance_outbox_process_next','lance_document_delete') "
                 "AND prosecdef AND proconfig @> ARRAY['search_path=pg_catalog, pg_temp']::text[];"),
             "t",
             "outbox_functions_use_locked_security_definer_search_path",
@@ -203,6 +206,8 @@ def main() -> int:
                 TO pgwarc_outbox_ingest;
             GRANT EXECUTE ON FUNCTION public.lance_outbox_enqueue_revision(text,bigint[],real[],integer,text[],text[])
                 TO pgwarc_outbox_ingest;
+            GRANT EXECUTE ON FUNCTION public.lance_document_delete(text,bigint[],text[]),
+                public.lance_dataset_write_lock(text) TO pgwarc_outbox_ingest;
             GRANT SELECT ON pgwarc_lance.lance_outbox_status,
                 pgwarc_lance.lance_outbox_failures TO pgwarc_outbox_worker;
             GRANT EXECUTE ON FUNCTION public.lance_outbox_process_next() TO pgwarc_outbox_worker;
@@ -225,6 +230,13 @@ def main() -> int:
         # worker must exclude the current XID, and the job commits still pending.
         sql(f"SELECT lance_create_table('{uri}',4,false);")
         sql(f"SELECT lance_create_table('{cte_uri}',4,false);")
+        rejected(
+            f"SELECT lance_document_delete('{uri}',ARRAY[-839099]::bigint[],"
+            + "ARRAY['" + "e" * 64 + "']::text[]);",
+            "55000",
+            "has no tracked revision",
+        )
+        checks["delete_requires_a_current_revision_mapping"] = True
         cte = f"""WITH enqueued AS MATERIALIZED (
     SELECT lance_outbox_enqueue('{cte_uri}',ARRAY[-810001]::bigint[],
         ARRAY[1,0,0,0]::real[],4,ARRAY['uncommitted']::text[]) AS id
@@ -387,6 +399,302 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
             str(write_log_before + 1),
             "successful_delivery_logged",
         )
+
+        # Delete is committed as a tombstone plus an ordered vector delete.
+        # Search hides the vector immediately, even while the Lance write is pending.
+        revision_v1 = warc_importer.record_revision(imported)
+        vector_v1 = warc_importer.hash_embedding(imported.text, 4)
+        vector_v1_sql = warc_importer.sql_vector(vector_v1)
+
+        def queue_revisioned_record(record, revision: str, vector: list[float]) -> str:
+            return f"""BEGIN;
+SELECT lance_dataset_write_lock('{uri}');
+INSERT INTO pgwarc_lance.warc_record
+    (doc_id,target_uri,warc_date,content_type,http_status,payload_digest,text_len,source_file)
+VALUES ({record.doc_id},{warc_importer.sql_string(record.target_uri)},
+    {warc_importer.sql_timestamp(record.warc_date)},{warc_importer.sql_string(record.content_type)},
+    {warc_importer.sql_int(record.http_status)},{warc_importer.sql_string(record.payload_digest)},
+    {len(record.text)},{warc_importer.sql_string(record.source_file)})
+ON CONFLICT (doc_id) DO UPDATE SET target_uri=EXCLUDED.target_uri,
+    warc_date=EXCLUDED.warc_date,content_type=EXCLUDED.content_type,
+    http_status=EXCLUDED.http_status,payload_digest=EXCLUDED.payload_digest,
+    text_len=EXCLUDED.text_len,source_file=EXCLUDED.source_file,imported_at=now();
+SELECT bm25_index_document({record.doc_id},{warc_importer.sql_string(record.text)});
+SELECT lance_outbox_enqueue_revision('{uri}',ARRAY[{record.doc_id}]::bigint[],
+    {warc_importer.sql_vector(vector)},4,
+    ARRAY[{warc_importer.sql_string(record.target_uri)}]::text[],
+    ARRAY['{revision}']::text[]);
+COMMIT;"""
+
+        before_delete_version = int(sql(
+            f"SELECT max(version) FROM lance_dataset_versions('{uri}');"
+        ))
+        rejected(
+            "SET pgwarc_lance.allow_destructive_ops=off; "
+            f"SELECT lance_document_delete('{uri}',ARRAY[{doc_id}]::bigint[],"
+            f"ARRAY['{revision_v1}']::text[]);",
+            "42501",
+            "disabled by pgwarc_lance.allow_destructive_ops = off",
+        )
+        checks["delete_obeys_destructive_operation_guard"] = True
+        delete_event_id = sql(
+            f"BEGIN; SELECT lance_document_delete('{uri}',ARRAY[{doc_id}]::bigint[],"
+            f"ARRAY['{revision_v1}']::text[]); COMMIT;"
+        )
+        expect(
+            sql(f"SELECT operation||'|'||state FROM pgwarc_lance.lance_outbox WHERE id={delete_event_id};"),
+            "delete|pending",
+            "delete_commits_as_pending_ordered_event",
+        )
+        expect(
+            sql(f"SELECT pending_delete_jobs||'|'||failed_delete_jobs FROM pgwarc_lance.lance_outbox_status WHERE uri='{uri}';"),
+            "1|0",
+            "outbox_status_reports_pending_delete_work",
+        )
+        expect(
+            sql(f"SELECT count(*) FROM pgwarc_lance.warc_record WHERE doc_id={doc_id};"),
+            "0",
+            "delete_removes_warc_metadata_at_sql_commit",
+        )
+        expect(
+            sql(f"SELECT count(*) FROM pgwarc_lance.bm25_doc WHERE doc_id={doc_id};"),
+            "0",
+            "delete_removes_bm25_document_and_cascades_postings",
+        )
+        expect(
+            sql(f"SELECT is_deleted::text FROM pgwarc_lance.lance_document_revision WHERE uri='{uri}' AND doc_id={doc_id};"),
+            "true",
+            "delete_persists_document_tombstone",
+        )
+        expect(
+            sql(f"SELECT count(*) FROM bm25_search('outbox',10) WHERE doc_id={doc_id};"),
+            "0",
+            "deleted_document_is_absent_from_bm25_search",
+        )
+        expect(
+            sql(f"SELECT count(*) FROM lance_vector_search('{uri}',{vector_v1_sql},10) WHERE id={doc_id};"),
+            "0",
+            "tombstone_hides_vector_before_async_delete_delivery",
+        )
+        expect(
+            sql(f"SELECT count(*) FROM hybrid_search('outbox',{vector_v1_sql},'{uri}',10) WHERE doc_id={doc_id};"),
+            "0",
+            "tombstone_hides_document_from_hybrid_search",
+        )
+        expect(
+            sql(f"SELECT count(*) FROM lance_scan('{uri}',100) WHERE id={doc_id};"),
+            "1",
+            "pending_delete_retains_physical_vector_until_worker",
+        )
+        delete_doctor = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parents[1] / "tools" / "doctor_pg_lance.py"),
+             "--uri", uri, "--psql", shlex.join(sql_command), "--max-rows", "20"],
+            text=True, capture_output=True, timeout=90,
+        )
+        if delete_doctor.returncode != 1:
+            raise AssertionError(f"doctor did not expose a pending tombstone vector: {delete_doctor.stderr[-2000:]}")
+        delete_doctor_report = json.loads(delete_doctor.stdout)
+        expect(str(delete_doctor_report["findings"]["deleted_vector_ids"]), "1", "doctor_classifies_pending_delete_vector")
+        expect(str(delete_doctor_report["findings"]["orphan_lance_ids"]), "1", "doctor_preserves_unrelated_untracked_vector_finding")
+        expect(
+            ",".join(map(str, delete_doctor_report["sample_doc_ids"]["orphan_lance"])),
+            "-810099",
+            "doctor_does_not_misclassify_tombstone_as_orphan",
+        )
+
+        # The Lance delete commits before PostgreSQL acknowledges the event.
+        # Inject a later SQL failure, then retry the same delete idempotently.
+        sql("""
+            CREATE FUNCTION public.issue8_fail_delete_ack() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.op = 'outbox_delete' THEN
+                    RAISE EXCEPTION 'issue8 injected delete acknowledgment failure';
+                END IF;
+                RETURN NEW;
+            END $$;
+            CREATE TRIGGER issue8_fail_delete_ack
+                BEFORE INSERT ON pgwarc_lance.lance_write_log
+                FOR EACH ROW EXECUTE FUNCTION public.issue8_fail_delete_ack();
+        """)
+        delete_ack_failure = subprocess.run(
+            sql_command, input="SELECT * FROM lance_outbox_process_next();",
+            text=True, capture_output=True, timeout=90,
+        )
+        if (delete_ack_failure.returncode == 0
+                or "P0001" not in delete_ack_failure.stderr
+                or "issue8 injected delete acknowledgment failure" not in delete_ack_failure.stderr):
+            raise AssertionError(
+                "injected delete acknowledgment failure was not observed: "
+                f"{delete_ack_failure.stdout} {delete_ack_failure.stderr}"
+            )
+        checks["delete_external_commit_before_ack_failure_injected"] = True
+        expect(
+            sql(f"SELECT count(*) FROM lance_scan('{uri}',100) WHERE id={doc_id};"),
+            "0",
+            "failed_ack_leaves_external_delete_committed",
+        )
+        expect(
+            sql(f"SELECT state||'|'||attempt_count::text FROM pgwarc_lance.lance_outbox WHERE id={delete_event_id};"),
+            "pending|0",
+            "failed_ack_keeps_delete_event_retryable",
+        )
+        sql("DROP TRIGGER issue8_fail_delete_ack ON pgwarc_lance.lance_write_log; DROP FUNCTION public.issue8_fail_delete_ack();")
+        delete_replay = worker_once()
+        assert delete_replay is not None
+        expect(str(delete_replay["outbox_id"]), delete_event_id, "retry_replays_same_delete_event")
+        expect(str(delete_replay["status"]), "completed", "delete_retry_completes_after_external_write")
+        expect(
+            sql(f"SELECT state||'|'||cardinality(ids)::text FROM pgwarc_lance.lance_outbox WHERE id={delete_event_id};"),
+            "completed|0",
+            "completed_delete_releases_ids_but_keeps_event_history",
+        )
+        expect(
+            sql(f"SELECT count(*) FROM lance_dataset_versions('{uri}') WHERE version={before_delete_version};"),
+            "1",
+            "delete_preserves_previous_dataset_version",
+        )
+        delete_jobs_before_repeat = sql(
+            f"SELECT count(*) FROM pgwarc_lance.lance_outbox WHERE uri='{uri}' AND operation='delete';"
+        )
+        expect(
+            sql(f"SELECT lance_document_delete('{uri}',ARRAY[{doc_id}]::bigint[],ARRAY['{revision_v1}']::text[]);"),
+            "0",
+            "repeated_delete_of_same_tombstone_is_idempotent",
+        )
+        expect(
+            sql(f"SELECT count(*) FROM pgwarc_lance.lance_outbox WHERE uri='{uri}' AND operation='delete';"),
+            delete_jobs_before_repeat,
+            "idempotent_delete_does_not_duplicate_outbox_jobs",
+        )
+
+        # Restoring the old Lance version alone must not undo PostgreSQL's
+        # committed tombstone or expose the old vector through search.
+        sql(f"SELECT lance_restore_version('{uri}',{before_delete_version});")
+        expect(sql(f"SELECT count(*) FROM lance_scan('{uri}',100) WHERE id={doc_id};"), "1", "explicit_restore_repromotes_old_physical_row")
+        expect(sql(f"SELECT count(*) FROM lance_vector_search('{uri}',{vector_v1_sql},10) WHERE id={doc_id};"), "0", "restored_old_vector_remains_hidden_by_tombstone")
+        recreated = dataclasses.replace(
+            imported,
+            text=imported.text + " recreated",
+            payload_digest="sha1:issue8-recreated",
+        )
+        revision_v2 = warc_importer.record_revision(recreated)
+        vector_v2 = [0.0, 1.0, 0.0, 0.0]
+        sql(queue_revisioned_record(recreated, revision_v2, vector_v2))
+        expect(
+            sql(f"SELECT is_deleted::text FROM pgwarc_lance.lance_document_revision WHERE uri='{uri}' AND doc_id={doc_id};"),
+            "false",
+            "revisioned_recreation_clears_tombstone",
+        )
+        rejected(
+            f"SELECT lance_document_delete('{uri}',ARRAY[{doc_id}]::bigint[],"
+            f"ARRAY['{revision_v1}']::text[]);",
+            "55000",
+            "revision changed before delete",
+        )
+        checks["stale_revision_cannot_delete_recreated_document"] = True
+        expect(
+            sql(f"SELECT count(*) FROM lance_vector_search('{uri}',{warc_importer.sql_vector(vector_v2)},10) WHERE id={doc_id};"),
+            "0",
+            "stale_predelete_revision_is_hidden_during_recreation",
+        )
+        recreated_delivery = worker_once()
+        assert recreated_delivery is not None
+        expect(str(recreated_delivery["status"]), "completed", "recreated_vector_delivery_completes")
+        expect(sql(f"SELECT count(*)||'|'||count(DISTINCT id) FROM lance_scan('{uri}',100) WHERE id={doc_id};"), "1|1", "recreation_keeps_one_vector_row")
+        expect(sql(f"SELECT count(*) FROM pgwarc_lance.warc_record WHERE doc_id={doc_id};"), "1", "recreation_keeps_one_metadata_row")
+        expect(sql(f"SELECT count(*) FROM pgwarc_lance.bm25_doc WHERE doc_id={doc_id};"), "1", "recreation_keeps_one_bm25_document")
+        expect(sql(f"SELECT revision FROM lance_scan_document_state('{uri}',100) WHERE doc_id={doc_id};"), revision_v2, "recreation_persists_new_revision")
+        rejected(
+            f"SELECT lance_upsert_many('{uri}',ARRAY[{doc_id}]::bigint[],"
+            "ARRAY[0,0,0,1]::real[],4,ARRAY['unversioned-update']::text[]);",
+            "55000",
+            "revision-tracked document IDs require revision-aware outbox operations",
+        )
+        rejected(
+            f"SELECT lance_insert('{uri}',{doc_id},ARRAY[0,0,0,1]::real[],'unversioned-insert');",
+            "55000",
+            "revision-tracked document IDs require revision-aware outbox operations",
+        )
+        rejected(
+            f"SELECT lance_insert_many('{uri}',ARRAY[{doc_id}]::bigint[],"
+            "ARRAY[0,0,0,1]::real[],4,ARRAY['unversioned-insert-many']::text[]);",
+            "55000",
+            "revision-tracked document IDs require revision-aware outbox operations",
+        )
+        rejected(
+            f"SELECT lance_outbox_enqueue('{uri}',ARRAY[{doc_id}]::bigint[],"
+            "ARRAY[0,0,0,1]::real[],4,ARRAY['unversioned-outbox']::text[]);",
+            "55000",
+            "revision-tracked document IDs require revision-aware outbox operations",
+        )
+        checks["unversioned_direct_upsert_cannot_bypass_revision_mapping"] = True
+
+        # Competing delete and upsert transactions take the same URI lock before
+        # metadata writes. The later upsert is ordered after the delete and wins.
+        race_delete_app = f"pgwarc_issue8_delete_{suffix}"
+        race_upsert_app = f"pgwarc_issue8_upsert_{suffix}"
+        race_app_names.extend([race_delete_app, race_upsert_app])
+        race_base_id = int(sql("SELECT COALESCE(max(id),0) FROM pgwarc_lance.lance_outbox;"))
+        delete_sql = f"BEGIN; SELECT lance_document_delete('{uri}',ARRAY[{doc_id}]::bigint[],ARRAY['{revision_v2}']::text[]); SELECT pg_sleep(1.2); COMMIT;"
+        delete_process = subprocess.Popen(
+            ["docker", "exec", "-i", "-e", f"PGAPPNAME={race_delete_app}", container,
+             "psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        race_processes.append(delete_process)
+        delete_process.stdin.write(delete_sql)
+        delete_process.stdin.close()
+        delete_process.stdin = None
+        wait_for_sleep(race_delete_app, delete_process)
+        race_record = dataclasses.replace(
+            recreated,
+            text=recreated.text + " concurrent",
+            payload_digest="sha1:issue8-concurrent",
+        )
+        race_revision = warc_importer.record_revision(race_record)
+        race_write_sql = queue_revisioned_record(race_record, race_revision, [0.0, 0.0, 1.0, 0.0])
+        upsert_process = subprocess.Popen(
+            ["docker", "exec", "-i", "-e", f"PGAPPNAME={race_upsert_app}", container,
+             "psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        race_processes.append(upsert_process)
+        upsert_process.stdin.write(race_write_sql)
+        upsert_process.stdin.close()
+        upsert_process.stdin = None
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if sql(f"SELECT count(*) FROM pg_stat_activity WHERE application_name='{race_upsert_app}' AND wait_event_type='Lock';") == "1":
+                break
+            if upsert_process.poll() is not None:
+                raise AssertionError("concurrent upsert completed before acquiring the delete-held URI lock")
+            time.sleep(0.05)
+        else:
+            raise AssertionError("concurrent upsert did not block on the URI writer lock")
+        expect(sql(f"SELECT payload_digest FROM pgwarc_lance.warc_record WHERE doc_id={doc_id};"), "sha1:issue8-recreated", "blocked_upsert_has_not_mutated_metadata")
+        delete_stdout, delete_stderr = delete_process.communicate(timeout=30)
+        if delete_process.returncode:
+            raise AssertionError(f"concurrent delete transaction failed: {delete_stdout} {delete_stderr}")
+        upsert_stdout, upsert_stderr = upsert_process.communicate(timeout=30)
+        if upsert_process.returncode:
+            raise AssertionError(f"concurrent upsert transaction failed: {upsert_stdout} {upsert_stderr}")
+        race_processes.clear()
+        expect(
+            sql(f"SELECT string_agg(operation,',' ORDER BY id) FROM pgwarc_lance.lance_outbox WHERE uri='{uri}' AND id>{race_base_id};"),
+            "delete,upsert",
+            "concurrent_delete_upsert_events_follow_uri_lock_order",
+        )
+        race_delete_delivery = worker_once()
+        race_upsert_delivery = worker_once()
+        assert race_delete_delivery is not None and race_upsert_delivery is not None
+        expect(str(race_delete_delivery["status"]), "completed", "concurrent_delete_delivers_before_recreation")
+        expect(str(race_upsert_delivery["status"]), "completed", "concurrent_upsert_delivers_after_delete")
+        expect(sql(f"SELECT count(*)||'|'||count(DISTINCT id) FROM lance_scan('{uri}',100) WHERE id={doc_id};"), "1|1", "concurrent_delete_upsert_converges_to_one_vector")
+        expect(sql(f"SELECT count(*) FROM pgwarc_lance.warc_record WHERE doc_id={doc_id};"), "1", "concurrent_delete_upsert_converges_to_one_metadata_row")
+        expect(sql(f"SELECT content FROM pgwarc_lance.bm25_doc WHERE doc_id={doc_id};"), race_record.text, "concurrent_delete_upsert_converges_to_latest_bm25_content")
+        expect(sql(f"SELECT expected_revision||'|'||is_deleted::text FROM pgwarc_lance.lance_document_revision WHERE uri='{uri}' AND doc_id={doc_id};"), f"{race_revision}|false", "concurrent_delete_upsert_leaves_latest_active_revision")
+        checks["concurrent_delete_upsert_serialization_and_retry_are_idempotent"] = True
 
         # Race two importer transactions for one stable ID with distinct content
         # revisions. Queue order must leave the last committed input on Lance.
@@ -596,6 +904,18 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
         # reports observable row mismatches and an unfinished job without
         # acknowledging the job, adding a Lance version, or changing write logs.
         sql(f"SELECT lance_create_table('{doctor_uri}',2,false);")
+        # These legacy Lance rows predate the PostgreSQL revision mapping.
+        # The two tracked rows below intentionally remain revision-less so the
+        # doctor can report stale legacy vectors while an unrelated orphan is
+        # still visible in the same fixture.
+        sql(
+            f"SELECT lance_insert_many('{doctor_uri}',ARRAY[-851001,-851004,-851006]::bigint[],"
+            "ARRAY[1,0,0,1,1,1]::real[],2,"
+            "ARRAY['https://example.test/doctor/ok','https://example.test/doctor/old','orphan']::text[]);"
+        )
+        sql(
+            f"SELECT lance_insert('{doctor_uri}',-851006,ARRAY[2,2]::real[],'duplicate orphan');"
+        )
         sql("""
             INSERT INTO pgwarc_lance.warc_record
                 (doc_id,target_uri,payload_digest,text_len)
@@ -612,6 +932,7 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
             SELECT bm25_index_document(-851005,'pending vector content');
         """)
         doctor_revisions = []
+        doctor_revision_by_id = {}
         for doc_id, digest, content, target_uri, text_len in [
             (-851001, "sha1:ok", "doctor expected content", "https://example.test/doctor/ok", 5),
             (-851003, "sha1:missing", "missing vector content", "https://example.test/doctor/missing", 7),
@@ -627,27 +948,23 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
                 "payload_digest": digest,
                 "bm25_content_md5": hashlib.md5(content.encode("utf-8")).hexdigest(),
             }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            doctor_revision_by_id[doc_id] = rev
             doctor_revisions.append(f"('{doctor_uri}',{doc_id},'{rev}')")
         sql(
             "INSERT INTO pgwarc_lance.lance_document_revision(uri,doc_id,expected_revision) VALUES "
             + ",".join(doctor_revisions) + ";"
         )
         sql(
-            f"SELECT lance_insert_many('{doctor_uri}',ARRAY[-851001,-851004,-851006]::bigint[],"
-            "ARRAY[1,0,0,1,1,1]::real[],2,"
-            "ARRAY['https://example.test/doctor/ok','https://example.test/doctor/old','orphan']::text[]);"
-        )
-        sql(
-            f"SELECT lance_insert('{doctor_uri}',-851006,ARRAY[2,2]::real[],'duplicate orphan'); "
-            f"SELECT lance_outbox_enqueue('{doctor_uri}',ARRAY[-851005]::bigint[],"
-            "ARRAY[3,3]::real[],2,ARRAY['https://example.test/doctor/pending']::text[]);"
+            f"SELECT lance_outbox_enqueue_revision('{doctor_uri}',ARRAY[-851005]::bigint[],"
+            "ARRAY[3,3]::real[],2,ARRAY['https://example.test/doctor/pending']::text[],"
+            f"ARRAY['{doctor_revision_by_id[-851005]}']::text[]);"
         )
         doctor_role = f"pgwarc_doctor_{suffix}"
         sql(f"""
             CREATE ROLE {doctor_role} NOLOGIN;
             GRANT USAGE ON SCHEMA public, pgwarc_lance TO {doctor_role};
             GRANT SELECT ON pgwarc_lance.bm25_doc, pgwarc_lance.warc_record TO {doctor_role};
-            GRANT SELECT (uri, doc_id, expected_revision)
+            GRANT SELECT (uri, doc_id, expected_revision, is_deleted)
                 ON pgwarc_lance.lance_document_revision TO {doctor_role};
             GRANT SELECT (id, uri, state, ids) ON pgwarc_lance.lance_outbox TO {doctor_role};
             GRANT EXECUTE ON FUNCTION public.lance_scan_document_state(text,integer) TO {doctor_role};
@@ -776,6 +1093,20 @@ SELECT enqueued.id || '|' || processed.n FROM enqueued CROSS JOIN processed;"""
         raise
     finally:
         if created:
+            if race_app_names:
+                app_names = ",".join("'" + name.replace("'", "''") + "'" for name in race_app_names)
+                subprocess.run(
+                    sql_command,
+                    input=f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name IN ({app_names});\n",
+                    text=True, capture_output=True, timeout=15,
+                )
+            for process in race_processes:
+                if process.poll() is None:
+                    try:
+                        process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=10)
             if writer and writer.poll() is None:
                 subprocess.run(
                     sql_command,

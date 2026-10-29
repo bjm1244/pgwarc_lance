@@ -1,10 +1,10 @@
 # pgwarc_lance
 
-> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 개발 후보는 **0.1.22**이다. URI별 문서 revision mapping과 Lance 행 revision을 durable vector outbox에 기록하고, read-only PG–Lance doctor가 ID/revision 불일치를 보고한다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며 outbox 갱신은 commit 뒤 eventual consistency를 제공한다. Linux x86_64 / PostgreSQL 16.15 artifact의 실제 설치·upgrade·SQL·importer·runtime·backup 검증과 artifact-bound 의존성 고지는 [PUBLICATION.md](PUBLICATION.md), [THIRD_PARTY.md](THIRD_PARTY.md)에 기록한다. 이 검증은 binary 재배포·프로덕션 승인을 뜻하지 않는다.
+> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 개발 후보는 **0.1.23**이다. URI별 document revision, tombstone, ordered vector upsert/delete outbox로 삭제·재생성 중 stale vector 노출을 막는다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며 outbox 갱신은 commit 뒤 eventual consistency를 제공한다. 현재 후보의 실제 PG16 검증 범위와 한계는 [PUBLICATION.md](PUBLICATION.md)에 기록한다. 과거 0.1.22 artifact의 설치·upgrade·SQL·importer·runtime·backup 검증 및 artifact-bound 의존성 고지는 [THIRD_PARTY.md](THIRD_PARTY.md)에 보존한다. 검증은 binary 재배포·프로덕션 승인을 뜻하지 않는다.
 >
 > 라이선스: Apache-2.0 ([LICENSE](LICENSE)). 기여 전 [CONTRIBUTING.md](CONTRIBUTING.md)·[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)를 참고하라.
 
-이전 0.1.18 실험, 0.1.19 인덱스, 0.1.20 후보와 현재 0.1.21 배포 고지 검토의 결과·한계는 [개발 기록](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), [THIRD_PARTY.md](THIRD_PARTY.md)에 기록한다.
+이전 0.1.18 실험, 0.1.19 인덱스, 0.1.20–0.1.23 후보의 결과·한계는 [개발 기록](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), [THIRD_PARTY.md](THIRD_PARTY.md)에 기록한다.
 
 `pgwarc_lance`는 WARC/Web archive 데이터를 PostgreSQL 안에서 검색 가능한 레코드로 다루기 위한 pgrx 기반 확장이다. 현재 구현은 PostgreSQL 테이블 기반 BM25, Lance dataset 기반 벡터 검색, RRF 기반 hybrid search, 그리고 초기 WARC/WARC.GZ SQL importer를 제공한다.
 
@@ -153,6 +153,8 @@ pgwarc_lance/
 | `lance_insert_many(uri, ids, flat_vectors, vector_dim, labels)` | Lance dataset에 여러 벡터 row를 한 번의 batch append로 삽입 |
 | `lance_outbox_enqueue(uri, ids, flat_vectors, vector_dim, labels)` | caller transaction에 재시도 안전한 비버전 벡터 upsert 작업을 저장 |
 | `lance_outbox_enqueue_revision(uri, ids, flat_vectors, vector_dim, labels, revisions)` | URI별 예상 문서 revision mapping과 벡터 작업을 같은 caller transaction에 저장 |
+| `lance_document_delete(uri, ids, expected_revisions)` | 예상 revision이 현재 상태와 일치할 때 metadata/BM25를 지우고 tombstone과 순서가 보장된 Lance delete 작업을 커밋 |
+| `lance_dataset_write_lock(uri)` | importer가 metadata/BM25 변경 전에 해당 URI writer 잠금을 획득 |
 | `lance_outbox_process_next()` | 독립 transaction에서 가장 오래된 완료 가능 작업을 Lance에 반영하고 결과 버전/지연을 반환 |
 | `lance_scan(uri, limit=100)` | Lance row 스캔 |
 | `lance_scan_document_state(uri, limit=100)` | Lance row의 document ID, label, 실제 저장 revision을 읽기 전용으로 조회 |
@@ -163,7 +165,7 @@ pgwarc_lance/
 | `lance_dataset_versions(uri)` | dataset 버전 목록 `(version, created_ms)` 반환 (오래된 순) |
 | `lance_restore_version(uri, version)` | 지정 버전을 최신 상태로 재승격 (롤백 보상 경로) |
 
-`pgwarc_lance.lance_outbox`는 importer가 같은 PostgreSQL transaction에 저장한 vector payload, 대기/실패 상태, 재시도 수, 문서 revision과 완료 Lance 버전을 보관한다. 성공적으로 반영된 행은 완료와 applied version을 커밋할 때 큰 vector payload를 비우지만 작은 revision 영수증은 유지한다. `lance_document_revision`은 URI/document별 기대 revision을 기록하고 Lance의 `revision` 열에는 실제 upsert한 revision이 저장된다. `lance_outbox_status`는 URI별 ready/pending/failed 작업 수, 가장 오래 기다린 지연, 마지막 완료 시각과 outbox 반영 버전을 요약한다.
+`pgwarc_lance.lance_outbox`는 importer가 같은 PostgreSQL transaction에 저장한 vector payload, 대기/실패 상태, 재시도 수, 문서 revision, upsert/delete 종류와 완료 Lance 버전을 보관한다. 성공적으로 반영된 행은 완료와 applied version을 커밋할 때 큰 vector payload와 ID 목록을 비우지만 작은 revision 영수증은 유지한다. `lance_document_revision`은 URI/document별 기대 revision과 삭제 tombstone을 기록하고 Lance의 `revision` 열에는 실제 upsert한 revision이 저장된다. `lance_outbox_status`는 URI별 ready/pending/failed 작업 수와 pending/failed delete 작업 수, 가장 오래 기다린 지연, 마지막 완료 시각과 outbox 반영 버전을 요약한다.
 
 `lance_create_table()`은 기존 1-argument 호출 호환성을 위해 기본 차원을 3으로 둔다. 실제 embedding 연동에서는 모델 차원에 맞춰 `vector_dim`을 명시한다. 테스트처럼 반복 실행이 필요한 경우에만 `overwrite=true`로 dataset을 재생성한다.
 
@@ -180,8 +182,35 @@ Lance dataset은 PostgreSQL이 관리하지 않는 파일이다. 기본 direct �
 - worker는 autocommit의 standalone SQL call로만 동작한다. 같은 transaction의 미커밋 XID는 선택에서 제외되고 explicit `BEGIN` 안의 worker 호출은 거부된다. URI별 이전 작업이 완료되기 전에는 다음 이벤트를 처리하지 않으므로 한 URI의 pending/failed 이벤트가 뒤 작업을 막는다.
 - 처리 전까지 BM25와 WARC metadata는 보이고 vector/hybrid 결과는 늦을 수 있다. read-after-write가 필요하면 해당 outbox ID가 `completed`인지 확인한 뒤 vector 검색을 수행한다. `lance_outbox_status`의 대기 지연, 실패, 완료 버전을 감시한다.
 - direct Lance API는 즉시 쓰기 의미를 유지한다. 같은 URI에 미완료 outbox 이벤트가 있으면 direct write/restore는 거부되어 두 writer 경로가 순서를 바꾸지 못하게 한다. 한 dataset에서 outbox worker와 외부 Lance writer를 동시에 운용하지 않는다.
+- importer의 `upsert`/`outbox`는 각 SQL batch에서 metadata/BM25를 바꾸기 전에 `lance_dataset_write_lock(uri)`를 호출한다. 삭제 함수와 worker도 같은 URI별 transaction lock을 사용하므로 커밋된 upsert/delete 이벤트가 한 dataset 안에서 순서대로 처리된다. revision이 등록된 ID에는 revision 없는 direct upsert를 허용하지 않는다.
 - outbox 상태와 payload는 extension configuration data로 `pg_dump` 대상이다. backup 시 importer와 worker를 함께 멈추고 queue가 비었는지 확인한다. pending 작업을 보존한 snapshot은 SQL과 그 시점의 Lance directory를 함께 복구한 뒤 worker를 재개해야 한다.
 - outbox를 사용하지 않는 direct write의 rollback/취소 보상은 `lance_dataset_versions()`와 `lance_restore_version()`으로 관리한다. 이 경우 `lance_write_log` 부재가 외부 파일 쓰기 부재를 증명하지 않는다.
+
+### 문서 삭제·재생성 lifecycle (0.1.23)
+
+삭제 전에 현재 `lance_document_revision.expected_revision`을 읽고 그 값을 그대로
+`lance_document_delete(uri, ids, expected_revisions)`에 전달한다. revision mapping이
+없거나 값이 바뀌었으면 삭제를 거부하므로, 먼저 importer의 revision-aware `outbox`
+upsert로 해당 문서를 등록한다. 이 함수는 URI writer lock을 잡고 WARC metadata와
+BM25 행을 삭제하고 postings cascade, 마지막 content revision을 보존한 tombstone, delete outbox event를 한 SQL transaction에
+커밋한다. 같은 revision으로 반복 요청하면 새 event 없이 no-op이며, 이후 재생성은
+새 revision을 포함한 revision-aware outbox upsert로 처리한다. 재생성 때 새 revision mapping이
+기존 tombstone을 대체하고, 이전 vector 행은 새 upsert가 전달될 때까지 검색 필터에서 숨긴다.
+
+```sql
+SELECT lance_document_delete(uri, ARRAY[doc_id], ARRAY[expected_revision])
+FROM pgwarc_lance.lance_document_revision
+WHERE uri = '/srv/pgwarc/archive.lance' AND doc_id = 123 AND NOT is_deleted;
+```
+
+`lance_document_delete`는 destructive operation이며 함수 권한과
+`pgwarc_lance.allow_destructive_ops` 설정을 모두 통과해야 한다. 삭제 commit 직후 BM25와
+WARC metadata에서는 빠지고, tombstone이 Lance vector/hybrid 검색 결과를 즉시 거른다.
+Worker는 pending event를 재시도해 Lance의 현재 dataset version에서 ID를 제거한다. Lance의
+이전 version은 보존되며 extension이 자동 compaction이나 version GC를 수행하지 않는다.
+오래된 version을 정리하는 일은 별도 백업·복구 계획 아래 운영자가 수행한다. Lance version만
+복원해도 PostgreSQL tombstone은 유지되어 검색 결과가 되살아나지 않는다. 논리 문서 복구는
+권위 있는 원본에서 metadata, BM25, 새 revision과 vector를 함께 재구성해야 한다.
 
 ### PG–Lance read-only doctor (Issue #6 progress)
 
@@ -226,8 +255,9 @@ python3 tools/doctor_pg_lance.py --uri "$LANCE_URI" \
 
 | GUC | 기본값 | 의미 |
 |-----|--------|------|
-| `pgwarc_lance.allowed_uri_prefix` | `NULL` | 비우면 호출자를 신뢰(기존 동작). 값을 주면 모든 Lance URI가 이 접두어로 시작해야 하며, 아니면 `insufficient_privilege`로 거부한다. | `pgwarc_lance.max_scan_rows` | `0`(무제한) | `lance_scan`이 백엔드 메모리에 담을 수 있는 최대 행 수. 초과 요청은 `program_limit_exceeded`로 거부한다.
-| `pgwarc_lance.allow_destructive_ops` | `on` | `off`면 `lance_create_table(overwrite => true)`와 `lance_restore_version()`을 거부한다. 데이터가 실려 있는 환경에서는 `off`를 권장한다.
+| `pgwarc_lance.allowed_uri_prefix` | `NULL` | 비우면 호출자를 신뢰(기존 동작). 값을 주면 모든 Lance URI가 이 접두어로 시작해야 하며, 아니면 `insufficient_privilege`로 거부한다. |
+| `pgwarc_lance.max_scan_rows` | `0`(무제한) | `lance_scan`이 백엔드 메모리에 담을 수 있는 최대 행 수. 초과 요청은 `program_limit_exceeded`로 거부한다. |
+| `pgwarc_lance.allow_destructive_ops` | `on` | `off`면 문서 삭제, `lance_create_table(overwrite => true)`, `lance_restore_version()`을 거부한다. 데이터가 실려 있는 환경에서는 `off`를 권장한다. |
 
 ```sql
 SET pgwarc_lance.allowed_uri_prefix = '/var/lib/pgwarc_lance/datasets';
