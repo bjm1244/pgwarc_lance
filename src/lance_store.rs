@@ -550,6 +550,24 @@ pub fn spawn_vector_search(uri: &str, query: Vec<f32>, k: usize) -> PendingVecto
     }
 }
 
+/// Start an exact search over a bounded PostgreSQL eligibility set.
+///
+/// The id predicate is generated only from signed integers returned by the
+/// parameterized PostgreSQL filter query. Prefiltering and disabling vector
+/// indices ensure the `k = eligible_doc_ids.len()` scan returns every eligible
+/// vector before the caller applies the final result limit.
+pub fn spawn_filtered_vector_search(
+    uri: &str,
+    query: Vec<f32>,
+    eligible_doc_ids: Vec<i64>,
+) -> PendingVectorSearch {
+    let uri = uri.to_string();
+    PendingVectorSearch {
+        task: runtime()
+            .spawn(async move { vector_search_filtered_async(uri, query, eligible_doc_ids).await }),
+    }
+}
+
 async fn vector_search_async(
     uri: String,
     query: Vec<f32>,
@@ -579,6 +597,78 @@ async fn vector_search_async(
     scanner
         .nearest("vector", query_ref, k)
         .map_err(|error| error.to_string())?;
+    if has_revision {
+        scanner
+            .project(&["id", "label", "revision", "_distance"])
+            .map_err(|error| error.to_string())?;
+    } else {
+        scanner
+            .project(&["id", "label", "_distance"])
+            .map_err(|error| error.to_string())?;
+    }
+
+    let mut stream = Box::pin(
+        scanner
+            .try_into_stream()
+            .await
+            .map_err(|error| error.to_string())?,
+    );
+    let mut results = Vec::new();
+    while let Some(batch) = stream.next().await {
+        let batch = batch.map_err(|error| error.to_string())?;
+        append_vector_batch(&batch, &mut results).map_err(|error| error.to_string())?;
+    }
+    results.sort_by(|a, b| {
+        let distance_order = a
+            .distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(Ordering::Equal);
+        distance_order.then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(results)
+}
+
+async fn vector_search_filtered_async(
+    uri: String,
+    query: Vec<f32>,
+    eligible_doc_ids: Vec<i64>,
+) -> Result<Vec<SearchResult>, String> {
+    if eligible_doc_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let dataset = DatasetBuilder::from_uri(&uri)
+        .load()
+        .await
+        .map_err(|error| error.to_string())?;
+    let vector_dim = dataset_vector_dim(&dataset).map_err(|error| error.to_string())?;
+    if query.len() != vector_dim as usize {
+        return Err(format!(
+            "query dimension mismatch: expected {}, got {}",
+            vector_dim,
+            query.len()
+        ));
+    }
+
+    let id_filter = format!(
+        "id IN ({})",
+        eligible_doc_ids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let query_array = Float32Array::from(query);
+    let query_ref: &dyn arrow::array::Array = &query_array;
+    let mut scanner = dataset.scan();
+    let has_revision = dataset.schema().field("revision").is_some();
+    scanner
+        .prefilter(true)
+        .filter(&id_filter)
+        .map_err(|error| error.to_string())?
+        .nearest("vector", query_ref, eligible_doc_ids.len())
+        .map_err(|error| error.to_string())?
+        .use_index(false);
     if has_revision {
         scanner
             .project(&["id", "label", "revision", "_distance"])

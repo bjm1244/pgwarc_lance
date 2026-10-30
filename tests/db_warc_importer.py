@@ -59,6 +59,7 @@ def warc_response(row: int) -> bytes:
     http = (
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
+        "Content-Language: EN-us\r\n"
         "\r\n"
         f"{html}"
     ).encode("utf-8")
@@ -142,6 +143,12 @@ SELECT bm25_doc_count();
 SELECT lance_count('{lance_uri}');
 SELECT count(*) FROM hybrid_warc_search('shared search', ARRAY[0,0,0,0]::float4[], '{lance_uri}', 3)
 WHERE target_uri LIKE 'https://example.test/importer-db/%';
+SELECT count(*) FROM pgwarc_lance.warc_record
+WHERE domain = 'example.test' AND content_language = 'en-us' AND media_type = 'text/html';
+SELECT count(*) FROM hybrid_warc_search_filtered(
+    'shared search', ARRAY[0,0,0,0]::float4[], '{lance_uri}',
+    '{{"domain":"example.test","language":"en-US","format":"text/html"}}'::jsonb, 10
+);
 SELECT doc_id FROM bm25_search('{long_token}', 10) ORDER BY doc_id;
 SELECT json_agg(t ORDER BY doc_id) FROM bm25_search('shared {long_token}', 10) t;
 """
@@ -150,12 +157,14 @@ SELECT json_agg(t ORDER BY doc_id) FROM bm25_search('shared {long_token}', 10) t
             assert_equal(checks[1], "4", f"{mode}: bm25_doc_count")
             assert_equal(checks[2], "4", f"{mode}: lance_count")
             assert_equal(checks[3], "3", f"{mode}: hybrid_warc_search count")
-            assert_equal(checks[4], str(records[-1].doc_id), f"{mode}: exact long-token search")
+            assert_equal(checks[4], "4", f"{mode}: imported filter metadata count")
+            assert_equal(checks[5], "4", f"{mode}: candidate-filtered search count")
+            assert_equal(checks[6], str(records[-1].doc_id), f"{mode}: exact long-token search")
             if expected_mixed_scores is None:
-                expected_mixed_scores = checks[5]
+                expected_mixed_scores = checks[7]
             else:
                 assert_equal(
-                    checks[5], expected_mixed_scores,
+                    checks[7], expected_mixed_scores,
                     f"{mode}: mixed short/long BM25 scores match function mode",
                 )
     print("db_warc_importer: ok")

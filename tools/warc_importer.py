@@ -28,6 +28,7 @@ import zipfile
 import zlib
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Iterator
+from urllib.parse import urlsplit
 
 try:
     from tools import collection_manifest
@@ -82,6 +83,10 @@ class ImportRecord:
     char_end: int = 0
     parent_text_len: int = 0
     chunking_version: str = "whole-document-v1"
+    domain: str | None = None
+    content_language: str | None = None
+    media_type: str | None = None
+    collection_id: str | None = None
 
 
 class HtmlTextExtractor(html.parser.HTMLParser):
@@ -726,6 +731,38 @@ def media_type(content_type: str | None) -> str:
     return (content_type or "").split(";", 1)[0].strip().lower()
 
 
+def target_domain(target_uri: str | None) -> str | None:
+    """Return the normalized URI host used by exact domain search filters."""
+    if not target_uri:
+        return None
+    try:
+        host = urlsplit(target_uri).hostname
+        if not host:
+            return None
+        # Keep internationalized hosts stable across backend locales.
+        return host.rstrip(".").encode("idna").decode("ascii").lower() or None
+    except (UnicodeError, ValueError):
+        # Preserve the record and source URI; a malformed URI has no domain.
+        return None
+
+
+def content_languages(value: str | None) -> str | None:
+    """Normalize a bounded HTTP Content-Language list for exact tag matching."""
+    if not value:
+        return None
+    if len(value.encode("utf-8")) > 256:
+        raise ValueError("HTTP Content-Language exceeds the 256-byte metadata limit")
+    tags = [part.strip().lower() for part in value.split(",") if part.strip()]
+    if len(tags) > 8:
+        raise ValueError("HTTP Content-Language has more than 8 tags")
+    for tag in tags:
+        if len(tag) > 63 or tag.startswith("-") or tag.endswith("-") or "--" in tag:
+            raise ValueError("HTTP Content-Language contains an invalid language tag")
+        if any(not (char.isascii() and (char.isalnum() or char == "-")) for char in tag):
+            raise ValueError("HTTP Content-Language contains an invalid language tag")
+    return ",".join(tags) or None
+
+
 def decode_body(
     body: bytes,
     headers: dict[str, str],
@@ -868,6 +905,9 @@ def import_record_from_warc(
         text=text,
         source_file=record.source_file,
         extraction_status=extraction_status,
+        domain=target_domain(target_uri),
+        content_language=content_languages(http_headers.get("content-language")),
+        media_type=media_type(content_type) or None,
     )
 
 
@@ -994,6 +1034,10 @@ def record_to_json(record: ImportRecord) -> dict[str, Any]:
         "revision": record_revision(record),
         "text_len": len(record.text),
         "source_file": record.source_file,
+        "domain": record.domain,
+        "content_language": record.content_language,
+        "media_type": record.media_type,
+        "collection_id": record.collection_id,
         "text": record.text,
     }
 
@@ -1374,6 +1418,10 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
     payload_digest text,
     text_len       integer NOT NULL DEFAULT 0,
     source_file    text,
+    domain         text,
+    content_language text,
+    media_type     text,
+    collection_id  text,
     imported_at    timestamptz NOT NULL DEFAULT now()
 );
 """.strip(),
@@ -1381,6 +1429,14 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
         "ON pgwarc_lance.warc_record (target_uri);",
         "CREATE INDEX IF NOT EXISTS warc_record_warc_date_idx "
         "ON pgwarc_lance.warc_record (warc_date);",
+        "CREATE INDEX IF NOT EXISTS warc_record_domain_idx "
+        "ON pgwarc_lance.warc_record (domain);",
+        "CREATE INDEX IF NOT EXISTS warc_record_language_gin_idx "
+        "ON pgwarc_lance.warc_record USING gin (string_to_array(content_language, ','));",
+        "CREATE INDEX IF NOT EXISTS warc_record_media_type_idx "
+        "ON pgwarc_lance.warc_record (media_type);",
+        "CREATE INDEX IF NOT EXISTS warc_record_collection_idx "
+        "ON pgwarc_lance.warc_record (collection_id);",
     ]
     if skip_schema:
         lines = ["SET standard_conforming_strings = on;"]
@@ -1392,6 +1448,14 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
             "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS char_end integer;",
             "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS parent_text_len integer;",
             "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS chunking_version text;",
+            "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS domain text;",
+            "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS content_language text;",
+            "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS media_type text;",
+            "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS collection_id text;",
+            "CREATE INDEX IF NOT EXISTS warc_record_domain_idx ON pgwarc_lance.warc_record (domain);",
+            "CREATE INDEX IF NOT EXISTS warc_record_language_gin_idx ON pgwarc_lance.warc_record USING gin (string_to_array(content_language, ','));",
+            "CREATE INDEX IF NOT EXISTS warc_record_media_type_idx ON pgwarc_lance.warc_record (media_type);",
+            "CREATE INDEX IF NOT EXISTS warc_record_collection_idx ON pgwarc_lance.warc_record (collection_id);",
             "CREATE INDEX IF NOT EXISTS warc_record_parent_chunk_idx "
             "ON pgwarc_lance.warc_record (parent_doc_id, chunk_index);",
         ])
@@ -1445,11 +1509,13 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
 INSERT INTO pgwarc_lance.warc_record (
     doc_id, parent_doc_id, chunk_index, char_start, char_end, parent_text_len,
     chunking_version, target_uri, warc_date, content_type, http_status,
-    payload_digest, text_len, source_file, imported_at
+    payload_digest, text_len, source_file, domain, content_language,
+    media_type, collection_id, imported_at
 ) VALUES (
     {doc_id}, {parent_doc_id}, {chunk_index}, {char_start}, {char_end}, {parent_text_len},
     {chunking_version}, {target_uri}, {warc_date}, {content_type}, {http_status},
-    {payload_digest}, {text_len}, {source_file}, now()
+    {payload_digest}, {text_len}, {source_file}, {domain}, {content_language},
+    {media_type}, {collection_id}, now()
 ) ON CONFLICT (doc_id) DO UPDATE SET
     parent_doc_id = EXCLUDED.parent_doc_id,
     chunk_index = EXCLUDED.chunk_index,
@@ -1464,6 +1530,10 @@ INSERT INTO pgwarc_lance.warc_record (
     payload_digest = EXCLUDED.payload_digest,
     text_len = EXCLUDED.text_len,
     source_file = EXCLUDED.source_file,
+    domain = EXCLUDED.domain,
+    content_language = EXCLUDED.content_language,
+    media_type = EXCLUDED.media_type,
+    collection_id = EXCLUDED.collection_id,
     imported_at = now();
 """.strip().format(
                     doc_id=record.doc_id,
@@ -1480,6 +1550,10 @@ INSERT INTO pgwarc_lance.warc_record (
                     payload_digest=sql_string(record.payload_digest),
                     text_len=len(record.text),
                     source_file=sql_string(record.source_file),
+                    domain=sql_string(record.domain),
+                    content_language=sql_string(record.content_language),
+                    media_type=sql_string(record.media_type),
+                    collection_id=sql_string(record.collection_id),
                 )
             )
             if reconcile_chunks:
@@ -1790,6 +1864,7 @@ def iter_import_records(
     chunk_size_chars: int | None = None,
     chunk_overlap_chars: int = 0,
     chunking_version: str = "whole-document-v1",
+    collection_id: str | None = None,
 ) -> Iterator[ImportRecord]:
     if max_record_bytes <= 0:
         raise ValueError("max_record_bytes must be positive")
@@ -1808,6 +1883,7 @@ def iter_import_records(
             )
             if record is None or (record.extraction_status != "metadata_only" and len(record.text) < min_text_chars):
                 continue
+            record.collection_id = collection_id
             record_id = warc_record.headers.get("warc-record-id")
             if charset_policy is not None and record_id in charset_policy.record_overrides:
                 charset_policy.record_used[record_id] = charset_policy.record_used.get(record_id, 0) + 1
@@ -2183,6 +2259,7 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                 charset_policy, pdf_extractor, docx_extractor, retention,
                 args.chunking_strategy, args.chunk_size_chars,
                 args.chunk_overlap_chars, args.chunking_version,
+                getattr(args, "collection_id", None),
             ))
             charset_policy.validate_record_overrides()
             if audit_manifest is not None:

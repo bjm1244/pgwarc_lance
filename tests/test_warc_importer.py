@@ -24,12 +24,15 @@ sys.modules[SPEC.name] = warc_importer
 SPEC.loader.exec_module(warc_importer)
 
 
-def warc_response(uri: str, date: str, html: str) -> bytes:
+def warc_response(uri: str, date: str, html: str, content_language: str | None = None) -> bytes:
+    http_headers = "Content-Type: text/html; charset=utf-8\r\n"
+    if content_language is not None:
+        http_headers += f"Content-Language: {content_language}\r\n"
     http = (
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html; charset=utf-8\r\n"
-        "\r\n"
-        f"{html}"
+        + http_headers
+        + "\r\n"
+        + html
     ).encode("utf-8")
     headers = (
         "WARC/1.1\r\n"
@@ -1115,6 +1118,36 @@ class WarcImporterTests(unittest.TestCase):
         self.assertIn("Hello WARC", records[0].text)
         self.assertIn("Search text.", records[0].text)
         self.assertNotIn("skip", records[0].text)
+
+    def test_search_filter_metadata_is_normalized_and_imported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "filters.warc"
+            payload = warc_response(
+                "https://Example.Test:8443/archive",
+                "2026-06-30T00:00:00Z",
+                "<html><body>filter metadata</body></html>",
+                content_language="EN-US, fr-CA",
+            )
+            path.write_bytes(payload)
+            record = next(warc_importer.iter_import_records(
+                [path], None, 1, collection_id="archive.v1"
+            ))
+
+        self.assertEqual(record.domain, "example.test")
+        self.assertEqual(record.content_language, "en-us,fr-ca")
+        self.assertEqual(record.media_type, "text/html")
+        self.assertEqual(record.collection_id, "archive.v1")
+        sql = warc_importer.emit_sql(
+            [record], None, 4, False, False
+        )
+        self.assertIn("content_language", sql)
+        self.assertIn("'en-us,fr-ca'", sql)
+        self.assertIn("'example.test'", sql)
+        self.assertIn("'archive.v1'", sql)
+        self.assertIn(
+            "USING gin (string_to_array(content_language, ','))",
+            sql,
+        )
 
     def test_extracts_gzip_warc(self):
         with tempfile.TemporaryDirectory() as tmp:

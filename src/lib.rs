@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::CString;
 
-use pgrx::datum::DatumWithOid;
+use pgrx::datum::{DatumWithOid, JsonB};
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 use pgrx::iter::TableIterator;
 use pgrx::pg_sys::panic::ErrorReportable;
@@ -12,6 +12,7 @@ use pgrx::spi::Spi;
 mod bm25;
 mod hybrid;
 mod lance_store;
+mod search_filter;
 mod tokenizer;
 mod uri_policy;
 
@@ -31,6 +32,8 @@ static ALLOW_DESTRUCTIVE_OPS: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// Keep individual search inputs bounded while allowing the longest observed
 /// Common Crawl token (2,298,914 characters) to be searched exactly.
 const MAX_QUERY_BYTES: usize = 2_500_000;
+/// Maximum metadata-eligible IDs materialized for an exact filtered search.
+const MAX_FILTERED_DOC_IDS: usize = 10_000;
 const OUTBOX_MAX_ATTEMPTS: i32 = 8;
 
 #[pg_guard]
@@ -449,6 +452,10 @@ struct WarcMetadata {
     payload_digest: Option<String>,
     text_len: i32,
     source_file: Option<String>,
+    domain: Option<String>,
+    content_language: Option<String>,
+    media_type: Option<String>,
+    collection_id: Option<String>,
 }
 
 fn warc_metadata_for_docs(doc_ids: Vec<i64>) -> HashMap<i64, WarcMetadata> {
@@ -465,7 +472,11 @@ fn warc_metadata_for_docs(doc_ids: Vec<i64>) -> HashMap<i64, WarcMetadata> {
                    http_status,
                    payload_digest,
                    text_len,
-                   source_file
+                   source_file,
+                   domain,
+                   content_language,
+                   media_type,
+                   collection_id
                FROM pgwarc_lance.warc_record
                WHERE doc_id = ANY($1::bigint[])";
 
@@ -496,6 +507,16 @@ fn warc_metadata_for_docs(doc_ids: Vec<i64>) -> HashMap<i64, WarcMetadata> {
                     .unwrap_or(0),
                 source_file: row
                     .get_by_name::<String, _>("source_file")
+                    .unwrap_or_report(),
+                domain: row.get_by_name::<String, _>("domain").unwrap_or_report(),
+                content_language: row
+                    .get_by_name::<String, _>("content_language")
+                    .unwrap_or_report(),
+                media_type: row
+                    .get_by_name::<String, _>("media_type")
+                    .unwrap_or_report(),
+                collection_id: row
+                    .get_by_name::<String, _>("collection_id")
                     .unwrap_or_report(),
             };
             metadata_by_doc.insert(doc_id, metadata);
@@ -556,11 +577,25 @@ pgrx::extension_sql!(
         payload_digest text,
         text_len       integer NOT NULL DEFAULT 0,
         source_file    text,
+        domain         text,
+        content_language text,
+        media_type     text,
+        collection_id  text,
         imported_at    timestamptz NOT NULL DEFAULT now()
     );
 
+    ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS domain text;
+    ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS content_language text;
+    ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS media_type text;
+    ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS collection_id text;
+
     CREATE INDEX IF NOT EXISTS warc_record_target_uri_idx ON pgwarc_lance.warc_record (target_uri);
     CREATE INDEX IF NOT EXISTS warc_record_warc_date_idx ON pgwarc_lance.warc_record (warc_date);
+    CREATE INDEX IF NOT EXISTS warc_record_domain_idx ON pgwarc_lance.warc_record (domain);
+    CREATE INDEX IF NOT EXISTS warc_record_language_gin_idx
+        ON pgwarc_lance.warc_record USING gin (string_to_array(content_language, ','));
+    CREATE INDEX IF NOT EXISTS warc_record_media_type_idx ON pgwarc_lance.warc_record (media_type);
+    CREATE INDEX IF NOT EXISTS warc_record_collection_idx ON pgwarc_lance.warc_record (collection_id);
 
     CREATE TABLE IF NOT EXISTS pgwarc_lance.lance_write_log (
         id         bigserial PRIMARY KEY,
@@ -1518,6 +1553,87 @@ fn hybrid_warc_search(
             metadata.payload_digest,
             metadata.text_len,
             metadata.source_file,
+        )
+    });
+    TableIterator::new(rows)
+}
+
+/// Search WARC records using one shared eligibility set for BM25 and vectors.
+/// The vector path is an exact prefiltered scan, bounded to 10,000 eligible
+/// metadata rows; it does not use an ANN index or post-filter top-k candidates.
+#[pg_extern]
+fn hybrid_warc_search_filtered(
+    query: &str,
+    vector_query: Vec<f32>,
+    lance_uri: &str,
+    filters: JsonB,
+    k: default!(i32, 10),
+) -> TableIterator<
+    'static,
+    (
+        name!(doc_id, i64),
+        name!(score, f64),
+        name!(source, String),
+        name!(target_uri, Option<String>),
+        name!(warc_date, Option<String>),
+        name!(content_type, Option<String>),
+        name!(http_status, Option<i32>),
+        name!(payload_digest, Option<String>),
+        name!(text_len, i32),
+        name!(source_file, Option<String>),
+        name!(domain, Option<String>),
+        name!(content_language, Option<String>),
+        name!(media_type, Option<String>),
+        name!(collection_id, Option<String>),
+    ),
+> {
+    let k = bounded_search_k(k, "k");
+    require_query_text(query);
+    require_finite_vector(&vector_query);
+    let filters = search_filter::SearchFilters::parse(filters);
+    let authorized_uri = authorize_uri(lance_uri);
+    let lance_uri = authorized_uri.as_ref();
+    if k == 0 {
+        return TableIterator::new(std::iter::empty::<(
+            i64,
+            f64,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i32>,
+            Option<String>,
+            i32,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )>());
+    }
+
+    let eligible_doc_ids = filters.matching_document_ids();
+    let hits = hybrid::search_filtered(query, vector_query, lance_uri, k, eligible_doc_ids)
+        .unwrap_or_else(|error| fail_operation("hybrid_warc_search_filtered", error));
+    let doc_ids = hits.iter().map(|hit| hit.doc_id).collect::<Vec<_>>();
+    let mut metadata_by_doc = warc_metadata_for_docs(doc_ids);
+    let rows = hits.into_iter().map(move |hit| {
+        let metadata = metadata_by_doc.remove(&hit.doc_id).unwrap_or_default();
+        (
+            hit.doc_id,
+            hit.score,
+            hit.source,
+            metadata.target_uri,
+            metadata.warc_date,
+            metadata.content_type,
+            metadata.http_status,
+            metadata.payload_digest,
+            metadata.text_len,
+            metadata.source_file,
+            metadata.domain,
+            metadata.content_language,
+            metadata.media_type,
+            metadata.collection_id,
         )
     });
     TableIterator::new(rows)

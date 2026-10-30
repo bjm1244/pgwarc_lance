@@ -22,6 +22,42 @@ pub fn search(
     let bm25_hits = bm25::search(query, k);
     let vec_hits = crate::filter_vector_results(lance_uri, vector_task.wait()?);
 
+    Ok(fuse_hits(bm25_hits, vec_hits, k))
+}
+
+/// Apply the same PostgreSQL eligibility set before BM25 scoring and vector
+/// nearest-neighbor ranking. The exact vector scan is bounded by the caller's
+/// maximum eligibility-set size; stale/tombstoned rows are removed before the
+/// final vector top-k is selected.
+pub fn search_filtered(
+    query: &str,
+    vector_query: Vec<f32>,
+    lance_uri: &str,
+    k: usize,
+    eligible_doc_ids: Vec<i64>,
+) -> Result<Vec<HybridHit>, Box<dyn std::error::Error>> {
+    if eligible_doc_ids.is_empty() || k == 0 {
+        return Ok(Vec::new());
+    }
+    let mut vector_task = lance_store::spawn_filtered_vector_search(
+        lance_uri,
+        vector_query,
+        eligible_doc_ids.clone(),
+    );
+    let bm25_hits = bm25::search_filtered(query, k, &eligible_doc_ids);
+    let vec_hits = crate::filter_vector_results(lance_uri, vector_task.wait()?)
+        .into_iter()
+        .take(k)
+        .collect();
+
+    Ok(fuse_hits(bm25_hits, vec_hits, k))
+}
+
+fn fuse_hits(
+    bm25_hits: Vec<bm25::Bm25Hit>,
+    vec_hits: Vec<lance_store::SearchResult>,
+    k: usize,
+) -> Vec<HybridHit> {
     let bm25_rank: HashMap<i64, usize> = bm25_hits
         .iter()
         .enumerate()
@@ -63,5 +99,5 @@ pub fn search(
         score_order.then_with(|| a.doc_id.cmp(&b.doc_id))
     });
     fused.truncate(k);
-    Ok(fused)
+    fused
 }

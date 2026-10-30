@@ -1,10 +1,10 @@
 # pgwarc_lance
 
-> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 개발 후보는 **0.1.23**이다. URI별 document revision, tombstone, ordered vector upsert/delete outbox로 삭제·재생성 중 stale vector 노출을 막는다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며 outbox 갱신은 commit 뒤 eventual consistency를 제공한다. 현재 후보의 실제 PG16 검증 범위와 한계는 [PUBLICATION.md](PUBLICATION.md)에 기록한다. 과거 0.1.22 artifact의 설치·upgrade·SQL·importer·runtime·backup 검증 및 artifact-bound 의존성 고지는 [THIRD_PARTY.md](THIRD_PARTY.md)에 보존한다. 검증은 binary 재배포·프로덕션 승인을 뜻하지 않는다.
+> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 개발 후보는 **0.1.24**이다. URI별 document revision, tombstone, ordered vector upsert/delete outbox로 삭제·재생성 중 stale vector 노출을 막으며, 필터 검색은 동일 eligibility 집합을 BM25와 정확 vector 후보 탐색에 적용한다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며 outbox 갱신은 commit 뒤 eventual consistency를 제공한다. 현재 후보의 실제 PG16 검증 범위와 한계는 [PUBLICATION.md](PUBLICATION.md)에 기록한다. 과거 artifact의 설치·upgrade·SQL·importer·runtime·backup 검증 및 artifact-bound 의존성 고지는 [THIRD_PARTY.md](THIRD_PARTY.md)에 보존한다. 검증은 binary 재배포·프로덕션 승인을 뜻하지 않는다.
 >
 > 라이선스: Apache-2.0 ([LICENSE](LICENSE)). 기여 전 [CONTRIBUTING.md](CONTRIBUTING.md)·[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)를 참고하라.
 
-이전 0.1.18 실험, 0.1.19 인덱스, 0.1.20–0.1.23 후보의 결과·한계는 [개발 기록](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), [THIRD_PARTY.md](THIRD_PARTY.md)에 기록한다.
+이전 0.1.18 실험, 0.1.19 인덱스, 0.1.20–0.1.24 후보의 결과·한계는 [개발 기록](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), [THIRD_PARTY.md](THIRD_PARTY.md)에 기록한다.
 
 `pgwarc_lance`는 WARC/Web archive 데이터를 PostgreSQL 안에서 검색 가능한 레코드로 다루기 위한 pgrx 기반 확장이다. 현재 구현은 PostgreSQL 테이블 기반 BM25, Lance dataset 기반 벡터 검색, RRF 기반 hybrid search, 그리고 초기 WARC/WARC.GZ SQL importer를 제공한다.
 
@@ -164,6 +164,7 @@ pgwarc_lance/
 | `lance_vector_search(uri, query, k=10)` | Lance nearest-neighbor 검색 |
 | `hybrid_search(query, vector_query, lance_uri, k=10)` | BM25와 벡터 검색을 RRF로 결합 |
 | `hybrid_warc_search(query, vector_query, lance_uri, k=10)` | hybrid search 결과에 `warc_record` metadata를 결합해 반환 |
+| `hybrid_warc_search_filtered(query, vector_query, lance_uri, filters, k=10)` | 같은 WARC eligibility 조건을 BM25와 정확 vector 후보 생성에 적용 |
 | `lance_dataset_versions(uri)` | dataset 버전 목록 `(version, created_ms)` 반환 (오래된 순) |
 | `lance_restore_version(uri, version)` | 지정 버전을 최신 상태로 재승격 (롤백 보상 경로) |
 
@@ -171,7 +172,7 @@ pgwarc_lance/
 
 `lance_create_table()`은 기존 1-argument 호출 호환성을 위해 기본 차원을 3으로 둔다. 실제 embedding 연동에서는 모델 차원에 맞춰 `vector_dim`을 명시한다. 테스트처럼 반복 실행이 필요한 경우에만 `overwrite=true`로 dataset을 재생성한다.
 
-`pgwarc_lance.warc_record` metadata table은 importer가 적재한 WARC record의 URI, WARC date, content type, HTTP status, payload digest, text length, source file을 보관한다.
+`pgwarc_lance.warc_record` metadata table은 importer가 적재한 WARC record의 URI, WARC date, content type, HTTP status, payload digest, text length, source file, 정규화 host, HTTP `Content-Language`, media type, manifest collection ID를 보관한다.
 
 `pgwarc_lance.lance_write_log`는 direct API 쓰기와 성공한 outbox 반영의 URI, op, 행 수, 시각을 남긴다. `lance_outbox`의 `completed`와 `applied_version`이 해당 queued 작업의 완료 근거다.
 
@@ -832,9 +833,13 @@ PGWARC_PSQL="$READ_ONLY_PSQL" python3 tools/audit_bm25_index.py --warc-only \
     --output-json "$PRIVATE_EVIDENCE_DIR/bm25-index-audit.json"
 ```
 
-WARC 검색 결과를 바로 소비해야 하면 `hybrid_warc_search()`를 사용한다. 기존 `hybrid_search()`와 같은 ranking을 사용하되 `target_uri`, UTC 문자열 `warc_date`, `content_type`, `http_status`, `payload_digest`, `text_len`, `source_file`을 함께 반환한다. 해당 doc_id의 metadata가 없으면 ranking row는 유지하고 metadata 컬럼은 null/0 기본값으로 반환한다.
+WARC 검색 결과를 바로 소비해야 하면 `hybrid_warc_search()`를 사용한다. 기존 `hybrid_search()`와 같은 backward-compatible ranking을 사용하되 `target_uri`, UTC 문자열 `warc_date`, `content_type`, `http_status`, `payload_digest`, `text_len`, `source_file`을 함께 반환한다. 해당 doc_id의 metadata가 없으면 ranking row는 유지하고 metadata 컬럼은 null/0 기본값으로 반환한다. 이 결과에 적용한 SQL `WHERE`는 후보 검색 이후 처리되므로 선택 조건에서 k개를 채우지 못할 수 있다.
 
-metadata filter는 새 함수 인자를 늘리지 않고 SQL `WHERE`로 표현하는 것을 현재 계약으로 둔다. snippet/highlight도 extension API로 고정하지 않고, 필요하면 `pgwarc_lance.bm25_doc`를 join해 SQL/client layer에서 만든다. ranking diagnostics는 현재 `source` 컬럼(`bm25`, `vector`, `bm25+vector`)만 안정 계약으로 제공하고, per-source rank/score breakdown은 품질 평가 단계에서 별도 함수로 검토한다.
+조건 결과를 top-k 안에서도 채우려면 `hybrid_warc_search_filtered(query, vector_query, lance_uri, filters, k)`를 사용한다. `filters`는 JSONB 객체이며 `domain`, `from`, `to`, `language`, `format`, `collection_id`만 허용한다. Domain은 정규화한 정확 host, 날짜는 명시적 timezone이 있는 RFC 3339 inclusive 범위, language는 HTTP `Content-Language`의 정확 tag, format은 정확 media type, collection은 importer가 manifest에서 받은 정확 ID다. 값은 제한된 형식·길이로 검증되고 PostgreSQL 조회에는 bind parameter를 쓴다.
+
+BM25는 eligibility ID 집합으로 먼저 제한하고, Lance는 같은 ID 조건을 prefilter로 적용한 뒤 vector index를 끄고 정확 탐색한다. 따라서 filtered API는 ANN을 쓰지 않으며 필터가 맞는 exact vector top-k를 반환한다. 일치하는 metadata row는 최대 10,000개까지 처리하고, 더 많으면 결과를 자르지 않고 `program_limit_exceeded`를 반환한다. 이 한도와 flat vector scan은 정확성·자원 경계를 위한 개발 후보 정책이며 규모별 SLA로 검증된 값은 아니다. 0.1.23 이하에서 이미 적재된 행의 domain/media type은 upgrade 때 가능한 범위에서 backfill되지만, 과거 HTTP language와 manifest collection은 추론하지 않는다. 해당 필터는 그 메타데이터를 새 importer 적재 또는 원본 기반 재적재로 채운 문서에만 일치한다.
+
+Snippet/highlight는 extension API로 고정하지 않고, 필요하면 `pgwarc_lance.bm25_doc`를 join해 SQL/client layer에서 만든다. Ranking diagnostics는 현재 `source` 컬럼(`bm25`, `vector`, `bm25+vector`)만 안정 계약으로 제공한다.
 
 ```sql
 SELECT h.doc_id, h.score, h.source, h.target_uri,
@@ -851,6 +856,28 @@ WHERE h.http_status = 200
   AND h.warc_date::timestamptz >= '2026-06-30T00:00:00Z'::timestamptz
   AND h.source_file = 'sample.warc'
 ORDER BY h.score DESC, h.doc_id ASC;
+```
+
+Candidate-level filter example:
+
+```sql
+SELECT doc_id, score, source, target_uri, warc_date, domain,
+       content_language, media_type, collection_id
+FROM hybrid_warc_search_filtered(
+    '검색',
+    ARRAY[0,0,0,0]::float4[],
+    '/tmp/warc.lance',
+    jsonb_build_object(
+        'domain', 'example.org',
+        'from', '2026-06-30T00:00:00Z',
+        'to', '2026-07-01T00:00:00Z',
+        'language', 'ko',
+        'format', 'text/html',
+        'collection_id', 'archive-v1'
+    ),
+    10
+)
+ORDER BY score DESC, doc_id ASC;
 ```
 
 `lance_insert_many()`는 vector를 2차원 SQL 배열이 아니라 row-major flat `float4[]`로 받는다. 예를 들어 4차원 vector 2개는 `ARRAY[0,0,0,0,10,0,0,0]::float4[]`, `vector_dim=4`, `ids=ARRAY[1,2]::bigint[]`, `labels=ARRAY['doc1','doc2']::text[]`로 호출한다. importer는 batch마다 이 함수를 한 번 emit해서 row별 `lance_insert()` 호출을 피한다.

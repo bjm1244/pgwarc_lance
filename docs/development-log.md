@@ -1,5 +1,46 @@
 # Development log
 
+## Issue #12 — 후보 생성부터 적용하는 조건 검색 (2026-10-30)
+
+- 구조화 대기열이 선택한 P1 issue #12의 C1–C3만 진행했다. 작업은 canonical
+  `development`에서 이어갔고 `.codex/config.toml`의 `gpt-6-luna` / `max`를
+  유지했다. 검색 결과 이후의 `WHERE`가 후보를 누락시키던 문제와 필터 메타데이터
+  입력 경로를 다루기 위해 0.1.24로 버전을 올리고 `.23→.24` migration을 추가했다.
+- WARC 가져오기 경로가 정규화 host, `Content-Language`, media type 및 manifest의
+  collection ID를 `warc_record`에 저장한다. 필터 API는 domain, 포괄적인 `from` /
+  `to`, language, format, collection ID만 허용한다. PostgreSQL의 매개변수화된
+  조건 조회에서 하나의 적격 ID 집합을 만든 뒤 BM25 점수/상위 k 이전과 벡터 검색
+  전에 공통으로 적용한다. 벡터 경로는 최대 10,000개의 적격 문서까지 ANN 인덱스를
+  끈 정확 검색이며, 필터와 결과 개수 입력은 크기·형식을 제한하고 새 함수 권한은
+  기본적으로 `PUBLIC`에서 회수한다.
+- 고정 Linux x86_64 / PostgreSQL 16.15 이미지에서 `--locked --offline` native
+  package build가 성공했다. 아티팩트 SHA-256은
+  `fa38e234e96647feb4b0a9937a4776f7c1f73830e34b8f6e453a19310f549445`, Cargo.lock
+  SHA-256은 `a25325bb3d397aafccadadaf4331585a7a6ab2045c81bc2952472becf2a548a7`이다.
+  새 아티팩트 fresh install, `setup/functions/search/security` PG16 SQL 회귀 4/4,
+  실제 0.1.23 populated upgrade가 통과했다. 회귀는 post-top-k 도메인 조건의 빈
+  결과와 같은 필터의 정상 검색, 다섯 조건의 경계, k보다 적은 결과, 정확 벡터
+  순서, 잘못된 입력/SQL 모양 입력, 10,001 적격 행 거부 및 미승인 역할의 실행
+  차단을 확인했다.
+- 네 개 synthetic WARC 응답을 importer DB에 두 BM25 모드로 적재해 domain/language/
+  format 메타데이터와 필터 검색이 일치함을 확인했다. 100,000 문서/800,000 posting
+  검색 한도·spill·timeout, BM25 원자 교체 중 점수 일관성, runtime safety 및
+  backup/restore 회귀도 통과했다. Python 전체 525개, `make check-docs`,
+  `cargo fmt --all -- --check`, Python compile 및 `git diff --check`가 통과했다.
+- 현 Cargo.lock의 엄격한 의존성 고지 수집은 436 package에서 누락 0건이다. 1,395건
+  권고를 포함한 현재 RustSec DB로 감사해 취약/unsound/yanked는 0건이며 미관리
+  경고 3건은 남았다. 기존 체크인 SBOM/고지 bundle은 0.1.23에 묶여 있어 이번
+  0.1.24 바이너리 재배포는 승인되지 않는다. 실행 중 초기 회귀 출력 불일치를
+  fixture 기대값/빈 반환 처리 수정 후 다시 실행해 최종 4/4로 확인했다. Host
+  `cargo check`는 PGRX host 설정 부재로 시작할 수 없어 증거로 세지 않았고, 고정
+  컨테이너의 locked package build를 사용했다. source가 바뀐 첫 package 시도는
+  취소되어 결과로 세지 않았다.
+- 모든 증거는 폐기 가능한 PostgreSQL fixture와 비공개 검증 run에 있다. 독립 qrels,
+  검색 relevance, production latency/SLA, 실제 Common Crawl 조건에서의 filtered
+  quality 및 production approval은 확인하지 않았다. 상세 명령과 실패 기록은
+  비공개 evidence에 보존하며 직접 push, 이슈 종료, binary release를 하지 않았다.
+  공개 반영은 별도 publisher 결과를 기다린다.
+
 ## Issue #11 — document chunks and source provenance (2026-10-30)
 
 - The structured queue selected P1 issue #11 after prerequisites #10 and #7;

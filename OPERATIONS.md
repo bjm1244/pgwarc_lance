@@ -55,6 +55,8 @@ GRANT SELECT (id, uri, state, ids)
     ON pgwarc_lance.lance_outbox TO pgwarc_reader;
 GRANT EXECUTE ON FUNCTION public.hybrid_warc_search(text,real[],text,integer)
     TO pgwarc_reader;
+GRANT EXECUTE ON FUNCTION public.hybrid_warc_search_filtered(text,real[],text,jsonb,integer)
+    TO pgwarc_reader;
 GRANT EXECUTE ON FUNCTION public.lance_scan_document_state(text,integer)
     TO pgwarc_reader;
 
@@ -225,6 +227,55 @@ FROM public.hybrid_warc_search(
 JOIN pgwarc_lance.warc_record AS record ON record.doc_id = hit.doc_id
 ORDER BY hit.score DESC;
 ```
+
+### Candidate-level WARC filters (0.1.24)
+
+Post-filtering the existing `hybrid_warc_search()` result with SQL `WHERE` can
+return fewer than `k` rows because BM25 and Lance have already selected their
+top candidates. Use `hybrid_warc_search_filtered()` when the condition defines
+which documents are eligible:
+
+```sql
+SELECT doc_id, score, source, target_uri, warc_date, domain,
+       content_language, media_type, collection_id
+FROM public.hybrid_warc_search_filtered(
+    'archiveword', array_fill(0.0::real, ARRAY[384]),
+    '/srv/pgwarc/collections/archive/datasets/e5-v2.lance',
+    jsonb_build_object(
+        'domain', 'example.org',
+        'from', '2026-06-30T00:00:00Z',
+        'to', '2026-07-01T00:00:00Z',
+        'language', 'en',
+        'format', 'text/html',
+        'collection_id', 'archive-v1'
+    ),
+    10
+)
+ORDER BY score DESC, doc_id ASC;
+```
+
+`domain` matches one normalized exact host; it does not imply subdomains or
+ports. `from` and `to` are inclusive RFC 3339 timestamps and require an
+explicit `Z` or UTC offset. `language` exactly matches a tag in HTTP
+`Content-Language`; `format` exactly matches the normalized media type;
+`collection_id` matches the importer manifest ID. These inputs are allowlisted,
+bounded and bound to PostgreSQL parameters. The vector path applies eligibility
+before an exact flat search and disables Lance ANN indices. It returns exact
+eligible vector top-k, with at most 10,000 eligible metadata rows per call; a
+larger set raises `program_limit_exceeded` and must be narrowed. This can scan
+more vectors than ANN and has no scale or latency guarantee yet.
+
+Only supplied, allowlisted predicates are added to the metadata query, so its
+parameterized clauses can use the domain, date, format and collection B-tree
+indexes plus the language-tag expression GIN index. The result limit probes at
+most 10,001 matching IDs before candidate generation; broader filters fail
+closed instead of silently returning a partial candidate set.
+
+An extension upgrade backfills host and media type when they can be derived
+from existing metadata. It cannot infer historic response language or the
+collection manifest used during import. Those fields stay NULL until records
+are reimported from the source with the matching importer/profile; a filter
+excludes rows whose requested eligibility value is unknown.
 
 An outbox import reconciles stale chunks only for parents present in that
 completed input. To remove a whole document, pass all current chunk IDs and

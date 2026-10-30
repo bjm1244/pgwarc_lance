@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-30T10:55:07.251853+00:00",
+  "updated_at": "2026-10-30T17:16:34.405067+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -168,6 +168,7 @@
       ],
       "status": "done",
       "summary": "외부 WARC importer에 버전 고정 청크와 출처 위치 및 갱신·삭제 추적을 추가하고 실제 Common Crawl 텍스트 표본과 PostgreSQL 16 회귀로 C1–C3를 검증했다.",
+      "public_commit": "3ede0a3e7d6fe8fe1aae913c413e00702a703830",
       "criteria_passed": [
         "C1",
         "C2",
@@ -183,8 +184,13 @@
         10,
         11
       ],
-      "status": "queued",
-      "criteria_passed": []
+      "status": "done",
+      "summary": "BM25와 정확 벡터 후보 생성 전에 동일한 제한형 메타데이터 조건을 적용하고, PostgreSQL 16 회귀·가져오기·권한·자원 한도 검증을 통과했다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
     },
     {
       "number": 13,

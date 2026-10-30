@@ -41,6 +41,14 @@ BEGIN
     EXCEPTION WHEN insufficient_privilege THEN NULL;
     END;
     BEGIN
+        PERFORM 1 FROM hybrid_warc_search_filtered(
+            'search', ARRAY[0,0,0,0]::float4[], '/tmp/pgwarc-untrusted.lance',
+            '{"domain":"example.test"}'::jsonb, 1
+        );
+        RAISE EXCEPTION 'search function was executable without an explicit grant';
+    EXCEPTION WHEN insufficient_privilege THEN NULL;
+    END;
+    BEGIN
         PERFORM set_config('pgwarc_lance.max_scan_rows', '0', false);
         RAISE EXCEPTION 'untrusted role changed scan limit';
     EXCEPTION WHEN insufficient_privilege THEN NULL;

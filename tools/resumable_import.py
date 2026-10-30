@@ -640,6 +640,8 @@ def _stage_record(
             )
             return "skipped", False
 
+        record.collection_id = getattr(args, "collection_id", None)
+
         record_id = raw.headers.get("warc-record-id")
         if record_id in charset_policy.record_overrides:
             charset_policy.record_used[record_id] = charset_policy.record_used.get(record_id, 0) + 1

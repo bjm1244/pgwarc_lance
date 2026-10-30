@@ -62,8 +62,8 @@
 작업 후보:
 
 - quality loop에서 필요성이 확인되면 ranking diagnostics를 안정 계약으로 추가한다.
-- metadata filtering은 현재처럼 `hybrid_warc_search()` 결과에 SQL `WHERE`를 적용하는 방식을 기본으로 유지한다.
-- RRF weighting, source weighting, filter options는 실사용 query에서 필요성이 확인되면 options-bearing API로 검토한다.
+- 후보 단계의 domain/date/language/format/collection eligibility는 0.1.24 `hybrid_warc_search_filtered()` JSONB 입력으로 BM25와 정확 vector 탐색에 함께 적용한다. 기존 `hybrid_warc_search()` 뒤의 SQL `WHERE`는 presentation-level narrowing이며 선택 조건의 k개 결과를 보장하지 않는다.
+- RRF weighting, source weighting과 후보 수 옵션은 이 필터 계약과 별도로 다음 ranking issue에서 검토한다.
 - snippet/highlight는 extension 내부 함수보다 `bm25_doc` join 또는 client layer를 우선한다.
 
 완료 기준:

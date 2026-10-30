@@ -1,5 +1,23 @@
 # Dependency notice review
 
+## 0.1.24 development lockfile recheck (2026-10-30)
+
+Strict target-filtered notice collection covered all 436 reachable Linux
+x86_64 / PostgreSQL 16 Cargo packages with no missing primary texts. The
+Cargo.lock SHA-256 is
+`a25325bb3d397aafccadadaf4331585a7a6ab2045c81bc2952472becf2a548a7`. The
+current RustSec database revision is
+`2295466c4e9df26647fd67d8fa1c705ac2fc7f81` (1,395 advisories). Audit ran with
+vulnerable, unsound and yanked dependencies denied; it found zero
+vulnerabilities, unsound or yanked packages. Three unmaintained warnings
+remain: `paste` 1.0.15, `proc-macro-error2` 2.0.1 and `serde_cbor` 0.11.2.
+
+This recheck is tied to the source lockfile, not a redistribution package. The
+checked-in CycloneDX SBOM and complete notice bundle below are still bound to
+the 0.1.23 artifact. A matching 0.1.24 artifact-bound SBOM and bundle have not
+been generated; this source preview does not grant binary redistribution or
+production approval.
+
 ## Current 0.1.23 PG16 validation artifact notices and SBOM (2026-10-30)
 
 Strict target-filtered notices collected primary texts for all 436 reachable

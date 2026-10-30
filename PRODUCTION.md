@@ -1,17 +1,17 @@
 # Production readiness
 
-This is still a source preview. Passing unit tests is not a production approval.
-The current source candidate is 0.1.23. It adds revision-checked deletion,
-tombstones and an ordered Lance delete event to the transactionally stored
-vector outbox. PostgreSQL and Lance do not share an atomic commit. The locked
-PG16.15 candidate passed fresh installation, four SQL regressions, 143 outbox
-lifecycle checks, 18 importer database checks, 18 runtime-safety checks, a
-populated 0.1.22-to-0.1.23 upgrade and 15 backup/restore checks. Strict Cargo
-notices, a matching CycloneDX SBOM and current RustSec audit are recorded for
-the validation artifact. See [PACKAGING.md](PACKAGING.md),
-[PUBLICATION.md](PUBLICATION.md) and [THIRD_PARTY.md](THIRD_PARTY.md) for the
-verified scope and remaining gaps. Package verification and notice collection
-do not grant binary redistribution or production approval.
+This is still a source preview. Passing unit tests is not production approval.
+The current source candidate is 0.1.24. It adds filtered WARC search that
+applies domain, inclusive date, language, media type and collection conditions
+before BM25 and exact vector candidate ranking. On the locked PostgreSQL 16.15
+target, fresh installation, four SQL regressions, a populated 0.1.23-to-0.1.24
+upgrade, importer database checks, BM25 resource/concurrency checks,
+runtime-safety checks and backup/restore passed on disposable fixtures.
+PostgreSQL and Lance still do not share an atomic commit. Strict Cargo notice
+collection and a current RustSec audit cover the 0.1.24 lockfile, while the
+checked-in SBOM remains bound to the 0.1.23 artifact. Binary redistribution is
+not cleared. See [PACKAGING.md](PACKAGING.md), [PUBLICATION.md](PUBLICATION.md)
+and [THIRD_PARTY.md](THIRD_PARTY.md) for the verified scope and remaining gaps.
 Install the complete consecutive upgrade chain and reconnect existing backends.
 See [PUBLICATION.md](PUBLICATION.md) for current evidence and limitations.
 The initial validation profile is PostgreSQL 16, a single instance, local Lance

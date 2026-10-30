@@ -177,6 +177,15 @@ pub struct Bm25Hit {
 }
 
 pub fn search(query: &str, k: usize) -> Vec<Bm25Hit> {
+    search_with_doc_ids(query, k, None)
+}
+
+/// Restrict scoring to eligible documents before aggregation and top-k.
+pub fn search_filtered(query: &str, k: usize, eligible_doc_ids: &[i64]) -> Vec<Bm25Hit> {
+    search_with_doc_ids(query, k, Some(eligible_doc_ids))
+}
+
+fn search_with_doc_ids(query: &str, k: usize, eligible_doc_ids: Option<&[i64]>) -> Vec<Bm25Hit> {
     crate::require_query_text(query);
     if k == 0 {
         return Vec::new();
@@ -251,6 +260,7 @@ pub fn search(query: &str, k: usize) -> Vec<Bm25Hit> {
             -- planner; the join alone can overestimate matching postings
             -- enough to select expensive scans and unnecessary JIT work.
             WHERE t.term = ANY($1::text[]) AND s.n > 0 AND s.avgdl > 0
+              AND ($5::bigint[] IS NULL OR t.doc_id = ANY($5::bigint[]))
         )
         SELECT doc_id, sum(contribution ORDER BY term) AS score
         FROM contributions
@@ -289,6 +299,7 @@ pub fn search(query: &str, k: usize) -> Vec<Bm25Hit> {
             JOIN pgwarc_lance.bm25_doc d ON d.doc_id = t.doc_id
             CROSS JOIN statistics s
             WHERE t.term = ANY($1::text[]) AND s.n > 0 AND s.avgdl > 0
+              AND ($5::bigint[] IS NULL OR t.doc_id = ANY($5::bigint[]))
         )
         SELECT doc_id, sum(contribution ORDER BY sort_term) AS score
         FROM contributions
@@ -314,6 +325,7 @@ pub fn search(query: &str, k: usize) -> Vec<Bm25Hit> {
                     DatumWithOid::from(K1),
                     DatumWithOid::from(B),
                     DatumWithOid::from(k as i64),
+                    DatumWithOid::from(eligible_doc_ids.map(|ids| ids.to_vec())),
                 ],
             )
             .unwrap_or_report();

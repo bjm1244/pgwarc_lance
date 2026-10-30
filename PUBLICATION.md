@@ -1,6 +1,43 @@
 # Source publication review — updated 2026-10-30
 
-## Latest source and distribution review: 0.1.23 (2026-10-30)
+## Issue #12 — candidate-filtered search in 0.1.24 (2026-10-30)
+
+The 0.1.24 source preview adds `hybrid_warc_search_filtered` with exact
+eligibility filters for domain, inclusive capture-date bounds, language,
+media type, and collection ID. PostgreSQL resolves one shared set of eligible
+document IDs before BM25 scoring or Lance vector ranking. Filtered vector search
+uses an exact Lance scan with its ANN index disabled, and applies `k` after
+eligibility. Filter keys and values are allowlisted and bounded; SQL values are
+parameters, the candidate set is capped at 10,000 documents, and the new
+function is revoked from `PUBLIC` by default.
+
+The Linux x86_64 PostgreSQL 16.15 target built from the locked dependencies
+using Rust 1.96.0 and cargo-pgrx 0.19.1. The extracted 0.1.24 artifact SHA-256
+is `fa38e234e96647feb4b0a9937a4776f7c1f73830e34b8f6e453a19310f549445`; the
+matching Cargo.lock SHA-256 is
+`a25325bb3d397aafccadadaf4331585a7a6ab2045c81bc2952472becf2a548a7`. Fresh
+installation, all four PostgreSQL SQL regressions, and a populated 0.1.23 to
+0.1.24 upgrade passed on PostgreSQL 16.15. The SQL regression verifies the
+pre-existing top-1/post-filter miss, common eligibility for BM25 and vectors,
+exact filtered vector order, fewer results than `k`, invalid/injection-shaped
+input, the 10,000-row fan-out limit, and function ACLs. A synthetic four-record
+WARC was also imported through both supported BM25 modes; the persisted domain,
+language and media type matched filtered retrieval. BM25 spill/timeout,
+concurrent corpus-replacement, runtime-safety and backup/restore database
+checks passed as well.
+
+Strict notice collection for the 436-package target Cargo graph had no missing
+primary texts. The current RustSec audit database contained 1,395 advisories:
+zero vulnerabilities, unsound or yanked packages were found; three
+unmaintained-package warnings remain. The checked-in artifact-bound SBOM and
+full license bundle still describe 0.1.23; a matching 0.1.24 SBOM has not been
+generated, so binary redistribution is not cleared. These disposable-fixture
+results do not establish independent retrieval quality, production latency or
+SLA, multi-host behavior, or production approval. The source change is for the
+separate reviewed fast-forward publisher; no direct push or binary release was
+made.
+
+## Previous artifact-bound distribution review: 0.1.23 (2026-10-30)
 
 Issue #8 adds a revision-checked document delete API. It atomically removes WARC
 metadata and BM25 rows, records an `is_deleted` tombstone and queues a durable
