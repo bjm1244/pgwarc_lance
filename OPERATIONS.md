@@ -133,6 +133,57 @@ unversioned until such an update. Do not grant the writer direct access to
 Custom import transactions must call `lance_dataset_write_lock(uri)` before the
 first WARC/BM25 write, then queue the revisioned upsert in that same transaction.
 
+## Logical collection manifests
+
+`tools/collection_manifest.py` keeps one private manifest per trusted logical
+collection. Place the manifest and all versioned Lance datasets below the
+operator-managed root, restrict write access there to trusted OS operators and
+the PostgreSQL server account, and set `pgwarc_lance.allowed_uri_prefix` to the
+same root. The extension does not enforce tenant separation.
+
+Create or stage a profile with a unique relative dataset path, model and pinned
+model revision, vector dimensions, normalization method/version, chunking
+version and expected vector count. The current importer only supports the
+declared `whole_document` strategy; the version marker records configuration,
+not implemented chunking. Use the same complete source accounting when choosing
+the expected vector count and the importer `--audit-manifest-json` or
+`--checkpoint-db` option to bind source checksums. Model identity is asserted
+configuration; pin the external provider deployment separately.
+
+Prepare the staged path with administrator credentials, then import its exact
+version with matching profile flags and direct `upsert` writes. The importer
+holds a shared manifest lock throughout the write; stage, abandon, activate and
+rollback take an exclusive lock. It records a ready receipt only after all input
+is accounted, PostgreSQL execution succeeds, and the emitted vector count equals
+the manifest's expected count. Outbox writes are not eligible for staged-version
+activation until worker completion is represented by a later validated path.
+
+```bash
+python3 tools/collection_manifest.py prepare "$COLLECTION_MANIFEST" \
+    --version-id embedding-v2 --psql "$ADMIN_PSQL"
+python3 tools/warc_importer.py full-corpus.warc.gz --skip-schema --execute \
+    --collection-manifest "$COLLECTION_MANIFEST" \
+    --collection-version embedding-v2 --lance-mode upsert \
+    --vector-dim "$VECTOR_DIM" --embedding-jsonl vectors.jsonl \
+    --embedding-model "$MODEL_ID" --embedding-model-version "$MODEL_REVISION" \
+    --embedding-normalization l2 --normalization-version l2-f32-v1 \
+    --chunking-version whole-document-v1 \
+    --audit-manifest-json "$PRIVATE_RUN/import-audit.json" \
+    --psql "$WRITER_PSQL"
+python3 tools/collection_manifest.py activate "$COLLECTION_MANIFEST" \
+    --version-id embedding-v2 --psql "$ADMIN_PSQL"
+ACTIVE_URI=$(python3 tools/collection_manifest.py resolve "$COLLECTION_MANIFEST")
+```
+
+`activate` checks the stored ready receipt and asks PostgreSQL to verify the
+actual Lance vector dimension before atomically changing the active manifest
+pointer. Search SQL still accepts an explicit dataset URI, so resolve the active
+path at query time. `rollback` restores the prior version pointer and keeps both
+datasets. `abandon` clears only the staged pointer; it does not delete a partial
+dataset. Include the manifest and every retained dataset path in the same backup
+set as PostgreSQL. The tool provides trusted-operator/shared-corpus management,
+not per-user or per-tenant authorization or isolation.
+
 ### Delete and recreate a document
 
 The writer may call `lance_document_delete(text,bigint[],text[])` only when

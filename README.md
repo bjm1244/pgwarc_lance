@@ -84,6 +84,7 @@ pgwarc_lance/
 │   ├── preflight_quality_inputs.py # WARC/query/qrels와 real-corpus manifest read-only preflight
 │   ├── audit_bm25_index.py    # 저장 본문과 BM25 posting read-only 일관성 검사
 │   ├── doctor_pg_lance.py     # PostgreSQL/Lance ID·metadata·outbox read-only 대사
+│   ├── collection_manifest.py # operator-owned collection/model-version manifest
 │   ├── audit_warc_import.py   # raw WARC import accounting과 fingerprint manifest
 │   └── warc_importer.py       # WARC/WARC.GZ -> metadata/BM25/Lance SQL importer
 ├── src/
@@ -97,6 +98,7 @@ pgwarc_lance/
     ├── test_audit_bm25_index.py # BM25 content/posting audit 단위 테스트
     ├── test_doctor_pg_lance.py # PG–Lance doctor 분류 회귀
     ├── test_warc_importer.py  # Python WARC importer 단위 테스트
+    ├── test_collection_manifest.py # collection profile·stage·activate·rollback 회귀
     ├── test_lance_outbox_worker.py # outbox worker 단위 테스트
     ├── db_outbox.py           # PG16 committed-only/restart outbox 통합 테스트
     ├── test_eval_quality.py   # quality fixture 단위 테스트
@@ -211,6 +213,69 @@ Worker는 pending event를 재시도해 Lance의 현재 dataset version에서 ID
 오래된 version을 정리하는 일은 별도 백업·복구 계획 아래 운영자가 수행한다. Lance version만
 복원해도 PostgreSQL tombstone은 유지되어 검색 결과가 되살아나지 않는다. 논리 문서 복구는
 권위 있는 원본에서 metadata, BM25, 새 revision과 vector를 함께 재구성해야 한다.
+
+### 논리 컬렉션·임베딩 버전 manifest (Issue #10)
+
+`tools/collection_manifest.py`는 컬렉션 ID마다 운영자가 관리하는 JSON manifest를 만든다.
+각 immutable 버전은 manifest 디렉터리 아래의 고유 dataset 상대 경로, 모델 ID와 고정 revision,
+차원, 정규화 방식/version, chunking 설정/version, 예상 vector 행 수와 profile SHA-256을
+기록한다. 현재 importer는 `whole_document`만 지원하므로 chunk size는 `null`, overlap은 0이다.
+이 설정은 실제 문서 chunking 기능을 제공하지 않는다; 이는 후속 #11의 범위다.
+
+초기 버전과 재색인은 모두 비활성 staged 버전으로 준비한다. 다음 예의 경로는 PostgreSQL
+서버도 접근할 수 있어야 하고, 관리자가 설정한 `pgwarc_lance.allowed_uri_prefix` 아래에
+있어야 한다.
+
+```bash
+MANIFEST=/srv/pgwarc/collections/archive.json
+python3 tools/collection_manifest.py create "$MANIFEST" --collection-id archive --version-id e5-v1 \
+    --dataset-path datasets/e5-v1.lance --model example/e5-small \
+    --model-version "$PINNED_MODEL_REVISION" --dimensions 384 \
+    --expected-vectors "$EXPECTED_VECTOR_ROWS" --normalization l2 \
+    --normalization-version l2-f32-v1 --chunking-version whole-document-v1
+python3 tools/collection_manifest.py prepare "$MANIFEST" --version-id e5-v1 --psql "$ADMIN_PSQL"
+python3 tools/warc_importer.py archive.warc.gz --skip-schema --execute \
+    --collection-manifest "$MANIFEST" --collection-version e5-v1 --lance-mode upsert \
+    --vector-dim 384 --embedding-jsonl vectors.jsonl \
+    --embedding-model example/e5-small --embedding-model-version "$PINNED_MODEL_REVISION" \
+    --embedding-normalization l2 --normalization-version l2-f32-v1 \
+    --chunking-version whole-document-v1 \
+    --audit-manifest-json "$PRIVATE_RUN/import-audit.json" --psql "$WRITER_PSQL"
+python3 tools/collection_manifest.py activate "$MANIFEST" --version-id e5-v1 --psql "$ADMIN_PSQL"
+```
+
+적재 입력 audit의 checksum과 expected vector 수가 manifest-ready receipt에 결합되고,
+차원·모델 revision·정규화/chunking version 중 하나라도 다르면 importer가 SQL 실행 전에
+거부한다. `l2` 설정은 모든 입력 벡터의 실제 norm도 검사한다. 모델 이름/revision은 운영자가
+주장한 provenance다. 원격 embedding service가 그 revision으로 실행됐음을 도구가 증명하지는
+않으므로 provider deployment를 별도로 고정해야 한다.
+
+재색인은 새 version과 dataset 경로에만 쓴다. 활성 version은 그대로 resolve된다. 입력 전체를
+다시 적재하고 expected vector 수를 만족해 importer가 성공한 뒤에만 manifest가 staged version을
+ready로 기록한다. `activate`는 PostgreSQL의 실제 `lance_vector_dim()` 결과를 다시 확인한 뒤
+manifest를 atomic rename으로 전환한다. 이전 경로와 버전은 남는다. 문제가 있으면 `rollback`이
+직전 active version으로 되돌리며 어느 dataset도 지우지 않는다. 실패한 staged 작업은 `abandon`으로
+포인터만 비울 수 있고 해당 버전 metadata와 파일은 보존된다.
+
+```bash
+python3 tools/collection_manifest.py stage "$MANIFEST" --version-id e5-v2 \
+    --dataset-path datasets/e5-v2.lance --model example/e5-large \
+    --model-version "$NEXT_PINNED_MODEL_REVISION" --dimensions 1024 \
+    --expected-vectors "$EXPECTED_VECTOR_ROWS" --normalization l2 \
+    --normalization-version l2-f32-v1 --chunking-version whole-document-v1
+python3 tools/collection_manifest.py prepare "$MANIFEST" --version-id e5-v2 --psql "$ADMIN_PSQL"
+# importer: --collection-version e5-v2 and matching versioned profile flags
+python3 tools/collection_manifest.py activate "$MANIFEST" --version-id e5-v2 --psql "$ADMIN_PSQL"
+ACTIVE_URI=$(python3 tools/collection_manifest.py resolve "$MANIFEST")
+python3 tools/collection_manifest.py rollback "$MANIFEST" --psql "$ADMIN_PSQL"
+```
+
+`resolve` 결과를 기존 SQL 검색 함수의 dataset URI로 넘긴다; SQL 검색 함수 자체는 여전히 URI를
+받는다. manifest와 `.lock` 파일은 신뢰한 OS 운영자가 소유하고, 생성 파일은 mode 0600이다.
+여러 버전의 경로는 backup set에 함께 보존한다. 이 기능은 신뢰한 운영자와 공유 corpus를 위한
+경로/version 관리이며 사용자·tenant 격리, 독립 권한 경계, DB 전체 corpus namespace를 제공하지
+않는다. 검색 애플리케이션이 manifest를 건너뛰고 URI를 직접 지정할 수 있으므로 이 경계를
+격리 주장으로 확대하지 않는다.
 
 ### PG–Lance read-only doctor (Issue #6 progress)
 

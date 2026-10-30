@@ -1,5 +1,46 @@
 # Development log
 
+## Issue #10 — logical collections and embedding profiles (2026-10-30)
+
+- The runner selected P1 issue #10 after prerequisite #6; its structured queue
+  supersedes the previous development-log next-work note. Work stayed on the
+  canonical `development` line with the configured `gpt-6-luna` / `max` setting.
+- Added an operator-owned, versioned collection manifest and CLI. It records a
+  collection ID, unique managed Lance dataset path, model and declared immutable
+  revision, vector dimension, normalization and implementation version, and
+  chunking strategy/settings/version. Profiles are immutable, paths remain
+  below the manifest directory, manifest writes are atomic and mode 0600, and
+  shared import locks serialize against activation or reindex changes. This
+  importer contract currently supports whole-document vectors only.
+- The WARC importer now resolves its Lance URI from the active or staged
+  manifest entry and requires matching model, revision, dimension, normalization
+  and chunking declarations. It rejects a wrong profile before SQL execution
+  and validates unit-length vectors for declared L2 normalization. A staged
+  reindex needs full input accounting and an exact expected vector count before
+  it can be marked ready. Activation checks the dataset dimension through
+  PostgreSQL; rollback restores the prior pointer and retains both datasets.
+  Checkpoint fingerprints include the collection/version/profile identity.
+- On PostgreSQL 16.15 with the unchanged retained 0.1.23 extension artifact, an
+  isolated one-record synthetic WARC fixture created and populated distinct
+  three- and four-dimensional datasets. The run verified profile field
+  matching, wrong-model rejection before SQL, vector scans/search through both
+  resolved URIs, activation from v1 to v2, rollback to v1, and preservation of
+  both dataset paths. This is routing and lifecycle evidence, not retrieval
+  quality or production-corpus evidence. Tenant isolation is explicitly
+  unsupported; the manifest names a trusted OS operator and shared corpus.
+- The full Python suite passed 519 tests. Documentation checks, Rust formatting
+  check and `git diff --check` passed. The native fingerprint and Cargo.lock
+  matched the existing PG16 validation receipt, so the immutable artifact was
+  reused and no native build, upgrade or release artifact was created. Early
+  fixture/setup and a documentation-check matcher failure were corrected; the
+  failed attempts and final command results remain in private evidence.
+- The model provider/revision and whole-document chunking identity are operator
+  assertions; the importer cannot independently attest a remote embedding
+  service's implementation. No multi-tenant isolation, real-corpus reindex,
+  relevance judgment, production approval or release approval is established.
+  The verified source change is committed locally for the separate reviewed
+  publisher; no direct push or issue closure was performed.
+
 ## Issue #9 — coordinated backup, fresh-instance restore and recovery (2026-10-30)
 
 - The runner selected P0 issue #9 after prerequisites #3, #6 and #8. The queue

@@ -92,6 +92,15 @@ def _settings(
         "no_hash_vectors": args.no_hash_vectors,
         "embedding_command_sha256": hashlib.sha256(args.embedding_command.encode()).hexdigest() if args.embedding_command else None,
         "embedding_jsonl_sha256": embedding_jsonl_sha256,
+        "collection": (
+            {
+                "collection_id": args.collection_id,
+                "version_id": args.collection_version,
+                "profile_sha256": args.collection_profile_sha256,
+            }
+            if getattr(args, "collection_manifest", None)
+            else None
+        ),
     }
 
 
@@ -735,7 +744,11 @@ def _run_embedding_command(records: list[dict[str, Any]], args: Any, wi: Any) ->
             return
         seen.add(doc_id)
         try:
-            vectors[doc_id] = wi.parse_vector(row.get("vector"), doc_id, args.vector_dim, f"embedding command:{line_no}")
+            vectors[doc_id] = wi.parse_vector(
+                row.get("vector"), doc_id, args.vector_dim,
+                f"embedding command:{line_no}",
+                getattr(args, "embedding_normalization", None),
+            )
         except ValueError:
             failures[doc_id] = "invalid_embedding"
 
@@ -862,7 +875,11 @@ def _load_embedding_file(store: CheckpointStore, run_id: str, args: Any, wi: Any
                 counts["ignored"] += 1
                 continue
             try:
-                vector = wi.parse_vector(row.get("vector"), doc_id, args.vector_dim, f"{args.embedding_jsonl}:{line_no}")
+                vector = wi.parse_vector(
+                    row.get("vector"), doc_id, args.vector_dim,
+                    f"{args.embedding_jsonl}:{line_no}",
+                    getattr(args, "embedding_normalization", None),
+                )
             except ValueError:
                 store.set_vector_status(run_id, doc_id, "failed", "invalid_embedding")
                 counts["failed"] += 1
@@ -1132,6 +1149,21 @@ def run(args: Any, lance_mode: str, wi: Any) -> int:
                 "lance_mode": lance_mode if args.lance_uri else "none",
                 "lance_consistency": "eventual_after_commit" if args.lance_uri and lance_mode == "outbox" else ("external_idempotent_upsert" if args.lance_uri and vector_map else "none"),
             }
+            if getattr(args, "collection_manifest", None):
+                vector_rows = store.connection.execute(
+                    "SELECT COUNT(*) FROM run_records rr JOIN record_checkpoints r "
+                    "ON r.archive_key=rr.archive_key AND r.ordinal=rr.ordinal "
+                    "WHERE rr.run_id=? AND r.outcome='ready' AND r.vector_status='ready'",
+                    (run_id,),
+                ).fetchone()[0]
+                args.collection_import_result = {
+                    "complete": status == "complete",
+                    "execute": bool(args.execute),
+                    "lance_mode": lance_mode,
+                    "records": counts["imported"] + counts["metadata_only"],
+                    "vector_rows": vector_rows,
+                    "input_sha256": _json_hash([row[0] for row in archive_rows]),
+                }
             store.finish_run(run_id, status, summary)
             if args.summary_json:
                 args.summary_json.write_text(json.dumps(summary, sort_keys=True, indent=2) + "\n", encoding="utf-8")

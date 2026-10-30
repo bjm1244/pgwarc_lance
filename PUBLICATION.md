@@ -81,6 +81,18 @@ Host power loss, active-writer snapshots, hardware/storage-stack faults,
 production corpus restore, an approved RPO/RTO and production approval remain
 unverified. Private command logs and checksums stay outside this repository.
 
+## Issue #10 — source-only collection manifest checkpoint (2026-10-30)
+
+The importer now binds a logical collection to immutable, versioned Lance
+dataset paths and declared embedding dimension, model revision, normalization
+and whole-document chunking settings. A bounded PostgreSQL 16.15 fixture
+verified profile mismatch rejection, separate three- and four-dimensional
+reindex targets, activation, rollback and retention of both datasets. Model
+provider identity remains an operator assertion, and the importer does not
+provide tenant isolation. The existing 0.1.23 native artifact and validation
+receipt remain unchanged; this source checkpoint is not a binary release or
+production approval.
+
 ## Previous package and distribution review: 0.1.22 (2026-10-29)
 
 Issue #6 adds a URI-scoped document revision mapping, revision-bearing Lance

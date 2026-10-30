@@ -29,6 +29,11 @@ import zlib
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Iterator
 
+try:
+    from tools import collection_manifest
+except ModuleNotFoundError:  # direct execution with tools/ as sys.path[0]
+    import collection_manifest
+
 
 HEADER_ENCODING = "iso-8859-1"
 MAX_HEADER_BYTES = 64 * 1024
@@ -930,7 +935,10 @@ def write_records_jsonl(records: Iterable[ImportRecord], path: Path) -> None:
     path.write_text(records_jsonl(records), encoding="utf-8")
 
 
-def parse_vector(value: Any, doc_id: int, vector_dim: int, source: str) -> list[float]:
+def parse_vector(
+    value: Any, doc_id: int, vector_dim: int, source: str,
+    normalization: str | None = None,
+) -> list[float]:
     if not isinstance(value, list):
         raise ValueError(f"{source}: vector for doc_id={doc_id} must be a JSON array")
     if len(value) != vector_dim:
@@ -953,11 +961,18 @@ def parse_vector(value: Any, doc_id: int, vector_dim: int, source: str) -> list[
                 f"{source}: vector for doc_id={doc_id} contains non-finite or out-of-range float4 value"
             )
         vector.append(numeric)
+    if normalization == "l2":
+        norm = math.sqrt(sum(item * item for item in vector))
+        if not math.isclose(norm, 1.0, rel_tol=0.0, abs_tol=1e-3):
+            raise ValueError(
+                f"{source}: vector for doc_id={doc_id} has L2 norm {norm:.8g}, expected 1"
+            )
     return vector
 
 
 def parse_embedding_jsonl(
-    content: str, required_doc_ids: set[int], vector_dim: int, source: str
+    content: str, required_doc_ids: set[int], vector_dim: int, source: str,
+    normalization: str | None = None,
 ) -> dict[int, list[float]]:
     vectors: dict[int, list[float]] = {}
     for line_no, line in enumerate(content.splitlines(), start=1):
@@ -978,7 +993,9 @@ def parse_embedding_jsonl(
             continue
         if doc_id in vectors:
             raise ValueError(f"{source}:{line_no}: duplicate vector for doc_id={doc_id}")
-        vectors[doc_id] = parse_vector(row.get("vector"), doc_id, vector_dim, source)
+        vectors[doc_id] = parse_vector(
+            row.get("vector"), doc_id, vector_dim, source, normalization
+        )
 
     missing = sorted(required_doc_ids.difference(vectors))
     if missing:
@@ -988,16 +1005,20 @@ def parse_embedding_jsonl(
 
 
 def load_embedding_jsonl(
-    path: Path, records: Iterable[ImportRecord], vector_dim: int
+    path: Path, records: Iterable[ImportRecord], vector_dim: int,
+    normalization: str | None = None,
 ) -> dict[int, list[float]]:
     record_list = list(records)
     required_doc_ids = {record.doc_id for record in record_list if record.extraction_status != "metadata_only"}
     content = path.read_text(encoding="utf-8")
-    return parse_embedding_jsonl(content, required_doc_ids, vector_dim, str(path))
+    return parse_embedding_jsonl(
+        content, required_doc_ids, vector_dim, str(path), normalization
+    )
 
 
 def run_embedding_command(
-    records: Iterable[ImportRecord], command: str, vector_dim: int
+    records: Iterable[ImportRecord], command: str, vector_dim: int,
+    normalization: str | None = None,
 ) -> dict[int, list[float]]:
     record_list = [r for r in records if r.extraction_status != "metadata_only"]
     required_doc_ids = {record.doc_id for record in record_list if record.extraction_status != "metadata_only"}
@@ -1016,7 +1037,9 @@ def run_embedding_command(
         raise SystemExit(result.returncode)
     if result.stderr:
         sys.stderr.write(result.stderr)
-    return parse_embedding_jsonl(result.stdout, required_doc_ids, vector_dim, command)
+    return parse_embedding_jsonl(
+        result.stdout, required_doc_ids, vector_dim, command, normalization
+    )
 
 
 def sql_string(value: str | None) -> str:
@@ -1628,6 +1651,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--lance-uri", help="Lance dataset URI to create/append vectors into")
     parser.add_argument("--vector-dim", type=int, default=3)
     parser.add_argument(
+        "--collection-manifest", type=Path,
+        help="use an operator-managed collection manifest; holds a shared lock through import",
+    )
+    parser.add_argument(
+        "--collection-version",
+        help="target the staged version during reindex; defaults to the active version",
+    )
+    parser.add_argument("--embedding-model", help="model identifier asserted by the collection manifest")
+    parser.add_argument("--embedding-model-version", help="immutable model/provider revision asserted by the manifest")
+    parser.add_argument("--embedding-normalization", choices=["none", "l2"])
+    parser.add_argument("--normalization-version", help="normalization implementation/version asserted by the manifest")
+    parser.add_argument("--chunking-version", help="chunking configuration version asserted by the manifest")
+    parser.add_argument(
         "--lance-mode",
         choices=LANCE_MODES,
         default="create",
@@ -1760,7 +1796,9 @@ class ImportSpool:
             for record in self.records(embedding_only):
                 output.write(json.dumps(record_to_json(record), ensure_ascii=False, sort_keys=True) + "\n")
 
-    def add_vectors(self, path: Path, vector_dim: int) -> None:
+    def add_vectors(
+        self, path: Path, vector_dim: int, normalization: str | None = None
+    ) -> None:
         with path.open(encoding="utf-8") as source:
             line_no = 0
             max_line = 65536 + vector_dim * 64
@@ -1785,7 +1823,9 @@ class ImportSpool:
                 doc_id = int(raw_id)
                 if not self.db.execute("SELECT 1 FROM records WHERE doc_id=? AND text_available=1", (doc_id,)).fetchone():
                     continue
-                vector = parse_vector(row.get("vector"), doc_id, vector_dim, str(path))
+                vector = parse_vector(
+                    row.get("vector"), doc_id, vector_dim, str(path), normalization
+                )
                 try:
                     self.db.execute("INSERT INTO vectors VALUES (?,?)", (doc_id, json.dumps(vector)))
                 except sqlite3.IntegrityError as exc:
@@ -1940,10 +1980,10 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                         raise
                 if returncode:
                     raise SystemExit(returncode)
-                spool.add_vectors(vectors_path, args.vector_dim)
+                spool.add_vectors(vectors_path, args.vector_dim, args.embedding_normalization)
                 vectors = spool
             elif args.embedding_jsonl:
-                spool.add_vectors(args.embedding_jsonl, args.vector_dim)
+                spool.add_vectors(args.embedding_jsonl, args.vector_dim, args.embedding_normalization)
                 vectors = spool
 
             # Generate the complete script on disk before execution. A malformed
@@ -2003,18 +2043,92 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                     key=lambda value: tuple(map(int, value.split("."))),
                     default=None,
                 ),
+                "collection": (
+                    {
+                        "collection_id": args.collection_id,
+                        "version_id": args.collection_version,
+                        "profile_sha256": args.collection_profile_sha256,
+                    }
+                    if args.collection_manifest
+                    else None
+                ),
             }
             if args.summary_json:
                 args.summary_json.write_text(json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8")
             if args.summary:
                 print(format_summary(summary), file=sys.stderr)
+            if args.collection_manifest:
+                input_sha256 = None
+                if audit_inputs:
+                    encoded = json.dumps(
+                        [item["sha256"] for item in audit_inputs], separators=(",", ":")
+                    ).encode("ascii")
+                    input_sha256 = hashlib.sha256(encoded).hexdigest()
+                args.collection_import_result = {
+                    "complete": bool(args.execute),
+                    "execute": bool(args.execute),
+                    "lance_mode": lance_mode,
+                    "records": spool.count,
+                    "vector_rows": vector_count,
+                    "input_sha256": input_sha256,
+                }
             return 0
         finally:
             spool.close()
 
 
-def main(argv: list[str]) -> int:
-    args = parse_args(argv)
+def _bind_collection_profile(args: argparse.Namespace, raw: dict[str, Any]) -> None:
+    collection_id, managed_path, descriptor = collection_manifest.import_profile(
+        raw, args.collection_manifest, args.collection_version
+    )
+    embedding = descriptor["embedding"]
+    chunking = descriptor["chunking"]
+    supplied = {
+        "--embedding-model": (args.embedding_model, embedding["model"]),
+        "--embedding-model-version": (args.embedding_model_version, embedding["model_version"]),
+        "--embedding-normalization": (args.embedding_normalization, embedding["normalization"]),
+        "--normalization-version": (args.normalization_version, embedding["normalization_version"]),
+        "--chunking-version": (args.chunking_version, chunking["version"]),
+    }
+    for flag, (actual, expected) in supplied.items():
+        if actual is None:
+            raise SystemExit(f"--collection-manifest requires {flag}")
+        if actual != expected:
+            raise SystemExit(f"{flag} does not match collection {collection_id!r} profile")
+    if args.vector_dim != embedding["dimensions"]:
+        raise SystemExit(
+            f"--vector-dim {args.vector_dim} does not match collection profile dimension {embedding['dimensions']}"
+        )
+    if args.lance_uri:
+        requested = Path(args.lance_uri).expanduser().resolve(strict=False)
+        if requested != managed_path:
+            raise SystemExit("--lance-uri must match the selected managed collection dataset path")
+    args.lance_uri = str(managed_path)
+    if not (args.embedding_command or args.embedding_jsonl) or args.no_hash_vectors:
+        raise SystemExit("collection imports require explicit --embedding-command or --embedding-jsonl vectors")
+
+    version_id = args.collection_version or raw["active_version"]
+    staged = version_id == raw["staged_version"]
+    exists = managed_path.exists()
+    if staged:
+        if not (args.audit_manifest_json or args.checkpoint_db):
+            raise SystemExit("staged reindex requires --audit-manifest-json or --checkpoint-db source checksums")
+        if args.lance_mode not in {"create", "upsert"} or args.overwrite_lance:
+            raise SystemExit("a staged version requires direct create/upsert writes; outbox is not ready for activation")
+        if not exists and args.lance_mode != "create":
+            raise SystemExit("prepare the staged Lance dataset before using upsert/outbox")
+        if exists and args.lance_mode == "create":
+            raise SystemExit("staged dataset already exists; use upsert/outbox to resume without recreating it")
+    elif args.lance_mode not in {"upsert", "outbox"} or args.overwrite_lance:
+        raise SystemExit("active collection imports require upsert or outbox; use a staged version for reindexing")
+
+    args.collection_id = collection_id
+    args.collection_profile_sha256 = descriptor["profile_sha256"]
+    args.collection_version = version_id
+    args.collection_is_staged = staged
+
+
+def _run_cli(args: argparse.Namespace) -> int:
     if args.embedding_timeout <= 0 or not math.isfinite(args.embedding_timeout):
         raise SystemExit("--embedding-timeout must be finite and positive")
     if args.max_record_bytes <= 0:
@@ -2066,6 +2180,36 @@ def main(argv: list[str]) -> int:
     if args.checkpoint_max_memory_bytes <= 0:
         raise SystemExit("--checkpoint-max-memory-bytes must be positive")
     return run_spooled_import(args, lance_mode)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    manifest_options = (
+        args.collection_version, args.embedding_model, args.embedding_model_version,
+        args.embedding_normalization, args.normalization_version, args.chunking_version,
+    )
+    if args.collection_manifest:
+        try:
+            with collection_manifest.import_lock(args.collection_manifest) as raw:
+                _bind_collection_profile(args, raw)
+                result = _run_cli(args)
+        except collection_manifest.ManifestError as exc:
+            raise SystemExit(f"collection manifest: {exc}") from exc
+        if result == 0 and args.collection_is_staged and args.execute:
+            try:
+                collection_manifest.record_ready(
+                    args.collection_manifest,
+                    args.collection_version,
+                    args.collection_import_result,
+                )
+            except collection_manifest.ManifestError as exc:
+                raise SystemExit(
+                    f"collection import succeeded but readiness was not recorded: {exc}"
+                ) from exc
+        return result
+    if any(value is not None for value in manifest_options):
+        raise SystemExit("collection profile options require --collection-manifest")
+    return _run_cli(args)
 
 
 if __name__ == "__main__":

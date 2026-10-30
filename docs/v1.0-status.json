@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-29T22:49:54.069199+00:00",
+  "updated_at": "2026-10-30T04:52:01.637102+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -133,6 +133,7 @@
       ],
       "status": "done",
       "summary": "격리된 PG16.15 환경에서 역할·정책·SQL/Lance·revision·대기 outbox의 새 인스턴스 복원과 SIGTERM, SIGKILL, ENOSPC, 손상·부분 복사 복구를 검증했다. 복구 절차와 fixture에서 측정한 RPO/RTO 범위를 문서화했다.",
+      "public_commit": "b0df9c633aa899bdb958f93b1c89f820fa83aad8",
       "criteria_passed": [
         "C1",
         "C2",
@@ -147,8 +148,13 @@
       "depends_on": [
         6
       ],
-      "status": "queued",
-      "criteria_passed": []
+      "status": "done",
+      "summary": "논리 컬렉션 manifest와 importer 버전 결합을 구현하고 실제 PostgreSQL 16 fixture에서 프로필 혼합 거부, 재색인 활성화·롤백 및 공유 corpus 경계를 검증했다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
     },
     {
       "number": 11,
