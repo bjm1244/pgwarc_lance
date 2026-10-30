@@ -47,6 +47,9 @@ class CollectionManifestTests(unittest.TestCase):
             normalization=values["normalization"],
             normalization_version=values["normalization_version"],
             chunking_version=values["chunking_version"],
+            chunking_strategy=values.get("chunking_strategy", "whole_document"),
+            chunk_size_chars=values.get("chunk_size_chars"),
+            chunk_overlap_chars=values.get("chunk_overlap_chars", 0),
         )
 
     def create(self):
@@ -113,6 +116,27 @@ class CollectionManifestTests(unittest.TestCase):
         raw["versions"]["e5-v1"]["embedding"]["model_version"] = "different"
         with self.assertRaisesRegex(cm.ManifestError, "checksum"):
             cm.validate_manifest(raw, self.path)
+
+    def test_char_window_profile_preserves_size_overlap_and_version(self):
+        cm._create(self.profile_args(
+            chunking_strategy="char_window", chunk_size_chars=512,
+            chunk_overlap_chars=64, chunking_version="char-window-v1",
+        ))
+        raw = cm.load_manifest(self.path)
+        self.assertEqual(raw["versions"]["e5-v1"]["chunking"], {
+            "strategy": "char_window", "version": "char-window-v1",
+            "size_chars": 512, "overlap_chars": 64,
+        })
+
+    def test_char_window_profile_rejects_invalid_boundaries(self):
+        for size, overlap in ((None, 0), (10, 10), (10, -1), (True, 0)):
+            with self.subTest(size=size, overlap=overlap), self.assertRaisesRegex(
+                cm.ManifestError, "char_window"
+            ):
+                cm._create(self.profile_args(
+                    chunking_strategy="char_window", chunk_size_chars=size,
+                    chunk_overlap_chars=overlap, chunking_version="char-window-v1",
+                ))
 
     def test_abandon_keeps_candidate_metadata_and_dataset_files(self):
         self.activate_initial()
@@ -220,6 +244,9 @@ class CollectionManifestTests(unittest.TestCase):
             embedding_normalization="l2",
             normalization_version="l2-f32-v1",
             chunking_version="whole-document-v1",
+            chunking_strategy=None,
+            chunk_size_chars=None,
+            chunk_overlap_chars=None,
             vector_dim=3,
             audit_manifest_json=Path("audit.json"),
             checkpoint_db=None,

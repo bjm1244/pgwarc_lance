@@ -295,6 +295,113 @@ class WarcImporterTests(unittest.TestCase):
         self.assertNotEqual(revision, warc_importer.record_revision(changed_metadata))
         self.assertEqual(len(revision), 64)
         self.assertEqual(warc_importer.record_to_json(original)["revision"], revision)
+        legacy_payload = {
+            "doc_id": original.doc_id,
+            "target_uri": original.target_uri,
+            "content_type": original.content_type,
+            "http_status": original.http_status,
+            "text_len": len(original.text),
+            "payload_digest": original.payload_digest,
+            "bm25_content_md5": warc_importer.hashlib.md5(
+                original.text.encode("utf-8")
+            ).hexdigest(),
+        }
+        legacy_revision = warc_importer.hashlib.sha256(
+            json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(revision, legacy_revision)
+        whole_document = warc_importer.chunk_import_record(
+            original, strategy="whole_document", version="whole-document-v1"
+        )[0]
+        self.assertEqual(revision, warc_importer.record_revision(whole_document))
+
+    def test_char_window_chunks_cover_the_normalized_text_and_keep_stable_ranges(self):
+        record = warc_importer.ImportRecord(
+            123, "https://example.test/chunk", "2026-10-01T00:00:00Z",
+            "text/plain", 200, "sha256:payload", "A🙂BCDEFG", "source.warc",
+        )
+        chunks = warc_importer.chunk_import_record(
+            record, strategy="char_window", size_chars=4, overlap_chars=1,
+            version="char-window-v1",
+        )
+        self.assertEqual([(row.char_start, row.char_end) for row in chunks], [(0, 4), (3, 7), (6, 8)])
+        self.assertEqual("".join(
+            row.text if index == 0 else row.text[1:]
+            for index, row in enumerate(chunks)
+        ), record.text)
+        self.assertTrue(all(row.parent_doc_id == chunks[0].parent_doc_id for row in chunks))
+        self.assertTrue(all(row.parent_text_len == len(record.text) for row in chunks))
+        replay = warc_importer.chunk_import_record(
+            record, strategy="char_window", size_chars=4, overlap_chars=1,
+            version="char-window-v1",
+        )
+        self.assertEqual([row.doc_id for row in chunks], [row.doc_id for row in replay])
+        updated = warc_importer.dataclasses.replace(record, payload_digest="sha256:corrected")
+        changed_capture = warc_importer.chunk_import_record(
+            updated, strategy="char_window", size_chars=4, overlap_chars=1,
+            version="char-window-v1",
+        )
+        self.assertEqual(chunks[0].parent_doc_id, changed_capture[0].parent_doc_id)
+        self.assertEqual([row.doc_id for row in chunks], [row.doc_id for row in changed_capture])
+        self.assertNotEqual(warc_importer.record_revision(chunks[0]),
+                            warc_importer.record_revision(changed_capture[0]))
+        self.assertEqual(warc_importer.record_to_json(chunks[0])["char_end"], 4)
+
+    def test_importer_chunk_records_jsonl_and_sql_keep_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, output = Path(tmp) / "long.warc", Path(tmp) / "records.jsonl"
+            text = "alpha beta " * 12
+            path.write_bytes(warc_response("https://example.test/long", "2026-10-01T00:00:00Z", text))
+            records = warc_importer.load_import_records(
+                [path], None, 1, chunking_strategy="char_window",
+                chunk_size_chars=32, chunk_overlap_chars=4,
+                chunking_version="char-window-v1",
+            )
+            self.assertGreater(len(records), 1)
+            sql = warc_importer.emit_sql(
+                records, "/tmp/chunk-fixture.lance", 3, False, False,
+                vectors_by_doc_id={row.doc_id: [1.0, 0.0, 0.0] for row in records},
+                lance_mode="outbox",
+                reconcile_chunks=True,
+            )
+            self.assertIn("parent_doc_id, chunk_index, char_start, char_end", sql)
+            self.assertIn("ON CONFLICT (doc_id) DO UPDATE SET\n    parent_doc_id = EXCLUDED.parent_doc_id", sql)
+            self.assertIn("char-window-v1", sql)
+            self.assertIn("SELECT lance_outbox_enqueue_revision(", sql)
+            self.assertIn("cannot reconcile stale chunks without tracked outbox revisions", sql)
+            self.assertNotIn("pdf_page", sql.lower())
+            output.write_text("\n".join(json.dumps(warc_importer.record_to_json(row)) for row in records))
+            json_rows = [json.loads(line) for line in output.read_text().splitlines()]
+            self.assertEqual([row["doc_id"] for row in json_rows], [row.doc_id for row in records])
+            self.assertTrue(all(row["parent_doc_id"] == records[0].parent_doc_id for row in json_rows))
+            self.assertEqual("".join(
+                row.text if index == 0 else row.text[4:]
+                for index, row in enumerate(records)
+            ), " ".join(text.split()))
+
+    def test_duplicate_chunk_ids_fail_before_sql_and_checkpoint_chunking_fails_closed(self):
+        record = warc_importer.ImportRecord(
+            1, "https://example.test/duplicate", "2026-10-01T00:00:00Z",
+            "text/plain", 200, "sha1:x", "a long document", "source.warc",
+        )
+        chunks = warc_importer.chunk_import_record(
+            record, strategy="char_window", size_chars=4, version="char-window-v1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            spool = warc_importer.ImportSpool(Path(tmp))
+            try:
+                with self.assertRaisesRegex(ValueError, "duplicate imported doc_id"):
+                    spool.add_records([*chunks, *chunks])
+            finally:
+                spool.close()
+            source, checkpoint = Path(tmp) / "input.warc", Path(tmp) / "checkpoint.sqlite"
+            source.write_bytes(warc_response("https://example.test/chunks", "2026-10-01T00:00:00Z", "long body"))
+            with self.assertRaisesRegex(SystemExit, "not supported by --checkpoint-db"):
+                warc_importer.main([
+                    str(source), "--checkpoint-db", str(checkpoint),
+                    "--chunking-strategy", "char_window", "--chunk-size-chars", "4",
+                    "--chunking-version", "char-window-v1",
+                ])
 
     def test_retention_diagnostics_remain_bounded_across_many_failed_documents(self):
         retention = warc_importer.ExtractionRetention("metadata-only")

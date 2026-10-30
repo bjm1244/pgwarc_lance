@@ -123,13 +123,21 @@ def _validate_descriptor(
         "strategy", "version", "size_chars", "overlap_chars"
     }:
         raise ManifestError(f"versions.{version_id}.chunking has missing or unknown fields")
-    if chunking["strategy"] != "whole_document":
-        raise ManifestError("this importer supports only whole_document chunking; chunking is not performed here")
+    if chunking["strategy"] not in {"whole_document", "char_window"}:
+        raise ManifestError("chunking.strategy must be whole_document or char_window")
     _required_text(chunking["version"], f"versions.{version_id}.chunking.version")
-    if chunking["size_chars"] is not None:
-        raise ManifestError("whole_document chunking requires size_chars=null")
-    if isinstance(chunking["overlap_chars"], bool) or chunking["overlap_chars"] != 0:
-        raise ManifestError("whole_document chunking requires overlap_chars=0")
+    if chunking["strategy"] == "whole_document":
+        if chunking["size_chars"] is not None:
+            raise ManifestError("whole_document chunking requires size_chars=null")
+        if isinstance(chunking["overlap_chars"], bool) or chunking["overlap_chars"] != 0:
+            raise ManifestError("whole_document chunking requires overlap_chars=0")
+    else:
+        size = chunking["size_chars"]
+        overlap = chunking["overlap_chars"]
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            raise ManifestError("char_window chunking requires a positive size_chars")
+        if isinstance(overlap, bool) or not isinstance(overlap, int) or overlap < 0 or overlap >= size:
+            raise ManifestError("char_window chunking overlap_chars must be non-negative and smaller than size_chars")
 
     _required_text(descriptor["created_at"], f"versions.{version_id}.created_at")
     expected_digest = _profile_digest(collection_id, version_id, descriptor)
@@ -288,6 +296,9 @@ def _new_descriptor(
     normalization: str,
     normalization_version: str,
     chunking_version: str,
+    chunking_strategy: str = "whole_document",
+    chunk_size_chars: int | None = None,
+    chunk_overlap_chars: int = 0,
 ) -> dict[str, Any]:
     _identifier(version_id, "version_id")
     descriptor: dict[str, Any] = {
@@ -300,10 +311,10 @@ def _new_descriptor(
             "normalization_version": normalization_version,
         },
         "chunking": {
-            "strategy": "whole_document",
+            "strategy": chunking_strategy,
             "version": chunking_version,
-            "size_chars": None,
-            "overlap_chars": 0,
+            "size_chars": chunk_size_chars,
+            "overlap_chars": chunk_overlap_chars,
         },
         "expected_vectors": expected_vectors,
         "created_at": _utc_now(),
@@ -321,6 +332,9 @@ def _parse_new_descriptor(args: argparse.Namespace, collection_id: str) -> dict[
         collection_id, args.version_id, args.dataset_path, args.model,
         args.model_version, args.dimensions, args.expected_vectors, args.normalization,
         args.normalization_version, args.chunking_version,
+        getattr(args, "chunking_strategy", "whole_document"),
+        getattr(args, "chunk_size_chars", None),
+        getattr(args, "chunk_overlap_chars", 0),
     )
 
 
@@ -574,6 +588,9 @@ def _add_profile_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--normalization", choices=sorted(NORMALIZATIONS), required=True)
     parser.add_argument("--normalization-version", required=True)
     parser.add_argument("--chunking-version", required=True)
+    parser.add_argument("--chunking-strategy", choices=["whole_document", "char_window"], default="whole_document")
+    parser.add_argument("--chunk-size-chars", type=int)
+    parser.add_argument("--chunk-overlap-chars", type=int, default=0)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

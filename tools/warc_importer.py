@@ -49,6 +49,7 @@ DEFAULT_PSQL = (
 )
 LANCE_MODES = ("create", "overwrite", "append", "upsert", "outbox")
 OUTBOX_MIN_EXTENSION_VERSION = "0.1.23"
+MAX_CHUNKS_PER_DOCUMENT = 10_000
 BM25_MODES = ("function", "bulk", "copy")
 APPEND_DUPLICATE_WARNING = (
     "lance append mode does not deduplicate by doc_id; repeated imports can "
@@ -75,6 +76,12 @@ class ImportRecord:
     text: str
     source_file: str
     extraction_status: str = "text"
+    parent_doc_id: int | None = None
+    chunk_index: int = 0
+    char_start: int = 0
+    char_end: int = 0
+    parent_text_len: int = 0
+    chunking_version: str = "whole-document-v1"
 
 
 class HtmlTextExtractor(html.parser.HTMLParser):
@@ -871,6 +878,86 @@ def stable_doc_id(target_uri: str | None, warc_date: str | None, digest: str) ->
     return value or 1
 
 
+def stable_parent_doc_id(
+    target_uri: str | None, warc_date: str | None, digest: str
+) -> int:
+    """Identify a captured URL/date across extraction revisions when possible."""
+    if target_uri and warc_date:
+        raw = "\n".join([target_uri, warc_date]).encode("utf-8")
+        value = int.from_bytes(hashlib.blake2b(raw, digest_size=8).digest(), "big")
+        value &= (1 << 63) - 1
+        return value or 1
+    return stable_doc_id(target_uri, warc_date, digest)
+
+
+def stable_chunk_id(parent_doc_id: int, version: str, start: int, end: int) -> int:
+    raw = f"{parent_doc_id}\n{version}\n{start}\n{end}".encode("utf-8")
+    value = int.from_bytes(hashlib.blake2b(raw, digest_size=8).digest(), "big")
+    value &= (1 << 63) - 1
+    return value or 1
+
+
+def chunk_import_record(
+    record: ImportRecord,
+    *,
+    strategy: str = "whole_document",
+    size_chars: int | None = None,
+    overlap_chars: int = 0,
+    version: str = "whole-document-v1",
+) -> list[ImportRecord]:
+    """Return indexable records with offsets in normalized extracted-text codepoints."""
+    if strategy not in {"whole_document", "char_window"}:
+        raise ValueError("chunking strategy must be whole_document or char_window")
+    parent_id = (
+        stable_parent_doc_id(record.target_uri, record.warc_date, record.payload_digest)
+        if strategy == "char_window"
+        else record.doc_id
+    )
+    text = record.text
+    parent_len = len(text)
+    if strategy == "whole_document" or record.extraction_status == "metadata_only" or not text:
+        spans = [(0, parent_len)]
+    else:
+        if size_chars is None or size_chars <= 0:
+            raise ValueError("char_window chunking requires a positive size_chars")
+        if overlap_chars < 0 or overlap_chars >= size_chars:
+            raise ValueError("overlap_chars must be non-negative and smaller than size_chars")
+        step = size_chars - overlap_chars
+        spans = []
+        start = 0
+        while start < parent_len:
+            end = min(start + size_chars, parent_len)
+            spans.append((start, end))
+            if end == parent_len:
+                break
+            start += step
+        if len(spans) > MAX_CHUNKS_PER_DOCUMENT:
+            raise ValueError(
+                f"doc_id={record.doc_id}: chunk count exceeds {MAX_CHUNKS_PER_DOCUMENT}; "
+                "no SQL executed"
+            )
+
+    chunks = []
+    for index, (start, end) in enumerate(spans):
+        chunk_id = (
+            stable_chunk_id(parent_id, version, start, end)
+            if strategy == "char_window"
+            else record.doc_id
+        )
+        chunks.append(dataclasses.replace(
+            record,
+            doc_id=chunk_id,
+            text=text[start:end],
+            parent_doc_id=parent_id,
+            chunk_index=index,
+            char_start=start,
+            char_end=end,
+            parent_text_len=parent_len,
+            chunking_version=version,
+        ))
+    return chunks
+
+
 def hash_embedding(text: str, dim: int) -> list[float]:
     values: list[float] = []
     seed = text.encode("utf-8")
@@ -893,6 +980,12 @@ def hash_embedding(text: str, dim: int) -> list[float]:
 def record_to_json(record: ImportRecord) -> dict[str, Any]:
     data = {
         "doc_id": record.doc_id,
+        "parent_doc_id": record.parent_doc_id or record.doc_id,
+        "chunk_index": record.chunk_index,
+        "char_start": record.char_start,
+        "char_end": record.char_end,
+        "parent_text_len": record.parent_text_len or len(record.text),
+        "chunking_version": record.chunking_version,
         "target_uri": record.target_uri,
         "warc_date": record.warc_date,
         "content_type": record.content_type,
@@ -920,6 +1013,25 @@ def record_revision(record: ImportRecord) -> str:
         "payload_digest": record.payload_digest,
         "bm25_content_md5": hashlib.md5(record.text.encode("utf-8")).hexdigest(),
     }
+    # Preserve the established revision for whole-document imports. Adding
+    # provenance columns alone must not make every existing vector appear
+    # stale and trigger a needless full re-embedding on the next outbox pass.
+    is_whole_document = (
+        (record.parent_doc_id is None or record.parent_doc_id == record.doc_id)
+        and record.chunk_index == 0
+        and record.char_start == 0
+        and record.char_end in {0, len(record.text)}
+        and record.parent_text_len in {0, len(record.text)}
+    )
+    if not is_whole_document:
+        payload.update({
+            "parent_doc_id": record.parent_doc_id or record.doc_id,
+            "chunk_index": record.chunk_index,
+            "char_start": record.char_start,
+            "char_end": record.char_end,
+            "parent_text_len": record.parent_text_len or len(record.text),
+            "chunking_version": record.chunking_version,
+        })
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -1224,6 +1336,7 @@ def iter_sql_chunks(
     total_batches: int | None = None,
     skip_schema: bool = False,
     requires_long_term_storage: bool = False,
+    reconcile_chunks: bool = False,
 ) -> Iterator[str]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -1235,6 +1348,8 @@ def iter_sql_chunks(
         raise ValueError(f"{lance_mode} batch_size must not exceed 10000")
     if bm25_mode not in BM25_MODES:
         raise ValueError(f"bm25_mode must be one of: {', '.join(BM25_MODES)}")
+    if reconcile_chunks and (not lance_uri or lance_mode != "outbox"):
+        raise ValueError("chunk reconciliation requires a Lance URI and outbox mode")
 
     has_lance_vectors = bool(lance_uri) and (include_hash_vectors or vectors_by_doc_id is not None)
     requires_dataset_lock = has_lance_vectors and lance_mode in {"upsert", "outbox"}
@@ -1246,6 +1361,12 @@ def iter_sql_chunks(
         """
 CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
     doc_id         bigint PRIMARY KEY,
+    parent_doc_id  bigint,
+    chunk_index    integer,
+    char_start     integer,
+    char_end       integer,
+    parent_text_len integer,
+    chunking_version text,
     target_uri     text,
     warc_date      timestamptz,
     content_type   text,
@@ -1263,6 +1384,23 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
     ]
     if skip_schema:
         lines = ["SET standard_conforming_strings = on;"]
+    else:
+        lines.extend([
+            "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS parent_doc_id bigint;",
+            "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS chunk_index integer;",
+            "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS char_start integer;",
+            "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS char_end integer;",
+            "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS parent_text_len integer;",
+            "ALTER TABLE pgwarc_lance.warc_record ADD COLUMN IF NOT EXISTS chunking_version text;",
+            "CREATE INDEX IF NOT EXISTS warc_record_parent_chunk_idx "
+            "ON pgwarc_lance.warc_record (parent_doc_id, chunk_index);",
+        ])
+    if reconcile_chunks:
+        lines.extend([
+            "DROP TABLE IF EXISTS pg_temp.pglance_import_expected_chunks;",
+            "CREATE TEMP TABLE pglance_import_expected_chunks ("
+            "parent_doc_id bigint NOT NULL, doc_id bigint PRIMARY KEY) ON COMMIT PRESERVE ROWS;",
+        ])
     requires_outbox = lance_mode == "outbox"
     guards = []
     if requires_long_term_storage:
@@ -1305,12 +1443,20 @@ CREATE TABLE IF NOT EXISTS pgwarc_lance.warc_record (
             lines.append(
                 """
 INSERT INTO pgwarc_lance.warc_record (
-    doc_id, target_uri, warc_date, content_type, http_status,
+    doc_id, parent_doc_id, chunk_index, char_start, char_end, parent_text_len,
+    chunking_version, target_uri, warc_date, content_type, http_status,
     payload_digest, text_len, source_file, imported_at
 ) VALUES (
-    {doc_id}, {target_uri}, {warc_date}, {content_type}, {http_status},
+    {doc_id}, {parent_doc_id}, {chunk_index}, {char_start}, {char_end}, {parent_text_len},
+    {chunking_version}, {target_uri}, {warc_date}, {content_type}, {http_status},
     {payload_digest}, {text_len}, {source_file}, now()
 ) ON CONFLICT (doc_id) DO UPDATE SET
+    parent_doc_id = EXCLUDED.parent_doc_id,
+    chunk_index = EXCLUDED.chunk_index,
+    char_start = EXCLUDED.char_start,
+    char_end = EXCLUDED.char_end,
+    parent_text_len = EXCLUDED.parent_text_len,
+    chunking_version = EXCLUDED.chunking_version,
     target_uri = EXCLUDED.target_uri,
     warc_date = EXCLUDED.warc_date,
     content_type = EXCLUDED.content_type,
@@ -1321,6 +1467,12 @@ INSERT INTO pgwarc_lance.warc_record (
     imported_at = now();
 """.strip().format(
                     doc_id=record.doc_id,
+                    parent_doc_id=(record.parent_doc_id or record.doc_id),
+                    chunk_index=record.chunk_index,
+                    char_start=record.char_start,
+                    char_end=record.char_end,
+                    parent_text_len=(record.parent_text_len or len(record.text)),
+                    chunking_version=sql_string(record.chunking_version),
                     target_uri=sql_string(record.target_uri),
                     warc_date=sql_timestamp(record.warc_date),
                     content_type=sql_string(record.content_type),
@@ -1330,6 +1482,12 @@ INSERT INTO pgwarc_lance.warc_record (
                     source_file=sql_string(record.source_file),
                 )
             )
+            if reconcile_chunks:
+                lines.append(
+                    "INSERT INTO pg_temp.pglance_import_expected_chunks (parent_doc_id, doc_id) "
+                    f"VALUES ({record.parent_doc_id or record.doc_id}, {record.doc_id}) "
+                    "ON CONFLICT (doc_id) DO UPDATE SET parent_doc_id = EXCLUDED.parent_doc_id;"
+                )
             if bm25_mode == "function":
                 lines.append(
                     f"SELECT bm25_index_document({record.doc_id}, {sql_string(record.text)});"
@@ -1363,6 +1521,55 @@ INSERT INTO pgwarc_lance.warc_record (
         yield "\n".join(lines) + "\n"
         start = end
 
+    if reconcile_chunks:
+        yield f"""
+DO $pgwarc_chunk_reconcile$
+DECLARE
+    stale_ids bigint[];
+    stale_revisions text[];
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pgwarc_lance.warc_record AS old_chunk
+        JOIN (SELECT DISTINCT parent_doc_id FROM pg_temp.pglance_import_expected_chunks) AS parents
+          USING (parent_doc_id)
+        LEFT JOIN pgwarc_lance.lance_document_revision AS revision
+          ON revision.uri = {sql_string(lance_uri)} AND revision.doc_id = old_chunk.doc_id
+        WHERE NOT EXISTS (
+            SELECT 1 FROM pg_temp.pglance_import_expected_chunks AS expected
+            WHERE expected.doc_id = old_chunk.doc_id
+        )
+          AND revision.doc_id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'cannot reconcile stale chunks without tracked outbox revisions; perform a complete revisioned outbox import first'
+            USING ERRCODE = '55000';
+    END IF;
+    LOOP
+        SELECT array_agg(stale.doc_id ORDER BY stale.doc_id),
+               array_agg(stale.expected_revision ORDER BY stale.doc_id)
+          INTO stale_ids, stale_revisions
+        FROM (
+            SELECT old_chunk.doc_id, revision.expected_revision
+            FROM pgwarc_lance.warc_record AS old_chunk
+            JOIN (SELECT DISTINCT parent_doc_id FROM pg_temp.pglance_import_expected_chunks) AS parents
+              USING (parent_doc_id)
+            JOIN pgwarc_lance.lance_document_revision AS revision
+              ON revision.uri = {sql_string(lance_uri)} AND revision.doc_id = old_chunk.doc_id
+            WHERE NOT EXISTS (
+                SELECT 1 FROM pg_temp.pglance_import_expected_chunks AS expected
+                WHERE expected.doc_id = old_chunk.doc_id
+            )
+              AND NOT revision.is_deleted
+            ORDER BY old_chunk.doc_id
+            LIMIT 10000
+        ) AS stale;
+        EXIT WHEN COALESCE(cardinality(stale_ids), 0) = 0;
+        PERFORM lance_document_delete({sql_string(lance_uri)}, stale_ids, stale_revisions);
+    END LOOP;
+END
+$pgwarc_chunk_reconcile$;
+"""
+
 
 def emit_sql(
     records: Iterable[ImportRecord],
@@ -1376,6 +1583,7 @@ def emit_sql(
     bm25_mode: str = "function",
     skip_schema: bool = False,
     requires_long_term_storage: bool = False,
+    reconcile_chunks: bool = False,
 ) -> str:
     record_list = list(records)
     return "".join(iter_sql_chunks(
@@ -1385,6 +1593,7 @@ def emit_sql(
         requires_long_term_storage=(requires_long_term_storage or any(
             validate_bm25_terms(record)[0] for record in record_list
         )),
+        reconcile_chunks=reconcile_chunks,
     ))
 
 
@@ -1577,6 +1786,10 @@ def iter_import_records(
     pdf_extractor: PdfTextExtractor | None = None,
     docx_extractor: DocxTextExtractor | None = None,
     retention: ExtractionRetention | None = None,
+    chunking_strategy: str = "whole_document",
+    chunk_size_chars: int | None = None,
+    chunk_overlap_chars: int = 0,
+    chunking_version: str = "whole-document-v1",
 ) -> Iterator[ImportRecord]:
     if max_record_bytes <= 0:
         raise ValueError("max_record_bytes must be positive")
@@ -1598,7 +1811,13 @@ def iter_import_records(
             record_id = warc_record.headers.get("warc-record-id")
             if charset_policy is not None and record_id in charset_policy.record_overrides:
                 charset_policy.record_used[record_id] = charset_policy.record_used.get(record_id, 0) + 1
-            yield record
+            yield from chunk_import_record(
+                record,
+                strategy=chunking_strategy,
+                size_chars=chunk_size_chars,
+                overlap_chars=chunk_overlap_chars,
+                version=chunking_version,
+            )
             count += 1
             if limit is not None and count >= limit:
                 return
@@ -1611,12 +1830,20 @@ def load_import_records(
     max_record_bytes: int = DEFAULT_MAX_RECORD_BYTES,
     pdf_extractor: PdfTextExtractor | None = None,
     docx_extractor: DocxTextExtractor | None = None,
+    chunking_strategy: str = "whole_document",
+    chunk_size_chars: int | None = None,
+    chunk_overlap_chars: int = 0,
+    chunking_version: str = "whole-document-v1",
 ) -> list[ImportRecord]:
     records: list[ImportRecord] = []
     sources: dict[int, str] = {}
     for record in iter_import_records(
         paths, limit, min_text_chars, max_record_bytes,
         pdf_extractor=pdf_extractor, docx_extractor=docx_extractor,
+        chunking_strategy=chunking_strategy,
+        chunk_size_chars=chunk_size_chars,
+        chunk_overlap_chars=chunk_overlap_chars,
+        chunking_version=chunking_version,
     ):
         if record.doc_id in sources:
             raise ValueError(f"duplicate imported doc_id={record.doc_id}: {sources[record.doc_id]} and {record.source_file}")
@@ -1663,6 +1890,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--embedding-normalization", choices=["none", "l2"])
     parser.add_argument("--normalization-version", help="normalization implementation/version asserted by the manifest")
     parser.add_argument("--chunking-version", help="chunking configuration version asserted by the manifest")
+    parser.add_argument("--chunking-strategy", choices=["whole_document", "char_window"],
+                        help="chunking profile; a collection manifest takes precedence")
+    parser.add_argument("--chunk-size-chars", type=int,
+                        help="maximum Unicode codepoints per chunk for char_window")
+    parser.add_argument("--chunk-overlap-chars", type=int,
+                        help="overlap in Unicode codepoints between adjacent chunks")
     parser.add_argument(
         "--lance-mode",
         choices=LANCE_MODES,
@@ -1755,7 +1988,7 @@ class ImportSpool:
         # Keep the cache small regardless of corpus size. All spool files are
         # disposable and are removed by TemporaryDirectory after the import.
         self.db.execute("PRAGMA cache_size=-2048")
-        self.db.execute("CREATE TABLE records (doc_id INTEGER PRIMARY KEY, ordinal INTEGER, source TEXT, data TEXT, text_available INTEGER NOT NULL)")
+        self.db.execute("CREATE TABLE records (doc_id INTEGER PRIMARY KEY, parent_doc_id INTEGER NOT NULL, ordinal INTEGER, source TEXT, data TEXT, text_available INTEGER NOT NULL)")
         self.db.execute("CREATE TABLE vectors (doc_id INTEGER PRIMARY KEY, data TEXT)")
         self.count = 0
         self.oversized_ascii_term_records = 0
@@ -1774,8 +2007,9 @@ class ImportSpool:
                 self.max_oversized_ascii_term_bytes, max_term_bytes
             )
             try:
-                self.db.execute("INSERT INTO records VALUES (?,?,?,?,?)", (
-                    record.doc_id, self.count, record.source_file,
+                self.db.execute("INSERT INTO records VALUES (?,?,?,?,?,?)", (
+                    record.doc_id, record.parent_doc_id or record.doc_id,
+                    self.count, record.source_file,
                     json.dumps(dataclasses.asdict(record), ensure_ascii=False),
                     int(record.extraction_status != "metadata_only"),
                 ))
@@ -1892,6 +2126,12 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                 "batch_size": args.batch_size,
                 "batch_max_bytes": args.batch_max_bytes,
                 "lance_mode": lance_mode if args.lance_uri else "none",
+                "chunking": {
+                    "strategy": args.chunking_strategy,
+                    "size_chars": args.chunk_size_chars,
+                    "overlap_chars": args.chunk_overlap_chars,
+                    "version": args.chunking_version,
+                },
                 "lance_uri_sha256": (
                     hashlib.sha256(args.lance_uri.encode("utf-8")).hexdigest()
                     if args.lance_uri
@@ -1941,6 +2181,8 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
             spool.add_records(iter_import_records(
                 args.warc, args.limit, args.min_text_chars, args.max_record_bytes,
                 charset_policy, pdf_extractor, docx_extractor, retention,
+                args.chunking_strategy, args.chunk_size_chars,
+                args.chunk_overlap_chars, args.chunking_version,
             ))
             charset_policy.validate_record_overrides()
             if audit_manifest is not None:
@@ -1948,7 +2190,10 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                     audit_manifest["outcomes"]["imported"]
                     + audit_manifest["outcomes"]["metadata_only"]
                 )
-                if spool.count != expected_records:
+                parent_count = spool.db.execute(
+                    "SELECT count(DISTINCT parent_doc_id) FROM records"
+                ).fetchone()[0]
+                if parent_count != expected_records:
                     raise ValueError(
                         "WARC preflight/import record counts differ; no SQL executed"
                     )
@@ -1998,6 +2243,11 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                     vectors, args.batch_size, lance_mode, args.bm25_mode, spool.count,
                     args.batch_max_bytes, batch_count, args.skip_schema,
                     requires_long_term_storage=spool.oversized_ascii_terms > 0,
+                    reconcile_chunks=(
+                        args.chunking_strategy == "char_window"
+                        and bool(args.lance_uri)
+                        and lance_mode == "outbox"
+                    ),
                 ):
                     output.write(chunk)
             if args.output:
@@ -2023,7 +2273,18 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                 "docx_extraction": docx_extractor.summary() if docx_extractor else {"enabled": False, "attempted": 0, "extracted": 0, "output_bytes": 0},
                 "extraction_retention": {"mode": retention.mode, "metadata_only": retention.metadata_only, "errors": retention.errors, "omitted_errors": retention.omitted_errors},
                 "vector_rows_expected": (len(vectors) if vectors is not None else spool.db.execute("SELECT count(*) FROM records WHERE text_available=1").fetchone()[0] if args.lance_uri and not args.no_hash_vectors else 0),
-                "records": spool.count, "sql_bytes": sql_path.stat().st_size,
+                "records": spool.count,
+                "source_documents": spool.db.execute(
+                    "SELECT count(DISTINCT parent_doc_id) FROM records"
+                ).fetchone()[0],
+                "chunking": {
+                    "strategy": args.chunking_strategy,
+                    "size_chars": args.chunk_size_chars,
+                    "overlap_chars": args.chunk_overlap_chars,
+                    "version": args.chunking_version,
+                    "offset_unit": "unicode_codepoints_in_normalized_extracted_text",
+                },
+                "sql_bytes": sql_path.stat().st_size,
                 "vectors": vector_count, "lance_mode": lance_mode if args.lance_uri else "none",
                 "lance_index_consistency": (
                     "none" if not args.lance_uri else (
@@ -2068,7 +2329,7 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                     "complete": bool(args.execute),
                     "execute": bool(args.execute),
                     "lance_mode": lance_mode,
-                    "records": spool.count,
+                    "records": summary["source_documents"],
                     "vector_rows": vector_count,
                     "input_sha256": input_sha256,
                 }
@@ -2094,6 +2355,13 @@ def _bind_collection_profile(args: argparse.Namespace, raw: dict[str, Any]) -> N
         if actual is None:
             raise SystemExit(f"--collection-manifest requires {flag}")
         if actual != expected:
+            raise SystemExit(f"{flag} does not match collection {collection_id!r} profile")
+    for flag, actual, expected in (
+        ("--chunking-strategy", args.chunking_strategy, chunking["strategy"]),
+        ("--chunk-size-chars", args.chunk_size_chars, chunking["size_chars"]),
+        ("--chunk-overlap-chars", args.chunk_overlap_chars, chunking["overlap_chars"]),
+    ):
+        if actual is not None and actual != expected:
             raise SystemExit(f"{flag} does not match collection {collection_id!r} profile")
     if args.vector_dim != embedding["dimensions"]:
         raise SystemExit(
@@ -2121,14 +2389,38 @@ def _bind_collection_profile(args: argparse.Namespace, raw: dict[str, Any]) -> N
             raise SystemExit("staged dataset already exists; use upsert/outbox to resume without recreating it")
     elif args.lance_mode not in {"upsert", "outbox"} or args.overwrite_lance:
         raise SystemExit("active collection imports require upsert or outbox; use a staged version for reindexing")
+    if not staged and chunking["strategy"] == "char_window" and args.lance_mode != "outbox":
+        raise SystemExit("active char_window collections require --lance-mode outbox for revisioned chunk reconciliation")
 
     args.collection_id = collection_id
+    args.chunking_strategy = chunking["strategy"]
+    args.chunk_size_chars = chunking["size_chars"]
+    args.chunk_overlap_chars = chunking["overlap_chars"]
+    args.chunking_version = chunking["version"]
     args.collection_profile_sha256 = descriptor["profile_sha256"]
     args.collection_version = version_id
     args.collection_is_staged = staged
 
 
 def _run_cli(args: argparse.Namespace) -> int:
+    if args.chunking_strategy is None:
+        args.chunking_strategy = "whole_document"
+    if args.chunk_overlap_chars is None:
+        args.chunk_overlap_chars = 0
+    if args.chunking_version is None:
+        args.chunking_version = "whole-document-v1"
+    if args.chunking_strategy == "whole_document":
+        if args.chunk_size_chars is not None or args.chunk_overlap_chars != 0:
+            raise SystemExit("whole_document chunking requires --chunk-size-chars omitted and overlap 0")
+    else:
+        if args.chunk_size_chars is None or args.chunk_size_chars <= 0:
+            raise SystemExit("char_window chunking requires a positive --chunk-size-chars")
+        if args.chunk_overlap_chars < 0 or args.chunk_overlap_chars >= args.chunk_size_chars:
+            raise SystemExit("--chunk-overlap-chars must be non-negative and smaller than chunk size")
+        if not args.chunking_version.strip():
+            raise SystemExit("char_window chunking requires a non-empty --chunking-version")
+        if args.checkpoint_db:
+            raise SystemExit("char_window chunking is not supported by --checkpoint-db yet; no SQL executed")
     if args.embedding_timeout <= 0 or not math.isfinite(args.embedding_timeout):
         raise SystemExit("--embedding-timeout must be finite and positive")
     if args.max_record_bytes <= 0:
@@ -2163,6 +2455,13 @@ def _run_cli(args: argparse.Namespace) -> int:
 
     if lance_mode in {"upsert", "outbox"} and args.batch_size > 10_000:
         raise SystemExit(f"{lance_mode} --batch-size must not exceed 10000")
+    if args.chunking_strategy == "char_window" and args.lance_uri:
+        staged_direct = bool(args.collection_manifest and getattr(args, "collection_is_staged", False))
+        allowed = {"create", "upsert"} if staged_direct else {"create", "outbox"}
+        if lance_mode not in allowed:
+            raise SystemExit("char_window vector imports require create for a new dataset or revisioned outbox mode")
+        if lance_mode == "outbox" and args.no_hash_vectors and not (args.embedding_command or args.embedding_jsonl):
+            raise SystemExit("char_window outbox imports require supplied embeddings; no SQL executed")
     if args.checkpoint_db and args.lance_uri and (
         args.embedding_command or args.embedding_jsonl or not args.no_hash_vectors
     ):
@@ -2186,7 +2485,7 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     manifest_options = (
         args.collection_version, args.embedding_model, args.embedding_model_version,
-        args.embedding_normalization, args.normalization_version, args.chunking_version,
+        args.embedding_normalization, args.normalization_version,
     )
     if args.collection_manifest:
         try:

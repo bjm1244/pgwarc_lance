@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-30T04:52:01.637102+00:00",
+  "updated_at": "2026-10-30T10:55:07.251853+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -150,6 +150,7 @@
       ],
       "status": "done",
       "summary": "논리 컬렉션 manifest와 importer 버전 결합을 구현하고 실제 PostgreSQL 16 fixture에서 프로필 혼합 거부, 재색인 활성화·롤백 및 공유 corpus 경계를 검증했다.",
+      "public_commit": "4df38abf6c7949b498352f214310235dd083f625",
       "criteria_passed": [
         "C1",
         "C2",
@@ -165,8 +166,13 @@
         10,
         7
       ],
-      "status": "queued",
-      "criteria_passed": []
+      "status": "done",
+      "summary": "외부 WARC importer에 버전 고정 청크와 출처 위치 및 갱신·삭제 추적을 추가하고 실제 Common Crawl 텍스트 표본과 PostgreSQL 16 회귀로 C1–C3를 검증했다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
     },
     {
       "number": 12,

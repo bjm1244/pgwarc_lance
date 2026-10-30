@@ -1,5 +1,66 @@
 # Development log
 
+## Issue #11 — document chunks and source provenance (2026-10-30)
+
+- The structured queue selected P1 issue #11 after prerequisites #10 and #7;
+  its C1–C3 criteria take precedence over the earlier development-log next-work
+  note. Work stayed on the canonical `development` line with the configured
+  `gpt-6-luna` / `max` setting.
+- The external WARC importer now supports manifest-bound `char_window` chunks
+  alongside the unchanged whole-document default. A logical parent capture ID
+  and versioned chunk IDs are stable across replay; each JSONL row carries the
+  chunk index, half-open character offsets, full normalized-text length, and
+  chunking version. Offsets count Unicode codepoints. The importer accounts for
+  source documents separately from emitted chunks, rejects duplicate chunk IDs
+  before SQL output, and does not silently truncate long text. The existing
+  one-record checkpoint format rejects multi-chunk mode before SQL execution.
+- A read-only scan of a Common Crawl 2026-39 archive selected 100 text response
+  records into a private derived sample. The production importer accounted for
+  all 100: 97 source documents became 236 chunks and 3 empty-text records were
+  policy-skipped, with zero extraction failures. All 236 IDs were unique, every
+  chunk stayed within its configured bound, and offset ranges covered the full
+  normalized source text. This validates the real WARC extraction/chunk path
+  for the selected text sample, not a full-crawl ingest. PDF and unsupported
+  binary records failed closed in direct attempts and were not represented as
+  verified text.
+- Generated SQL records parent and chunk provenance in `warc_record`. For a
+  complete capture update, revisioned outbox mode tracks the existing baseline,
+  updates current chunks and tombstones stale ones through the existing delete
+  API. Whole-document deletion remains explicit. Operations guidance covers
+  the initial revision baseline, search-result joins for URL/capture time and
+  chunk position, and the fact that no PDF page number is inferred. Legacy
+  whole-document revision hashes remain byte-for-byte compatible, preventing
+  provenance-only fields from forcing every existing vector through outbox
+  again.
+- A network-isolated PostgreSQL 16.15 test installed the unchanged 0.1.23
+  artifact and replayed a long synthetic WARC with externally supplied
+  normalized fixture vectors through the importer, transactional outbox and
+  Lance worker. It verified full coverage, stable IDs, duplicate rejection,
+  search provenance, shorter-document replacement (29 chunks to 3; 26 stale
+  vectors removed), BM25 cleanup, and explicit parent deletion across metadata,
+  postings and vectors. The vectors prove application through the real import
+  path; they are not model-generated evidence or a retrieval-quality claim.
+- The focused importer and manifest suites passed 92 and 16 tests respectively.
+  The complete `python3 -B -m unittest discover -s tests -p 'test_*.py'` suite
+  passed 524 tests on Python 3.12.15; `python3 tools/check_docs.py` and
+  `git diff --check` passed. A recheck first stopped because the private audit
+  output directory was group-readable; its permissions were tightened and the
+  importer plus full Common Crawl chunk-coverage audit then passed. Source-WARC,
+  derived-sample, fixture-vector and artifact checksums are recorded in private
+  run evidence, not tracked files. No `src/`, SQL, Cargo, vendor, control or
+  packaging input changed.
+  The native fingerprint, Cargo.lock and immutable PG16 artifact match the
+  existing validation receipt, which was reused without rewriting it. No
+  release binary or native validation receipt was created.
+- The verification covers a text-only Common Crawl sample and bounded synthetic
+  PostgreSQL fixture. Full-crawl extraction, a model-backed chunk embedding
+  run, independent relevance labels, production-scale update/delete behavior,
+  production SLA and production approval remain unverified. Private sample text,
+  database files and command logs remain outside this repository. The source
+  implementation commit is `c133e1e727b5b768a1d8559d60cfe2a724f2fb53`, ready
+  for the separate reviewed publisher; no direct push or issue closure was
+  performed.
+
 ## Issue #10 — logical collections and embedding profiles (2026-10-30)
 
 - The runner selected P1 issue #10 after prerequisite #6; its structured queue

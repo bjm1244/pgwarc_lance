@@ -219,8 +219,8 @@ Worker는 pending event를 재시도해 Lance의 현재 dataset version에서 ID
 `tools/collection_manifest.py`는 컬렉션 ID마다 운영자가 관리하는 JSON manifest를 만든다.
 각 immutable 버전은 manifest 디렉터리 아래의 고유 dataset 상대 경로, 모델 ID와 고정 revision,
 차원, 정규화 방식/version, chunking 설정/version, 예상 vector 행 수와 profile SHA-256을
-기록한다. 현재 importer는 `whole_document`만 지원하므로 chunk size는 `null`, overlap은 0이다.
-이 설정은 실제 문서 chunking 기능을 제공하지 않는다; 이는 후속 #11의 범위다.
+기록한다. importer는 기존 ID를 보존하는 `whole_document`와 선택형 `char_window`
+전략을 지원한다.
 
 초기 버전과 재색인은 모두 비활성 staged 버전으로 준비한다. 다음 예의 경로는 PostgreSQL
 서버도 접근할 수 있어야 하고, 관리자가 설정한 `pgwarc_lance.allowed_uri_prefix` 아래에
@@ -276,6 +276,37 @@ python3 tools/collection_manifest.py rollback "$MANIFEST" --psql "$ADMIN_PSQL"
 경로/version 관리이며 사용자·tenant 격리, 독립 권한 경계, DB 전체 corpus namespace를 제공하지
 않는다. 검색 애플리케이션이 manifest를 건너뛰고 URI를 직접 지정할 수 있으므로 이 경계를
 격리 주장으로 확대하지 않는다.
+
+### 문서 청크와 원문 출처 위치 (Issue #11)
+
+`char_window`는 추출·정규화한 본문을 크기와 overlap에 따라 청크로 나눈다. offset은
+원본 WARC byte offset이나 PDF 페이지가 아니라 정규화된 본문의 Unicode codepoint
+기준 반개구간 `[char_start, char_end)`이다. 부모 capture ID, 청크 ID, 번호, offset,
+전체 본문 문자 수와 chunking version은 embedding JSONL 및
+`pgwarc_lance.warc_record`에 함께 보존한다. 같은 URL과 WARC-Date로 다시 추출한
+수정본은 부모 ID를 유지하고, 같은 offset/version 청크 ID를 revision-aware upsert로
+갱신한다. URL이나 날짜가 없을 때는 기존 content-digest 기반 ID를 사용한다.
+
+```bash
+python3 tools/warc_importer.py archive.warc.gz --chunking-strategy char_window \
+    --chunk-size-chars 4000 --chunk-overlap-chars 300 \
+    --chunking-version char-window-v1 --records-jsonl chunks.jsonl \
+    --no-hash-vectors --output metadata-and-bm25.sql
+```
+
+각 JSONL row는 chunk `doc_id`, `parent_doc_id`, `chunk_index`, `char_start`,
+`char_end`, `parent_text_len`, `chunking_version`과 해당 chunk의 `text`를 포함한다.
+외부 embedding command/JSONL은 각 chunk `doc_id`를 key로 vector를 돌려줘야 한다.
+활성 char-window collection의 갱신은 `outbox` mode로 수행한다. stale chunk 제거는
+`pgwarc_lance.allow_destructive_ops=on`과 이전 revision의 outbox 기록을 요구한다.
+완료된 입력에 포함된 부모만 자동 대사한다. 입력에서 완전히 빠진 문서는 기존
+`lance_document_delete` API로 해당 부모의 모든 청크를 tombstone 처리한다. SQL과
+권한 예제는 [OPERATIONS.md](OPERATIONS.md)를 참고한다.
+
+검색은 `hybrid_warc_search` 결과의 chunk `doc_id`를 `warc_record`와 join해 URL,
+수집 시각과 위치를 함께 반환할 수 있다. importer는 확인되지 않은 PDF 페이지 번호를
+만들지 않는다. 현재 `--checkpoint-db`는 한 WARC record당 한 checkpoint ID를
+전제하므로 `char_window` mode를 실행 전에 거부한다.
 
 ### PG–Lance read-only doctor (Issue #6 progress)
 

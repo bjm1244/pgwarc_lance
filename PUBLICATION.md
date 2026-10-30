@@ -93,6 +93,27 @@ provide tenant isolation. The existing 0.1.23 native artifact and validation
 receipt remain unchanged; this source checkpoint is not a binary release or
 production approval.
 
+## Issue #11 — source-only document chunk provenance checkpoint (2026-10-30)
+
+The external importer now supports manifest-bound character-window chunks
+with stable parent and chunk IDs, Unicode-codepoint ranges, and a versioned
+chunking profile. A read-only Common Crawl 2026-39 sample selected 100 text
+records; the importer accounted for 97 source documents as 236 complete chunks
+and policy-skipped 3 empty-text records, with no extraction failures. IDs were
+unique and the chunk ranges covered the full normalized text. The sample was
+text-only; unsupported PDF and binary extraction was not represented as
+verified content.
+
+An isolated PostgreSQL 16.15 fixture with the unchanged 0.1.23 artifact tested
+stable replay, duplicate rejection, search-result URL/capture time/chunk
+location, shorter-document replacement, stale vector and BM25 cleanup, and
+explicit parent deletion. Externally supplied normalized fixture vectors were
+applied through the importer, transactional outbox and Lance worker. This
+demonstrates vector application and lifecycle behavior, not model quality or
+retrieval relevance. Unknown PDF page numbers are not inferred. The native
+fingerprint, Cargo.lock and existing PG16 validation receipt remain unchanged;
+this source checkpoint is not a binary release or production approval.
+
 ## Previous package and distribution review: 0.1.22 (2026-10-29)
 
 Issue #6 adds a URI-scoped document revision mapping, revision-bearing Lance

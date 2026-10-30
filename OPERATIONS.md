@@ -60,6 +60,8 @@ GRANT EXECUTE ON FUNCTION public.lance_scan_document_state(text,integer)
 
 GRANT SELECT, INSERT, UPDATE ON pgwarc_lance.bm25_doc,
     pgwarc_lance.warc_record TO pgwarc_writer;
+GRANT SELECT (uri, doc_id, expected_revision, is_deleted)
+    ON pgwarc_lance.lance_document_revision TO pgwarc_writer;
 GRANT SELECT, INSERT, DELETE ON pgwarc_lance.bm25_term,
     pgwarc_lance.bm25_long_term TO pgwarc_writer;
 GRANT INSERT ON pgwarc_lance.lance_write_log TO pgwarc_writer;
@@ -143,11 +145,11 @@ same root. The extension does not enforce tenant separation.
 
 Create or stage a profile with a unique relative dataset path, model and pinned
 model revision, vector dimensions, normalization method/version, chunking
-version and expected vector count. The current importer only supports the
-declared `whole_document` strategy; the version marker records configuration,
-not implemented chunking. Use the same complete source accounting when choosing
-the expected vector count and the importer `--audit-manifest-json` or
-`--checkpoint-db` option to bind source checksums. Model identity is asserted
+strategy/settings/version and expected vector count. `whole_document` keeps the
+existing document ID. `char_window` records actual chunk settings in the
+manifest. Choose its expected vector count from the complete extracted chunk
+input and bind source checksums with `--audit-manifest-json`; `char_window` is
+not yet compatible with `--checkpoint-db`. Model identity is asserted
 configuration; pin the external provider deployment separately.
 
 Prepare the staged path with administrator credentials, then import its exact
@@ -183,6 +185,68 @@ datasets. `abandon` clears only the staged pointer; it does not delete a partial
 dataset. Include the manifest and every retained dataset path in the same backup
 set as PostgreSQL. The tool provides trusted-operator/shared-corpus management,
 not per-user or per-tenant authorization or isolation.
+
+### Document chunks, provenance and replacement
+
+For an initial staged char-window build, declare chunk settings in the
+collection profile and complete a direct `create`/`upsert` load before
+activation. After activation, run the complete source once in `outbox` mode and
+drain its worker before accepting changed source records. This revisioned
+baseline gives stale-chunk cleanup an expected revision for every existing
+vector. Active char-window imports require `outbox`; the importer fails closed
+if a stale chunk has no tracked revision.
+
+Run the first importer pass as an administrator without `--skip-schema` so it
+adds the chunk provenance columns to an existing `warc_record` table. Later,
+the trusted writer can use `--skip-schema`. It needs SELECT on the listed
+`lance_document_revision` columns because the final reconciliation finds the
+expected revision before calling the protected delete API. Automatic stale
+cleanup uses that same revision-checked API, so enable
+`pgwarc_lance.allow_destructive_ops` only for the trusted import/delete role.
+The active manifest locks chunk strategy, size, overlap and version; stage a
+separate dataset/profile before changing any of them.
+
+Offsets are half-open Unicode-codepoint ranges in normalized extracted text.
+They do not identify WARC byte positions or PDF pages. Chunk IDs derive from
+the stable URL/date parent when both values exist, chunking version and range;
+otherwise the importer uses its source-digest document ID. Search URL/date comes
+from `hybrid_warc_search`; join its `doc_id` to `pgwarc_lance.warc_record` for
+parent and chunk location:
+
+```sql
+SELECT hit.doc_id AS chunk_id, hit.score, hit.source, hit.target_uri,
+       hit.warc_date, record.parent_doc_id, record.chunk_index,
+       record.char_start, record.char_end, record.parent_text_len,
+       record.chunking_version
+FROM public.hybrid_warc_search(
+    'archiveword', array_fill(0.0::real, ARRAY[384]),
+    '/srv/pgwarc/collections/archive/datasets/e5-v2.lance', 10
+) AS hit
+JOIN pgwarc_lance.warc_record AS record ON record.doc_id = hit.doc_id
+ORDER BY hit.score DESC;
+```
+
+An outbox import reconciles stale chunks only for parents present in that
+completed input. To remove a whole document, pass all current chunk IDs and
+revisions for its parent, then let the worker apply the queued vectors:
+
+```sql
+SELECT public.lance_document_delete(
+    '/srv/pgwarc/collections/archive/datasets/e5-v2.lance',
+    array_agg(record.doc_id ORDER BY record.doc_id),
+    array_agg(revision.expected_revision ORDER BY record.doc_id)
+)
+FROM pgwarc_lance.warc_record AS record
+JOIN pgwarc_lance.lance_document_revision AS revision
+  ON revision.uri = '/srv/pgwarc/collections/archive/datasets/e5-v2.lance'
+ AND revision.doc_id = record.doc_id
+WHERE record.parent_doc_id = 123456789 AND NOT revision.is_deleted;
+```
+
+Run generated SQL in one `psql` session so its temporary expected-chunk table
+remains available to final reconciliation. A failed import is not a completed
+full-input reconciliation; preserve its summary/log and retry after correcting
+the cause.
 
 ### Delete and recreate a document
 
