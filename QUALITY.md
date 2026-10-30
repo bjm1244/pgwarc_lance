@@ -428,4 +428,13 @@ Use `--url` for compatible local gateways, `--api-key-env` for a non-default key
 
 ## RRF And Weighting Decision
 
-Keep `hybrid_search()` and `hybrid_warc_search()` fixed-parameter for now. If quality evals show systematic BM25/vector imbalance, add a new options-bearing function instead of changing the existing signatures.
+Keep `hybrid_search()` and `hybrid_warc_search()` fixed-parameter for
+backward compatibility. `hybrid_search_explain()` and
+`hybrid_warc_search_filtered_explain()` expose candidate limits, source
+weights, `rrf_k`, and per-source contributions without changing those existing
+functions. With `candidate_k = k` and the default 1/1/60 RRF parameters, the
+explain call uses the legacy fusion formula; the new API's default
+`candidate_k = 100` can admit more candidates than a legacy `k = 10` call.
+Other settings are controls for evaluation, not recommended production values.
+Select weights or a new default only after an independent relevance fixture
+demonstrates the effect.

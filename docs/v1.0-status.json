@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-30T17:16:34.405067+00:00",
+  "updated_at": "2026-10-30T23:05:19.644370+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -186,6 +186,7 @@
       ],
       "status": "done",
       "summary": "BM25와 정확 벡터 후보 생성 전에 동일한 제한형 메타데이터 조건을 적용하고, PostgreSQL 16 회귀·가져오기·권한·자원 한도 검증을 통과했다.",
+      "public_commit": "8eea3c475f0fe042171b0c7b1693013ac1796752",
       "criteria_passed": [
         "C1",
         "C2",
@@ -200,8 +201,13 @@
       "depends_on": [
         12
       ],
-      "status": "queued",
-      "criteria_passed": []
+      "status": "done",
+      "summary": "기존 검색 API를 유지하며 candidate_k·가중 RRF·소스별 순위와 기여를 설명하는 API를 추가하고 PG16 신규 설치·회귀·업그레이드 검증을 통과했다. 독립 relevance label·프로덕션 SLA·승인은 확립되지 않았다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
     },
     {
       "number": 14,

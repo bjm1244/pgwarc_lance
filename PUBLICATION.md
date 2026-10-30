@@ -1,4 +1,49 @@
-# Source publication review — updated 2026-10-30
+# Source publication review — updated 2026-10-31
+
+## Issue #13 — candidate limits and explainable weighted RRF in 0.1.25 (2026-10-31)
+
+The 0.1.25 source preview adds `hybrid_search_explain` and
+`hybrid_warc_search_filtered_explain` without changing the existing search
+function signatures. The new calls separate final `k` (default 10) from the
+per-source candidate limit (default 100), accept finite BM25/vector weights
+from 0 to 1,000 and `rrf_k` from 1 to 10,000, and return each source rank and
+weighted contribution alongside the fused score. Candidate and final limits
+are capped at 10,000. Equal scores use ascending `doc_id`. Zero weight skips a
+source; an error from an enabled source fails the call instead of presenting a
+partial ranking as complete. Filtered vector search still performs its exact
+eligible-ID scan (up to the existing 10,000-row bound) before applying the
+candidate limit. New functions revoke `PUBLIC EXECUTE` by default.
+
+The x86_64 PostgreSQL 16.15 artifact was packaged with Rust 1.96.0,
+cargo-pgrx 0.19.1 and the locked dependency set. The extracted shared-library
+SHA-256 is `ec88bf4c7cc8afd3171603bdbfd9459b31868005b676a58ffc4399c905cf9636`;
+the Cargo.lock SHA-256 is
+`227a6c85056478a560259ea20a7993d76df2c2262b6869fac7c6012bc0055079`. Fresh
+installation and all four PostgreSQL SQL regressions passed on PostgreSQL
+16.15. The SQL fixtures cover the documented defaults, legacy API parity when
+candidate and final limits match, candidate expansion, deterministic ties,
+weighted contributions, each single-source mode, filtered and empty results,
+enabled-source failure, invalid options and default function ACLs. A synthetic
+four-record WARC passed through both importer BM25 modes; all 18 runtime-safety
+checks and 15 backup/restore checks passed. A populated 0.1.24-to-0.1.25
+upgrade retained its existing SQL and Lance state.
+
+The full Python suite passed 525 tests; documentation checks, Rust formatting
+and `git diff --check` passed. The publisher's fixed RustSec audit command
+passed against a database with 1,395 advisories: zero vulnerabilities,
+unsound or yanked findings, with three unmaintained-package warnings. The
+standard locked package attempt first found
+a stale root-package version in Cargo.lock, which was corrected; a retry then
+ran out of space in Docker's overlay. The successful locked/offline package
+build used a copied cache in the dedicated validation volume. Early regression
+attempts also used the wrong/default database and stale expected output; the
+clean final run used a new disposable database and passed 4/4. No dependency
+versions changed. The publisher will rerun its current RustSec gate before
+publication. The checked-in SBOM and complete notice bundle still describe
+0.1.23, so binary redistribution is not cleared. No independent relevance
+labels, corpus-based weight choice, ranking-quality comparison, production
+latency/SLA or production approval is established. This is a source preview
+for the separate reviewed publisher; no direct push or binary release was made.
 
 ## Issue #12 — candidate-filtered search in 0.1.24 (2026-10-30)
 

@@ -1,17 +1,20 @@
 # Production readiness
 
 This is still a source preview. Passing unit tests is not production approval.
-The current source candidate is 0.1.24. It adds filtered WARC search that
-applies domain, inclusive date, language, media type and collection conditions
-before BM25 and exact vector candidate ranking. On the locked PostgreSQL 16.15
-target, fresh installation, four SQL regressions, a populated 0.1.23-to-0.1.24
-upgrade, importer database checks, BM25 resource/concurrency checks,
-runtime-safety checks and backup/restore passed on disposable fixtures.
-PostgreSQL and Lance still do not share an atomic commit. Strict Cargo notice
-collection and a current RustSec audit cover the 0.1.24 lockfile, while the
-checked-in SBOM remains bound to the 0.1.23 artifact. Binary redistribution is
-not cleared. See [PACKAGING.md](PACKAGING.md), [PUBLICATION.md](PUBLICATION.md)
-and [THIRD_PARTY.md](THIRD_PARTY.md) for the verified scope and remaining gaps.
+The current source candidate is 0.1.25. It adds separate explain APIs with
+independent candidate and final-result limits, weighted RRF, and per-source
+ranks/contributions while preserving the existing search signatures. On the
+locked PostgreSQL 16.15 target, fresh installation, four SQL regressions, a
+populated 0.1.24-to-0.1.25 upgrade, importer database checks, runtime-safety
+checks and backup/restore passed on disposable fixtures. PostgreSQL and Lance
+still do not share an atomic commit. Cargo dependencies are unchanged from
+0.1.24. The publisher's fixed RustSec audit passed against a database with
+1,395 advisories: zero vulnerabilities, unsound or yanked findings, with three
+unmaintained-package warnings. The separate publication gate reruns its
+current audit. The checked-in SBOM and full notice bundle remain bound to the
+0.1.23 artifact, so binary redistribution is not cleared. See [PACKAGING.md](PACKAGING.md),
+[PUBLICATION.md](PUBLICATION.md) and [THIRD_PARTY.md](THIRD_PARTY.md) for the
+verified scope and remaining gaps.
 Install the complete consecutive upgrade chain and reconnect existing backends.
 See [PUBLICATION.md](PUBLICATION.md) for current evidence and limitations.
 The initial validation profile is PostgreSQL 16, a single instance, local Lance

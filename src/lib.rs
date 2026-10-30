@@ -126,6 +126,38 @@ fn bounded_search_k(value: i32, name: &str) -> usize {
     value as usize
 }
 
+fn ranking_options(
+    candidate_k: i32,
+    bm25_weight: f64,
+    vector_weight: f64,
+    rrf_k: f64,
+) -> hybrid::RankingOptions {
+    let candidate_k = bounded_search_k(candidate_k, "candidate_k");
+    if !bm25_weight.is_finite()
+        || !(0.0..=1000.0).contains(&bm25_weight)
+        || !vector_weight.is_finite()
+        || !(0.0..=1000.0).contains(&vector_weight)
+        || (bm25_weight == 0.0 && vector_weight == 0.0)
+    {
+        fail(
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "ranking weights must be finite values from 0 through 1000, with at least one source enabled",
+        );
+    }
+    if !rrf_k.is_finite() || !(1.0..=10_000.0).contains(&rrf_k) {
+        fail(
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "rrf_k must be finite and between 1 and 10000",
+        );
+    }
+    hybrid::RankingOptions {
+        candidate_k,
+        bm25_weight,
+        vector_weight,
+        rrf_k,
+    }
+}
+
 fn require_query_text(query: &str) {
     if query.len() > MAX_QUERY_BYTES {
         fail(
@@ -1494,6 +1526,67 @@ fn hybrid_search(
     }
 }
 
+/// Return the final ranking and each source's rank and weighted RRF contribution.
+#[pg_extern]
+fn hybrid_search_explain(
+    query: &str,
+    vector_query: Vec<f32>,
+    lance_uri: &str,
+    k: default!(i32, 10),
+    candidate_k: default!(i32, 100),
+    bm25_weight: default!(f64, 1.0),
+    vector_weight: default!(f64, 1.0),
+    rrf_k: default!(f64, 60.0),
+) -> TableIterator<
+    'static,
+    (
+        name!(doc_id, i64),
+        name!(score, f64),
+        name!(source, String),
+        name!(bm25_rank, Option<i32>),
+        name!(vector_rank, Option<i32>),
+        name!(bm25_contribution, f64),
+        name!(vector_contribution, f64),
+    ),
+> {
+    let k = bounded_search_k(k, "k");
+    let options = ranking_options(candidate_k, bm25_weight, vector_weight, rrf_k);
+    require_query_text(query);
+    require_finite_vector(&vector_query);
+    let authorized_uri = authorize_uri(lance_uri);
+    if k == 0 || options.candidate_k == 0 {
+        return TableIterator::new(std::iter::empty::<(
+            i64,
+            f64,
+            String,
+            Option<i32>,
+            Option<i32>,
+            f64,
+            f64,
+        )>());
+    }
+    let hits = hybrid::search_with_options(
+        query,
+        vector_query,
+        authorized_uri.as_ref(),
+        k,
+        options,
+        None,
+    )
+    .unwrap_or_else(|error| fail_operation("hybrid_search_explain", error));
+    TableIterator::new(hits.into_iter().map(|hit| {
+        (
+            hit.doc_id,
+            hit.score,
+            hit.source,
+            hit.bm25_rank.map(|rank| rank as i32),
+            hit.vector_rank.map(|rank| rank as i32),
+            hit.bm25_contribution,
+            hit.vector_contribution,
+        )
+    }))
+}
+
 #[pg_extern]
 fn hybrid_warc_search(
     query: &str,
@@ -1637,6 +1730,71 @@ fn hybrid_warc_search_filtered(
         )
     });
     TableIterator::new(rows)
+}
+
+/// Filter WARC candidates before ranking and explain the per-source RRF terms.
+/// Join the returned `doc_id` to `pgwarc_lance.warc_record` for metadata.
+#[pg_extern]
+fn hybrid_warc_search_filtered_explain(
+    query: &str,
+    vector_query: Vec<f32>,
+    lance_uri: &str,
+    filters: JsonB,
+    k: default!(i32, 10),
+    candidate_k: default!(i32, 100),
+    bm25_weight: default!(f64, 1.0),
+    vector_weight: default!(f64, 1.0),
+    rrf_k: default!(f64, 60.0),
+) -> TableIterator<
+    'static,
+    (
+        name!(doc_id, i64),
+        name!(score, f64),
+        name!(source, String),
+        name!(bm25_rank, Option<i32>),
+        name!(vector_rank, Option<i32>),
+        name!(bm25_contribution, f64),
+        name!(vector_contribution, f64),
+    ),
+> {
+    let k = bounded_search_k(k, "k");
+    let options = ranking_options(candidate_k, bm25_weight, vector_weight, rrf_k);
+    require_query_text(query);
+    require_finite_vector(&vector_query);
+    let filters = search_filter::SearchFilters::parse(filters);
+    let authorized_uri = authorize_uri(lance_uri);
+    if k == 0 || options.candidate_k == 0 {
+        return TableIterator::new(std::iter::empty::<(
+            i64,
+            f64,
+            String,
+            Option<i32>,
+            Option<i32>,
+            f64,
+            f64,
+        )>());
+    }
+    let eligible_doc_ids = filters.matching_document_ids();
+    let hits = hybrid::search_with_options(
+        query,
+        vector_query,
+        authorized_uri.as_ref(),
+        k,
+        options,
+        Some(eligible_doc_ids),
+    )
+    .unwrap_or_else(|error| fail_operation("hybrid_warc_search_filtered_explain", error));
+    TableIterator::new(hits.into_iter().map(|hit| {
+        (
+            hit.doc_id,
+            hit.score,
+            hit.source,
+            hit.bm25_rank.map(|rank| rank as i32),
+            hit.vector_rank.map(|rank| rank as i32),
+            hit.bm25_contribution,
+            hit.vector_contribution,
+        )
+    }))
 }
 
 #[cfg(test)]

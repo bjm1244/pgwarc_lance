@@ -1,5 +1,43 @@
 # Development log
 
+## Issue #13 — 후보 한도와 설명 가능한 가중 RRF (2026-10-31)
+
+- 구조화 대기열이 선행 issue #12 이후 P1 issue #13을 선택했다. 이 회차는
+  canonical `development`에서 `.codex/config.toml`의 `gpt-6-luna` / `max`를
+  유지해 진행했다. 0.1.25에 별도 `hybrid_search_explain()`과
+  `hybrid_warc_search_filtered_explain()`을 추가하고 기존 검색 함수 서명은
+  유지했다.
+- 새 함수는 최종 `k`와 fusion용 `candidate_k`를 분리한다. 기본값은 10과
+  100, 두 상한은 10,000이다. BM25/vector 가중치와 `rrf_k`를 유한 범위로
+  검증하고, 결과에 각 소스 rank와 `weight / (rrf_k + rank)` contribution을
+  반환한다. 같은 점수는 `doc_id` 오름차순으로 정렬한다. 가중치 0은 소스를
+  호출하지 않고, 활성 소스 실패는 부분 결과를 숨기지 않고 오류로 전달한다.
+  필터 함수는 기존처럼 적격 집합을 먼저 정확 스캔한 뒤 candidate 한도를
+  적용한다. 새 함수는 install/upgrade에서 기본 `PUBLIC EXECUTE`를 회수한다.
+- Rust 1.96.0, cargo-pgrx 0.19.1, Linux x86_64 / PostgreSQL 16.15에서
+  `--locked --offline` 패키지 빌드와 fresh install이 통과했다. 네 SQL 회귀
+  4/4, synthetic 4-record gzip WARC importer의 두 BM25 모드, runtime safety
+  18개 검사, backup/restore 15개 검사, populated 0.1.24→0.1.25 업그레이드가
+  통과했다. SQL fixture는 legacy 함수 parity, 문서화된 기본값, candidate 확장,
+  final-k 분리, 동점 tie-break, 두 소스 기여, 단일 소스, 빈 결과, 활성 소스
+  오류, 잘못된 옵션 및 함수 ACL을 확인한다. Python 전체 525개, 문서 검사,
+  `cargo fmt --all -- --check`, `git diff --check`도 통과했다.
+- 최종 PG16 `.so` SHA-256은
+  `ec88bf4c7cc8afd3171603bdbfd9459b31868005b676a58ffc4399c905cf9636`, Cargo.lock
+  SHA-256은 `227a6c85056478a560259ea20a7993d76df2c2262b6869fac7c6012bc0055079`이다.
+  의존성 버전은 바뀌지 않았다. 최초 빌드에서 lockfile의 crate 버전 불일치를
+  수정했고, 일반 Docker overlay 재시도는 디스크 부족으로 끝났다. 이후 기존
+  고정 builder의 cache를 전용 검증 볼륨으로 복사해 같은 locked/offline 빌드에
+  성공했다. SQL 회귀 초기 실행은 잘못된 DB 지정/오래된 기대 출력을 발견했으며,
+  새 disposable DB에서 fixture를 맞춘 최종 실행은 4/4 통과했다. Publisher와
+  같은 고정 RustSec audit 명령도 1,395개 advisory DB에서 통과했다. 취약·unsound·
+  yanked는 0건이고 unmaintained 경고 3건이 남았다. 실제 게시 직전에는 외부
+  publisher가 current gate를 다시 실행한다.
+- 이 결과는 옵션 수학과 API 동작에 대한 격리 fixture 검증이다. 독립 qrels,
+  적합한 BM25/vector 가중치, 실코퍼스 검색 품질, 성능/SLA, binary 배포 및
+  production 승인은 확인하지 않았다. 산출물 checksum과 시험 로그는 비공개
+  개발 evidence에 두며 직접 push, issue 종료 또는 release를 하지 않았다.
+
 ## Issue #12 — 후보 생성부터 적용하는 조건 검색 (2026-10-30)
 
 - 구조화 대기열이 선택한 P1 issue #12의 C1–C3만 진행했다. 작업은 canonical

@@ -57,6 +57,10 @@ GRANT EXECUTE ON FUNCTION public.hybrid_warc_search(text,real[],text,integer)
     TO pgwarc_reader;
 GRANT EXECUTE ON FUNCTION public.hybrid_warc_search_filtered(text,real[],text,jsonb,integer)
     TO pgwarc_reader;
+GRANT EXECUTE ON FUNCTION
+    public.hybrid_search_explain(text,real[],text,integer,integer,double precision,double precision,double precision),
+    public.hybrid_warc_search_filtered_explain(text,real[],text,jsonb,integer,integer,double precision,double precision,double precision)
+    TO pgwarc_reader;
 GRANT EXECUTE ON FUNCTION public.lance_scan_document_state(text,integer)
     TO pgwarc_reader;
 
@@ -264,6 +268,19 @@ before an exact flat search and disables Lance ANN indices. It returns exact
 eligible vector top-k, with at most 10,000 eligible metadata rows per call; a
 larger set raises `program_limit_exceeded` and must be narrowed. This can scan
 more vectors than ANN and has no scale or latency guarantee yet.
+
+Use `hybrid_warc_search_filtered_explain()` when the caller also needs each
+source's rank and score contribution. It accepts independent `k` and
+`candidate_k` limits plus BM25/vector weights and `rrf_k`; its result joins to
+`pgwarc_lance.warc_record` on `doc_id`. Each source contributes
+`weight / (rrf_k + rank)`. `candidate_k` and `k` are bounded by 10,000, weights
+by 1,000, and `rrf_k` to 1–10,000. A zero weight skips that source; an enabled
+source error fails the query instead of returning an unmarked partial result.
+The source ranks explain the calculation but do not establish which weights
+best serve a corpus. Grant the full function signature explicitly to reader
+roles; extension install and upgrade revoke `PUBLIC EXECUTE`. Filtered vector
+search still scans the exact eligible set (up to 10,000 rows) before applying
+the `candidate_k` fusion limit so stale revisions cannot hide valid results.
 
 Only supplied, allowlisted predicates are added to the metadata query, so its
 parameterized clauses can use the domain, date, format and collection B-tree

@@ -121,6 +121,221 @@ SELECT doc_id, source
 FROM hybrid_search('검색', ARRAY[0,0,0,0]::float4[], '/tmp/pgwarc_lance_hybrid_regress.lance', 2)
 ORDER BY doc_id;
 
+-- Explain mode at candidate_k = k preserves the legacy default ranking.
+DO $$
+BEGIN
+    IF EXISTS (
+        (SELECT doc_id, score, source
+         FROM hybrid_search('검색', ARRAY[0,0,0,0]::float4[],
+                            '/tmp/pgwarc_lance_hybrid_regress.lance', 2)
+         EXCEPT
+         SELECT doc_id, score, source
+         FROM hybrid_search_explain('검색', ARRAY[0,0,0,0]::float4[],
+                                    '/tmp/pgwarc_lance_hybrid_regress.lance',
+                                    2, 2, 1.0, 1.0, 60.0))
+        UNION ALL
+        (SELECT doc_id, score, source
+         FROM hybrid_search_explain('검색', ARRAY[0,0,0,0]::float4[],
+                                    '/tmp/pgwarc_lance_hybrid_regress.lance',
+                                    2, 2, 1.0, 1.0, 60.0)
+         EXCEPT
+         SELECT doc_id, score, source
+         FROM hybrid_search('검색', ARRAY[0,0,0,0]::float4[],
+                            '/tmp/pgwarc_lance_hybrid_regress.lance', 2))
+    ) THEN
+        RAISE EXCEPTION 'explain defaults changed the legacy hybrid ranking';
+    END IF;
+END $$;
+
+-- Equal source ranks use a stable document-ID tie-break. Expanding each
+-- candidate list lets a document ranked second by both sources win fusion,
+-- while final k remains independently limited to one row.
+DO $$
+BEGIN
+    PERFORM bm25_index_document(30, 'rankingneedle identical fixture');
+    PERFORM bm25_index_document(31, 'rankingneedle identical fixture');
+    PERFORM bm25_index_document(32, 'rankingneedle identical fixture');
+END $$;
+INSERT INTO pgwarc_lance.warc_record (doc_id, domain, target_uri)
+VALUES
+    (30, 'ranking.test', 'https://ranking.test/30'),
+    (31, 'ranking.test', 'https://ranking.test/31'),
+    (32, 'ranking.test', 'https://ranking.test/32');
+DO $$
+BEGIN
+    PERFORM lance_create_table('/tmp/pgwarc_lance_ranking_regress.lance', 4, true);
+    PERFORM lance_insert_many(
+        '/tmp/pgwarc_lance_ranking_regress.lance',
+        ARRAY[30,31,32]::bigint[],
+        ARRAY[2,0,0,0, 1,0,0,0, 0,0,0,0]::float4[],
+        4,
+        ARRAY['thirty','thirty-one','thirty-two']::text[]
+    );
+END $$;
+COPY (
+    SELECT doc_id::text || '|' || source || '|' ||
+           coalesce(bm25_rank::text, 'null') || '|' ||
+           coalesce(vector_rank::text, 'null') || '|' ||
+           bm25_contribution::text || '|' || vector_contribution::text
+    FROM hybrid_search_explain(
+        'rankingneedle', ARRAY[0,0,0,0]::float4[],
+        '/tmp/pgwarc_lance_ranking_regress.lance', 1, 1, 1.0, 1.0, 60.0
+    )
+) TO STDOUT;
+COPY (
+    SELECT doc_id::text || '|' || source || '|' || bm25_rank::text || '|' ||
+           vector_rank::text || '|' ||
+           (abs(score - 2.0 / 62.0) < 1e-12)::text || '|' ||
+           (abs(bm25_contribution - 1.0 / 62.0) < 1e-12)::text || '|' ||
+           (abs(vector_contribution - 1.0 / 62.0) < 1e-12)::text
+    FROM hybrid_search_explain(
+        'rankingneedle', ARRAY[0,0,0,0]::float4[],
+        '/tmp/pgwarc_lance_ranking_regress.lance', 1, 2, 1.0, 1.0, 60.0
+    )
+) TO STDOUT;
+COPY (
+    SELECT doc_id::text || '|' ||
+           (abs(score - 0.25) < 1e-12)::text || '|' ||
+           (abs(bm25_contribution - 2.0 / 12.0) < 1e-12)::text || '|' ||
+           (abs(vector_contribution - 1.0 / 12.0) < 1e-12)::text
+    FROM hybrid_search_explain(
+        'rankingneedle', ARRAY[0,0,0,0]::float4[],
+        '/tmp/pgwarc_lance_ranking_regress.lance', 1, 2, 2.0, 1.0, 10.0
+    )
+) TO STDOUT;
+
+-- Omitted options use the documented defaults; candidate_k=0 is a valid
+-- empty candidate pool and does not probe the Lance source.
+DO $$
+BEGIN
+    IF EXISTS (
+        (SELECT doc_id, score, source, bm25_rank, vector_rank,
+                bm25_contribution, vector_contribution
+         FROM hybrid_search_explain(
+            'rankingneedle', ARRAY[0,0,0,0]::float4[],
+            '/tmp/pgwarc_lance_ranking_regress.lance'))
+        EXCEPT
+        (SELECT doc_id, score, source, bm25_rank, vector_rank,
+                bm25_contribution, vector_contribution
+         FROM hybrid_search_explain(
+            'rankingneedle', ARRAY[0,0,0,0]::float4[],
+            '/tmp/pgwarc_lance_ranking_regress.lance',
+            10, 100, 1.0, 1.0, 60.0))
+        UNION ALL
+        (SELECT doc_id, score, source, bm25_rank, vector_rank,
+                bm25_contribution, vector_contribution
+         FROM hybrid_search_explain(
+            'rankingneedle', ARRAY[0,0,0,0]::float4[],
+            '/tmp/pgwarc_lance_ranking_regress.lance',
+            10, 100, 1.0, 1.0, 60.0))
+        EXCEPT
+        (SELECT doc_id, score, source, bm25_rank, vector_rank,
+                bm25_contribution, vector_contribution
+         FROM hybrid_search_explain(
+            'rankingneedle', ARRAY[0,0,0,0]::float4[],
+            '/tmp/pgwarc_lance_ranking_regress.lance'))
+    ) THEN
+        RAISE EXCEPTION 'omitted ranking options differ from their documented defaults';
+    END IF;
+END $$;
+COPY (
+    SELECT count(*)::text
+    FROM hybrid_search_explain(
+        'rankingneedle', ARRAY[0,0,0,0]::float4[],
+        '/tmp/pgwarc_lance_issue13_intentionally_missing.lance',
+        10, 0, 1.0, 1.0, 60.0
+    )
+) TO STDOUT;
+
+-- A zero weight explicitly disables a source; an enabled source error is
+-- surfaced as an error instead of returning an unexplained partial result.
+COPY (
+    SELECT doc_id::text || '|' || source || '|' || bm25_rank::text || '|' ||
+           coalesce(vector_rank::text, 'null')
+    FROM hybrid_search_explain(
+        'rankingneedle', ARRAY[0,0,0,0]::float4[],
+        '/tmp/pgwarc_lance_issue13_intentionally_missing.lance',
+        2, 3, 1.0, 0.0, 60.0
+    )
+) TO STDOUT;
+COPY (
+    SELECT doc_id::text || '|' || source
+    FROM hybrid_search_explain(
+        'no-bm25-vector-only-query', ARRAY[0,0,0,0]::float4[],
+        '/tmp/pgwarc_lance_ranking_regress.lance',
+        2, 3, 0.0, 1.0, 60.0
+    )
+) TO STDOUT;
+COPY (
+    SELECT doc_id::text
+    FROM hybrid_warc_search_filtered_explain(
+        'rankingneedle', ARRAY[0,0,0,0]::float4[],
+        '/tmp/pgwarc_lance_ranking_regress.lance',
+        '{"domain":"ranking.test"}'::jsonb, 1, 2, 1.0, 1.0, 60.0
+    )
+) TO STDOUT;
+COPY (
+    SELECT count(*)::text
+    FROM hybrid_warc_search_filtered_explain(
+        'rankingneedle', ARRAY[0,0,0,0]::float4[],
+        '/tmp/pgwarc_lance_ranking_regress.lance',
+        '{"domain":"missing.test"}'::jsonb, 10, 100, 1.0, 1.0, 60.0
+    )
+) TO STDOUT;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM 1 FROM hybrid_search_explain(
+            'rankingneedle', ARRAY[0,0,0]::float4[],
+            '/tmp/pgwarc_lance_ranking_regress.lance',
+            1, 3, 1.0, 1.0, 60.0
+        );
+        RAISE EXCEPTION 'enabled vector-source failure was hidden';
+    EXCEPTION WHEN internal_error THEN NULL;
+    END;
+    BEGIN
+        PERFORM 1 FROM hybrid_search_explain(
+            'rankingneedle', ARRAY[0,0,0,0]::float4[],
+            '/tmp/pgwarc_lance_ranking_regress.lance', 1, -1, 1.0, 1.0, 60.0
+        );
+        RAISE EXCEPTION 'negative candidate_k was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM 1 FROM hybrid_search_explain(
+            'rankingneedle', ARRAY[0,0,0,0]::float4[],
+            '/tmp/pgwarc_lance_ranking_regress.lance', 1, 10001, 1.0, 1.0, 60.0
+        );
+        RAISE EXCEPTION 'candidate_k above its cap was accepted';
+    EXCEPTION WHEN program_limit_exceeded THEN NULL;
+    END;
+    BEGIN
+        PERFORM 1 FROM hybrid_search_explain(
+            'rankingneedle', ARRAY[0,0,0,0]::float4[],
+            '/tmp/pgwarc_lance_ranking_regress.lance', 1, 3, 0.0, 0.0, 60.0
+        );
+        RAISE EXCEPTION 'both disabled sources were accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM 1 FROM hybrid_search_explain(
+            'rankingneedle', ARRAY[0,0,0,0]::float4[],
+            '/tmp/pgwarc_lance_ranking_regress.lance', 1, 3, 'NaN'::float8, 1.0, 60.0
+        );
+        RAISE EXCEPTION 'non-finite source weight was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM 1 FROM hybrid_search_explain(
+            'rankingneedle', ARRAY[0,0,0,0]::float4[],
+            '/tmp/pgwarc_lance_ranking_regress.lance', 1, 3, 1.0, 1.0, 0.0
+        );
+        RAISE EXCEPTION 'invalid rrf_k was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+END $$;
+
 COPY (
     SELECT doc_id::text || '|' || source || '|' || target_uri || '|' || warc_date || '|' || http_status::text AS result
     FROM hybrid_warc_search('검색', ARRAY[0,0,0,0]::float4[], '/tmp/pgwarc_lance_hybrid_regress.lance', 2)

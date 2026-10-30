@@ -1,10 +1,10 @@
 # pgwarc_lance
 
-> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 개발 후보는 **0.1.24**이다. URI별 document revision, tombstone, ordered vector upsert/delete outbox로 삭제·재생성 중 stale vector 노출을 막으며, 필터 검색은 동일 eligibility 집합을 BM25와 정확 vector 후보 탐색에 적용한다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며 outbox 갱신은 commit 뒤 eventual consistency를 제공한다. 현재 후보의 실제 PG16 검증 범위와 한계는 [PUBLICATION.md](PUBLICATION.md)에 기록한다. 과거 artifact의 설치·upgrade·SQL·importer·runtime·backup 검증 및 artifact-bound 의존성 고지는 [THIRD_PARTY.md](THIRD_PARTY.md)에 보존한다. 검증은 binary 재배포·프로덕션 승인을 뜻하지 않는다.
+> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 개발 후보는 **0.1.25**이다. URI별 document revision, tombstone, ordered vector upsert/delete outbox로 삭제·재생성 중 stale vector 노출을 막으며, 필터 검색은 동일 eligibility 집합을 BM25와 정확 vector 후보 탐색에 적용한다. 새 설명 API는 최종 결과 수와 소스별 후보 수, 가중 RRF 기여를 반환한다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며 outbox 갱신은 commit 뒤 eventual consistency를 제공한다. 현재 후보의 실제 PG16 검증 범위와 한계는 [PUBLICATION.md](PUBLICATION.md)에 기록한다. 과거 artifact의 설치·upgrade·SQL·importer·runtime·backup 검증 및 artifact-bound 의존성 고지는 [THIRD_PARTY.md](THIRD_PARTY.md)에 보존한다. 검증은 binary 재배포·프로덕션 승인을 뜻하지 않는다.
 >
 > 라이선스: Apache-2.0 ([LICENSE](LICENSE)). 기여 전 [CONTRIBUTING.md](CONTRIBUTING.md)·[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)를 참고하라.
 
-이전 0.1.18 실험, 0.1.19 인덱스, 0.1.20–0.1.24 후보의 결과·한계는 [개발 기록](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), [THIRD_PARTY.md](THIRD_PARTY.md)에 기록한다.
+이전 0.1.18 실험, 0.1.19 인덱스, 0.1.20–0.1.25 후보의 결과·한계는 [개발 기록](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), [THIRD_PARTY.md](THIRD_PARTY.md)에 기록한다.
 
 `pgwarc_lance`는 WARC/Web archive 데이터를 PostgreSQL 안에서 검색 가능한 레코드로 다루기 위한 pgrx 기반 확장이다. 현재 구현은 PostgreSQL 테이블 기반 BM25, Lance dataset 기반 벡터 검색, RRF 기반 hybrid search, 그리고 초기 WARC/WARC.GZ SQL importer를 제공한다.
 
@@ -163,8 +163,10 @@ pgwarc_lance/
 | `lance_vector_dim(uri)` | Lance dataset의 vector 차원 반환 |
 | `lance_vector_search(uri, query, k=10)` | Lance nearest-neighbor 검색 |
 | `hybrid_search(query, vector_query, lance_uri, k=10)` | BM25와 벡터 검색을 RRF로 결합 |
+| `hybrid_search_explain(query, vector_query, lance_uri, k=10, candidate_k=100, bm25_weight=1, vector_weight=1, rrf_k=60)` | 별도 후보 한도와 가중 RRF 옵션을 적용하고 소스별 순위·기여를 반환 |
 | `hybrid_warc_search(query, vector_query, lance_uri, k=10)` | hybrid search 결과에 `warc_record` metadata를 결합해 반환 |
 | `hybrid_warc_search_filtered(query, vector_query, lance_uri, filters, k=10)` | 같은 WARC eligibility 조건을 BM25와 정확 vector 후보 생성에 적용 |
+| `hybrid_warc_search_filtered_explain(query, vector_query, lance_uri, filters, k=10, candidate_k=100, bm25_weight=1, vector_weight=1, rrf_k=60)` | 필터 검색에 후보·RRF 옵션을 적용하고 소스별 순위·기여를 반환 |
 | `lance_dataset_versions(uri)` | dataset 버전 목록 `(version, created_ms)` 반환 (오래된 순) |
 | `lance_restore_version(uri, version)` | 지정 버전을 최신 상태로 재승격 (롤백 보상 경로) |
 
@@ -839,7 +841,38 @@ WARC 검색 결과를 바로 소비해야 하면 `hybrid_warc_search()`를 사�
 
 BM25는 eligibility ID 집합으로 먼저 제한하고, Lance는 같은 ID 조건을 prefilter로 적용한 뒤 vector index를 끄고 정확 탐색한다. 따라서 filtered API는 ANN을 쓰지 않으며 필터가 맞는 exact vector top-k를 반환한다. 일치하는 metadata row는 최대 10,000개까지 처리하고, 더 많으면 결과를 자르지 않고 `program_limit_exceeded`를 반환한다. 이 한도와 flat vector scan은 정확성·자원 경계를 위한 개발 후보 정책이며 규모별 SLA로 검증된 값은 아니다. 0.1.23 이하에서 이미 적재된 행의 domain/media type은 upgrade 때 가능한 범위에서 backfill되지만, 과거 HTTP language와 manifest collection은 추론하지 않는다. 해당 필터는 그 메타데이터를 새 importer 적재 또는 원본 기반 재적재로 채운 문서에만 일치한다.
 
-Snippet/highlight는 extension API로 고정하지 않고, 필요하면 `pgwarc_lance.bm25_doc`를 join해 SQL/client layer에서 만든다. Ranking diagnostics는 현재 `source` 컬럼(`bm25`, `vector`, `bm25+vector`)만 안정 계약으로 제공한다.
+기존 검색 함수의 서명과 기본값은 그대로다. 후보 수와 최종 반환 수를 조정하고 출처별 기여를 확인하려면 별도 옵션 API인 `hybrid_search_explain()` 또는 `hybrid_warc_search_filtered_explain()`을 쓴다. 결과는 `doc_id`, 최종 `score`, `source`, 1부터 시작하는 `bm25_rank`/`vector_rank`, 각 소스의 `*_contribution`을 반환한다. 각 기여는 `weight / (rrf_k + rank)`이고 점수는 두 기여의 합이다. 예를 들어:
+
+```sql
+SELECT doc_id, score, source, bm25_rank, vector_rank,
+       bm25_contribution, vector_contribution
+FROM hybrid_search_explain(
+    '검색', ARRAY[0,0,0,0]::float4[], '/tmp/warc.lance',
+    k => 10, candidate_k => 100,
+    bm25_weight => 1.0, vector_weight => 1.0, rrf_k => 60.0
+)
+ORDER BY score DESC, doc_id ASC;
+```
+
+`candidate_k`는 fusion에 넣을 소스별 후보 수이며 0–10,000 범위다. `k`는 소스 후보의 합집합에 적용하는 최종 상한으로 별도로 제한한다. 후보 수가 작으면 실제 반환 행이 `k`보다 적을 수 있다. 두 값의 기본값은 각각 100과 10이다. 기본 BM25/vector 가중치 1/1과 `rrf_k=60`으로 `candidate_k=k`를 주면 기존 RRF 수식과 동일하다. 새 API의 기본 `candidate_k=100`은 legacy `k=10`보다 많은 후보를 fusion에 넣을 수 있다. 필터형 API의 vector 경로는 `candidate_k`를 적용하기 전에 적격 문서 집합(최대 10,000개)을 정확 탐색한다. 가중치는 유한한 0–1,000 값이어야 하고 둘 다 0일 수 없다. 0은 해당 소스를 실행하지 않는 명시적 설정이다. `rrf_k`는 1–10,000 범위이며 기본값 60이다. 결과 동점은 `doc_id` 오름차순으로 결정된다. 활성화한 소스가 실패하면 부분 결과를 성공처럼 돌려주지 않고 호출 전체가 오류가 된다. 함수는 새 설치와 upgrade에서 기본적으로 `PUBLIC EXECUTE`가 회수되므로 사용할 역할에 명시적으로 권한을 준다. 이 옵션을 추가한 사실은 독립 qrels 기반 품질 비교나 권장 가중치 판정을 뜻하지 않는다.
+
+필터형 설명 함수의 Lance 검색은 이전과 같이 전체 적격 집합(최대 10,000개)을 정확 탐색해 stale revision을 거른 뒤 상위 `candidate_k`개를 fusion에 넘긴다. 따라서 `candidate_k`는 fusion 후보 한도이며 filtered exact scan 자체의 fan-out 상한을 대체하지 않는다.
+
+필터 조건을 포함한 설명 결과의 metadata는 `doc_id`로 연결한다:
+
+```sql
+SELECT hit.*, record.target_uri, record.warc_date, record.domain
+FROM hybrid_warc_search_filtered_explain(
+    '검색', ARRAY[0,0,0,0]::float4[], '/tmp/warc.lance',
+    '{"domain":"example.org"}'::jsonb,
+    k => 10, candidate_k => 100,
+    bm25_weight => 1.0, vector_weight => 1.0, rrf_k => 60.0
+) AS hit
+JOIN pgwarc_lance.warc_record AS record USING (doc_id)
+ORDER BY hit.score DESC, hit.doc_id ASC;
+```
+
+Snippet/highlight는 extension API로 고정하지 않고, 필요하면 `pgwarc_lance.bm25_doc`를 join해 SQL/client layer에서 만든다.
 
 ```sql
 SELECT h.doc_id, h.score, h.source, h.target_uri,

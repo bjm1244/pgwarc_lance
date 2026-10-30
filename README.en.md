@@ -82,7 +82,25 @@ trusted roles. Compose requires a password and binds only to `127.0.0.1` by defa
 | `lance_dataset_versions(uri)` | Dataset versions `(version, created_ms)` |
 | `lance_restore_version(uri, version)` | Promote a past version back to the tip |
 | `hybrid_search(query, vector_query, lance_uri, k => 10)` | RRF fusion of BM25 and vector search |
+| `hybrid_search_explain(query, vector_query, lance_uri, k => 10, candidate_k => 100, bm25_weight => 1, vector_weight => 1, rrf_k => 60)` | Options-bearing search with per-source ranks and weighted RRF contributions |
 | `hybrid_warc_search(...)` | Hybrid hits joined with `pgwarc_lance.warc_record` metadata |
+| `hybrid_warc_search_filtered_explain(...)` | Filtered hybrid search with per-source ranks and weighted RRF contributions |
+
+The existing search functions keep their signatures and defaults; the explain
+functions are separate options-bearing APIs. `candidate_k` (default 100)
+limits the per-source candidates admitted to fusion; `k` (default 10)
+independently caps the final union. Both accept values from 0 to 10,000, and a
+candidate pool smaller than `k` can return fewer rows. Filtered vector search
+still scans the eligible set exactly (up to 10,000 IDs) before truncating to
+`candidate_k`.
+Source weights are finite values from 0 to 1,000 with at least one nonzero
+weight; zero disables that source. `rrf_k` is finite and in [1, 10,000]. A
+source contribution is `weight / (rrf_k + rank)`, and `score` is their sum.
+Missing source ranks are NULL, absent contributions are zero, and final ties
+sort by ascending `doc_id`. An enabled source error fails the call instead of
+silently returning a partial hybrid result. The new functions are not granted
+to PUBLIC by default. These controls do not establish a relevance-based
+recommended weighting.
 
 Revision-aware outbox imports require extension 0.1.23 or newer. The revision
 combines document ID, target URI, content type, HTTP status, extracted text
