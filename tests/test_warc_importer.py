@@ -412,6 +412,7 @@ class WarcImporterTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 retention.failed("pdf", ValueError(f"failed doc_id={number}: " + "x" * 1000))
         self.assertEqual(retention.metadata_only, {"pdf": 1000})
+        self.assertEqual(retention.failure_categories, {"pdf_extractor_error": 1000})
         self.assertEqual(len(retention.errors), 16)
         self.assertEqual(retention.omitted_errors, 984)
         self.assertTrue(all(len(message) <= 512 for message in retention.errors))
@@ -433,6 +434,10 @@ class WarcImporterTests(unittest.TestCase):
                     self.assertEqual(data["records"], 2)
                     self.assertEqual(data["vector_rows_expected"], 1)
                     self.assertEqual(data["extraction_retention"]["metadata_only"], {"pdf": 1})
+                    self.assertEqual(
+                        data["extraction_retention"]["failure_categories"],
+                        {"pdf_extractor_error": 1},
+                    )
                     self.assertIn("https://example.test/bad.pdf", sql.read_text())
                     self.assertEqual(sql.read_text().count("SELECT lance_insert_many("), 1)
 

@@ -1,5 +1,52 @@
 # Development log
 
+## Issue #15 — full WARC and extraction safety accounting (2026-10-31)
+
+- The structured queue selected P1 issue #15 after prerequisites #2, #7 and #11;
+  its C1–C3 criteria supersede the previous next-work note. Work stayed on the
+  canonical `development` line with `.codex/config.toml` set to
+  `gpt-6-luna` / `max`. The source WARC was read-only; no production database or
+  Lance dataset was written.
+- The read-only audit now records allowlisted per-format outcomes and checks
+  their sum against every raw WARC record. It reports sanitized extraction
+  failure categories, PDF/DOCX attempts and output bytes, observed oversized
+  ASCII token sizes, and charset replacement observations without claiming
+  semantic recovery. Invalid `Content-Language` remains a failed record with
+  an aggregate reason. README documents these manifest fields and their limits.
+- A scan from the beginning through EOF of the 938,695,574-byte Common Crawl
+  2026-39 segment (SHA-256
+  `4b6b55dc25afdb8ef9bb0e48213faa73cf07756f195b0863ba2693638bf784f8`)
+  accounted for all 66,190 records: 21,806 imported, 40 metadata-only, 29
+  failed, and 44,315 policy-skipped. Format subtotals also balance: HTML
+  21,511 imported / 187 skipped / 4 failed; text 111 imported / 1 skipped;
+  PDF 181 imported / 40 metadata-only; DOCX 3 imported; unsupported 25 failed;
+  and 44,127 non-document WARC records skipped. The 29 failures remain
+  explicit: 25 unsupported MIME and 4 invalid language tags. The 40 PDF
+  metadata-only records comprise 18 extractor errors and 22 with no text where
+  OCR or manual review is needed; neither category claims OCR success. Poppler
+  24.02.0 extracted 181 of 221 PDFs; the bounded DOCX extractor handled all 3
+  observed DOCX records. Four documents had eight ASCII terms over the 2,000
+  byte storage-key threshold (maximum 7,886 bytes), below the existing
+  2,500,000-byte supported search-term ceiling. One scoped charset replacement
+  observed 65 U+FFFD codepoints; their intended meaning was not verified.
+- On a private slice of nine actual records from the same WARC, two checkpoint
+  passes each accounted for all nine and produced identical SQL and fingerprints.
+  Pass two reused the three ready and one skipped record, retried only five
+  failed records, and retained their failure state and error hashes. SQL was
+  generated but not executed. A separate full-segment durable importer
+  checkpoint attempt was stopped after about seven minutes at record 1,034 of
+  66,190; it remains partial and is not completion evidence. This run therefore
+  verifies full extraction/accounting through the read-only audit and retry
+  behavior on actual records, not a full durable import or PostgreSQL ingest.
+- Targeted and full Python regression suites, Python compilation, documentation
+  checks and `git diff --check` passed. Only Python, tests and README changed;
+  native inputs are unchanged, so the existing immutable PG16 validation receipt
+  is reusable without rewriting it. Independent relevance, OCR correctness,
+  full-segment durable checkpointing/import into PostgreSQL, production SLA and
+  production approval remain unverified. Private records and command evidence
+  remain outside this repository; direct push and issue closure are left to the
+  reviewed publication process.
+
 ## Issue #14 — 출처가 있는 snippet·안전한 highlight (2026-10-31, complete)
 
 - 구조화 대기열이 선행 issue #11과 #13 뒤 P1 issue #14를 선택해 C1–C3를

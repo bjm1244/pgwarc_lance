@@ -803,6 +803,17 @@ Embedding command 설정 checksum은 command 문자열을 기록하고, embeddin
 완료될 수 있으며 이때 `import_acceptable`은 `false`다. 결과는 입력 경로를 포함할 수 있어
 mode-0700 private 디렉터리에 mode-0600 파일로 저장한다.
 
+Manifest의 `format_outcomes`는 HTML, text, PDF, DOCX, unsupported, unknown,
+non-document WARC 형식별로 imported, metadata-only, failed, policy-skipped 수를
+대사한다. 형식 값은 allowlist label만 기록하며 응답의 원래 Content-Type 전체는
+저장하지 않는다. `reasons.metadata_only_extraction_failures`는 추출 한도·timeout·
+기타 extractor 오류를 원문 메시지 없이 집계한다. 텍스트가 없는 PDF는
+`pdf_no_text_ocr_or_manual_review`로 기록된다. 이는 OCR 성공이나 OCR 가능성을
+뜻하지 않으며, OCR 또는 수동 검토가 필요한 문서 수를 나타낸다. PDF/DOCX extractor
+설정에는 실제 시도·추출 수와 출력 byte 수가 남는다. Format별 outcome 합도 raw record
+수와 일치해야 manifest가 `accounted`가 된다. 잘못된 `Content-Language` 값은
+`invalid_content_language` 실패로 보존하며 값을 임의로 수정하거나 무시하지 않는다.
+
 `warc_importer.py --audit-manifest-json <path>`는 같은 전체 입력 preflight를 SQL 생성 전에
 실행한다. 입력이 끝까지 대사되지 않거나 record 실패가 있으면 manifest를 남기고 SQL 실행을
 중단한다. 성공한 preflight 뒤 실제 import record 수와 입력 file checksum도 다시 확인한다.

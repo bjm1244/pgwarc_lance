@@ -73,6 +73,12 @@ def failure_reason(error: Exception) -> str:
         return "unknown_charset"
     if "charset" in message or "decode" in message or isinstance(error, UnicodeError):
         return "text_decode_error"
+    if "content-language exceeds" in message:
+        return "content_language_size_limit"
+    if "content-language has more than" in message:
+        return "content_language_count_limit"
+    if "content-language contains an invalid" in message:
+        return "invalid_content_language"
     if "chunk" in message:
         return "invalid_http_chunking"
     if "gzip" in message:
@@ -88,6 +94,28 @@ def failure_reason(error: Exception) -> str:
     if isinstance(error, OSError):
         return "record_io_error"
     return "record_conversion_error"
+
+
+def record_format(record: wi.WarcRecord, record_type: str) -> str:
+    """Return a bounded format label without retaining untrusted MIME values."""
+    if record_type not in {"response", "resource"}:
+        return "non_document_warc"
+    try:
+        status_line, headers, body = wi.parse_http_headers(record.payload)
+    except Exception:
+        return "unknown"
+    content_type = headers.get("content-type") or record.headers.get("content-type")
+    mime = wi.media_type(content_type)
+    payload = body if status_line else record.payload
+    if mime == "application/pdf" or b"%PDF-" in payload[:1024]:
+        return "pdf"
+    if mime == wi.DOCX_MIME:
+        return "docx"
+    if content_type and "html" in content_type.lower():
+        return "html"
+    if not mime or mime.startswith("text/") or mime in wi.TEXT_APPLICATION_MIME_TYPES or mime.endswith(("+xml", "+json")):
+        return "text"
+    return "unsupported"
 
 
 def scan_warcs(
@@ -124,6 +152,7 @@ def scan_warcs(
     raw_records = 0
     record_types: collections.Counter[str] = collections.Counter()
     outcomes: collections.Counter[str] = collections.Counter()
+    format_outcomes: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
     skipped: collections.Counter[str] = collections.Counter()
     failed: collections.Counter[str] = collections.Counter()
     metadata_only: collections.Counter[str] = collections.Counter()
@@ -134,6 +163,9 @@ def scan_warcs(
     posting_rows: list[tuple[int, int, int, str]] = []
     total_postings = 0
     total_tf = 0
+    oversized_ascii_term_records = 0
+    oversized_ascii_terms = 0
+    max_oversized_ascii_term_bytes = 0
     complete_to_eof = True
 
     active_retention = retention or wi.ExtractionRetention(mode="fail")
@@ -143,9 +175,11 @@ def scan_warcs(
                 raw_records += 1
                 record_type = raw.headers.get("warc-type", "").strip().lower()
                 record_types[record_type or "unspecified"] += 1
+                format_name = record_format(raw, record_type)
                 if record_type not in {"response", "resource"}:
                     outcomes["policy_skipped"] += 1
                     skipped["non_document_warc_type"] += 1
+                    format_outcomes[format_name]["policy_skipped"] += 1
                     continue
 
                 previous_metadata_counts = dict(active_retention.metadata_only)
@@ -161,6 +195,7 @@ def scan_warcs(
                     if record is None:
                         outcomes["policy_skipped"] += 1
                         skipped["empty_extracted_text"] += 1
+                        format_outcomes[format_name]["policy_skipped"] += 1
                         continue
                     if (
                         record.extraction_status != "metadata_only"
@@ -168,10 +203,17 @@ def scan_warcs(
                     ):
                         outcomes["policy_skipped"] += 1
                         skipped["below_min_text_chars"] += 1
+                        format_outcomes[format_name]["policy_skipped"] += 1
                         continue
+                    record_id = raw.headers.get("warc-record-id")
+                    if charset_policy is not None and record_id in charset_policy.record_overrides:
+                        charset_policy.record_used[record_id] = (
+                            charset_policy.record_used.get(record_id, 0) + 1
+                        )
                     if record.doc_id in seen_doc_ids:
                         outcomes["failed"] += 1
                         failed["duplicate_doc_id"] += 1
+                        format_outcomes[format_name]["failed"] += 1
                         continue
 
                     metadata_reason: str | None = None
@@ -186,7 +228,12 @@ def scan_warcs(
                         )
                         frequencies: dict[str, int] = {}
                     else:
-                        wi.validate_bm25_terms(record)
+                        oversized_count, longest_term_bytes = wi.validate_bm25_terms(record)
+                        oversized_ascii_term_records += int(oversized_count > 0)
+                        oversized_ascii_terms += oversized_count
+                        max_oversized_ascii_term_bytes = max(
+                            max_oversized_ascii_term_bytes, longest_term_bytes
+                        )
                         frequencies = wi.bm25_term_frequencies(record.text)
 
                     content = record.text.encode("utf-8")
@@ -220,8 +267,10 @@ def scan_warcs(
                     if metadata_reason is not None:
                         outcomes["metadata_only"] += 1
                         metadata_only[metadata_reason] += 1
+                        format_outcomes[format_name]["metadata_only"] += 1
                     else:
                         outcomes["imported"] += 1
+                        format_outcomes[format_name]["imported"] += 1
                     posting_rows.append(
                         (
                             record.doc_id,
@@ -235,6 +284,7 @@ def scan_warcs(
                 except Exception as error:
                     outcomes["failed"] += 1
                     failed[failure_reason(error)] += 1
+                    format_outcomes[format_name]["failed"] += 1
         except Exception as error:
             complete_to_eof = False
             input_errors[failure_reason(error)] += 1
@@ -243,6 +293,8 @@ def scan_warcs(
     category_total = sum(outcomes.values())
     accounting_balanced = raw_records == category_total
     record_type_total = sum(record_types.values())
+    format_outcome_total = sum(sum(counts.values()) for counts in format_outcomes.values())
+    format_outcomes_balanced = format_outcome_total == raw_records
     skipped_total = sum(skipped.values())
     failed_total = sum(failed.values())
     metadata_only_total = sum(metadata_only.values())
@@ -277,8 +329,24 @@ def scan_warcs(
         "charset_record_overrides": dict(sorted((charset_policy.record_overrides if charset_policy else {}).items())),
         "pdf_extractor": pdf_extractor.summary() if pdf_extractor else None,
         "docx_extractor_enabled": docx_extractor is not None,
+        "docx_extractor": docx_extractor.summary() if docx_extractor else None,
         "import": import_settings or {"mode": "read_only_audit"},
     }
+    charset_observations = None
+    if charset_policy is not None:
+        charset_observations = {
+            "label_overrides_errors": "strict",
+            "label_override_records": dict(sorted(charset_policy.used.items())),
+            "record_override_errors": "replace",
+            "record_override_records": sum(charset_policy.record_used.values()),
+            "record_override_u_fffd_codepoints_observed": sum(
+                charset_policy.record_replacement_characters.values()
+            ),
+            "record_override_observations_by_id_sha256": {
+                hashlib.sha256(record_id.encode("utf-8")).hexdigest(): count
+                for record_id, count in sorted(charset_policy.record_replacement_characters.items())
+            },
+        }
     source_files = {
         "audit_tool_sha256": sha256_file(Path(__file__).resolve()),
         "importer_sha256": sha256_file(Path(wi.__file__).resolve()),
@@ -293,7 +361,7 @@ def scan_warcs(
         "schema_version": SCHEMA_VERSION,
         "status": (
             "accounted"
-            if complete_to_eof and accounting_balanced and reasons_balanced
+            if complete_to_eof and accounting_balanced and reasons_balanced and format_outcomes_balanced
             else "incomplete"
         ),
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -301,6 +369,7 @@ def scan_warcs(
         "scope": "read-only WARC parsing, extraction and BM25 fingerprint; no SQL or Lance writes",
         "inputs": inputs,
         "settings": actual_settings,
+        "charset_observations": charset_observations,
         "source_files": source_files,
         "checksums": {
             "configuration_sha256": config_checksum,
@@ -314,6 +383,10 @@ def scan_warcs(
             "platform": platform.platform(),
         },
         "record_types": dict(sorted(record_types.items())),
+        "format_outcomes": {
+            name: dict(sorted(counts.items()))
+            for name, counts in sorted(format_outcomes.items())
+        },
         "outcomes": {
             "raw": raw_records,
             "imported": outcomes["imported"],
@@ -323,6 +396,7 @@ def scan_warcs(
         },
         "reasons": {
             "metadata_only": dict(sorted(metadata_only.items())),
+            "metadata_only_extraction_failures": dict(sorted(active_retention.failure_categories.items())),
             "failed": dict(sorted(failed.items())),
             "policy_skipped": dict(sorted(skipped.items())),
             "input_scan_errors": dict(sorted(input_errors.items())),
@@ -332,10 +406,18 @@ def scan_warcs(
             "posting_count": total_postings,
             "total_tf": total_tf,
         },
+        "oversized_ascii_terms": {
+            "records": oversized_ascii_term_records,
+            "terms": oversized_ascii_terms,
+            "max_term_bytes": max_oversized_ascii_term_bytes,
+            "storage_key_policy_threshold_bytes": wi.MAX_BM25_TERM_BYTES,
+            "maximum_supported_search_term_bytes": wi.MAX_SEARCHABLE_TERM_BYTES,
+        },
         "accounting": {
             "complete_to_eof": complete_to_eof,
             "record_type_count_matches_raw": record_type_total == raw_records,
             "outcomes_sum_to_raw": accounting_balanced,
+            "format_outcomes_sum_to_raw": format_outcomes_balanced,
             "reason_counts_match_outcomes": reasons_balanced,
             "import_acceptable": (
                 complete_to_eof

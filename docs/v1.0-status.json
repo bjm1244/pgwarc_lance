@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-31T04:39:14.842806+00:00",
+  "updated_at": "2026-10-31T11:02:32.928473+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -221,6 +221,7 @@
       ],
       "status": "done",
       "summary": "검색 설명 결과에 안전한 client-side snippet/highlight와 chunk 출처 offset을 연결하고 README 예제와 회귀를 추가했다.",
+      "public_commit": "ee4ecb3a4bdf322f7fe6c2cb69465fd98861ea4b",
       "criteria_passed": [
         "C1",
         "C2",
@@ -237,8 +238,13 @@
         7,
         11
       ],
-      "status": "queued",
-      "criteria_passed": []
+      "status": "done",
+      "summary": "실제 Common Crawl segment를 처음부터 EOF까지 read-only 추출 감사로 처리해 66,190건의 형식별·결과별 대사를 맞췄다. 실패 29건과 PDF metadata-only 40건을 보존·분류했고, 실제 WARC 9건으로 checkpoint 재실행을 검증했다. 전체 segment의 durable importer checkpoint는 1,034건에서 시간 한도로 중단되어 partial이며 PostgreSQL 적재는 수행하지 않았다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
     },
     {
       "number": 16,

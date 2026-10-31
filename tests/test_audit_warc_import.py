@@ -49,15 +49,24 @@ class FailingPdfExtractor:
         return {"enabled": True, "version": "fixture-pdftotext"}
 
 
+class NoTextPdfExtractor:
+    def extract(self, body, max_output_bytes, record_key=None):
+        raise ValueError("pdftotext returned no text; OCR or manual review is required")
+
+    def summary(self):
+        return {"enabled": True, "version": "fixture-pdftotext"}
+
+
 class AuditWarcImportTests(unittest.TestCase):
     def write_fixture(self, directory: Path) -> Path:
         records = [
             make_warc_record("warcinfo", b"metadata", record_id="<urn:uuid:warcinfo>"),
             make_warc_record(
                 "response",
-                response(b"searchable words"),
+                response(b"<p>searchable words</p>", "text/html; charset=utf-8"),
                 target="https://example.test/imported",
                 record_id="<urn:uuid:imported>",
+                content_type="text/html; charset=utf-8",
             ),
             make_warc_record(
                 "response",
@@ -72,6 +81,13 @@ class AuditWarcImportTests(unittest.TestCase):
                 target="https://example.test/failed",
                 record_id="<urn:uuid:failed>",
                 content_type="application/zip",
+            ),
+            make_warc_record(
+                "response",
+                response(b"binary", wi.DOCX_MIME),
+                target="https://example.test/docx-unconfigured",
+                record_id="<urn:uuid:docx-unconfigured>",
+                content_type=wi.DOCX_MIME,
             ),
             make_warc_record(
                 "response",
@@ -102,17 +118,124 @@ class AuditWarcImportTests(unittest.TestCase):
 
         self.assertEqual(
             manifest["outcomes"],
-            {"raw": 6, "imported": 1, "metadata_only": 1, "failed": 1, "policy_skipped": 3},
+            {"raw": 7, "imported": 1, "metadata_only": 1, "failed": 2, "policy_skipped": 3},
         )
-        self.assertEqual(manifest["reasons"]["failed"], {"unsupported_mime_type": 1})
+        self.assertEqual(
+            manifest["reasons"]["failed"],
+            {"docx_extractor_not_configured": 1, "unsupported_mime_type": 1},
+        )
         self.assertEqual(manifest["reasons"]["metadata_only"], {"pdf": 1})
+        self.assertEqual(
+            manifest["reasons"]["metadata_only_extraction_failures"],
+            {"pdf_extractor_error": 1},
+        )
+        self.assertEqual(
+            manifest["format_outcomes"],
+            {
+                "docx": {"failed": 1},
+                "html": {"imported": 1},
+                "non_document_warc": {"policy_skipped": 1},
+                "pdf": {"metadata_only": 1},
+                "text": {"policy_skipped": 2},
+                "unsupported": {"failed": 1},
+            },
+        )
         self.assertEqual(
             manifest["reasons"]["policy_skipped"],
             {"below_min_text_chars": 1, "empty_extracted_text": 1, "non_document_warc_type": 1},
         )
         self.assertTrue(manifest["accounting"]["outcomes_sum_to_raw"])
+        self.assertTrue(manifest["accounting"]["format_outcomes_sum_to_raw"])
         self.assertTrue(manifest["accounting"]["reason_counts_match_outcomes"])
         self.assertTrue(manifest["accounting"]["record_type_count_matches_raw"])
+
+    def test_no_text_pdf_is_reported_as_ocr_or_manual_review_needed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = self.write_fixture(Path(temporary))
+            manifest = audit.scan_warcs(
+                [source],
+                pdf_extractor=NoTextPdfExtractor(),
+                retention=wi.ExtractionRetention(mode="metadata-only"),
+            )
+
+        self.assertEqual(
+            manifest["reasons"]["metadata_only_extraction_failures"],
+            {"pdf_no_text_ocr_or_manual_review": 1},
+        )
+
+    def test_invalid_content_language_is_a_failed_record_with_safe_reason(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "invalid-language.warc"
+            payload = (
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                b"Content-Language: en--us\r\n\r\n<html>body</html>"
+            )
+            source.write_bytes(
+                make_warc_record(
+                    "response",
+                    payload,
+                    target="https://example.test/invalid-language",
+                    record_id="<urn:uuid:invalid-language>",
+                    content_type="text/html; charset=utf-8",
+                )
+            )
+            manifest = audit.scan_warcs([source])
+
+        self.assertEqual(manifest["outcomes"]["failed"], 1)
+        self.assertEqual(manifest["reasons"]["failed"], {"invalid_content_language": 1})
+        self.assertEqual(manifest["format_outcomes"]["html"], {"failed": 1})
+        self.assertFalse(manifest["accounting"]["import_acceptable"])
+
+    def test_record_scoped_charset_observation_counts_u_fffd_without_claiming_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "charset.warc"
+            source.write_bytes(
+                make_warc_record(
+                    "response",
+                    response(b"valid \xff ending", "text/plain; charset=uft-8"),
+                    target="https://example.test/charset",
+                    record_id="<urn:uuid:charset>",
+                    content_type="text/plain; charset=uft-8",
+                )
+            )
+            policy = wi.CharsetPolicy.from_options(
+                [], ["<urn:uuid:charset>=utf-8"]
+            )
+            manifest = audit.scan_warcs([source], charset_policy=policy)
+
+        self.assertEqual(manifest["charset_observations"]["record_override_errors"], "replace")
+        self.assertEqual(manifest["charset_observations"]["record_override_records"], 1)
+        self.assertEqual(
+            manifest["charset_observations"]["record_override_u_fffd_codepoints_observed"],
+            1,
+        )
+        self.assertEqual(manifest["oversized_ascii_terms"]["records"], 0)
+
+    def test_manifest_reports_actual_long_term_storage_and_limit_summary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "long-term.warc"
+            source.write_bytes(
+                make_warc_record(
+                    "response",
+                    response(b"z" * 2001),
+                    target="https://example.test/long-term",
+                    record_id="<urn:uuid:long-term>",
+                )
+            )
+            manifest = audit.scan_warcs([source])
+
+        self.assertEqual(
+            manifest["oversized_ascii_terms"],
+            {
+                "records": 1,
+                "terms": 1,
+                "max_term_bytes": 2001,
+                "storage_key_policy_threshold_bytes": wi.MAX_BM25_TERM_BYTES,
+                "maximum_supported_search_term_bytes": wi.MAX_SEARCHABLE_TERM_BYTES,
+            },
+        )
 
     def test_same_actual_input_has_repeatable_document_posting_and_tf_fingerprints(self):
         with tempfile.TemporaryDirectory() as temporary:

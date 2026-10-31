@@ -712,6 +712,7 @@ class _MetadataOnlyExtraction(ValueError):
 class ExtractionRetention:
     mode: str = "fail"
     metadata_only: dict[str, int] = dataclasses.field(default_factory=dict)
+    failure_categories: dict[str, int] = dataclasses.field(default_factory=dict)
     errors: dict[str, int] = dataclasses.field(default_factory=dict)
     omitted_errors: int = 0
 
@@ -719,6 +720,16 @@ class ExtractionRetention:
         if self.mode != "metadata-only":
             raise error
         self.metadata_only[kind] = self.metadata_only.get(kind, 0) + 1
+        message_lower = str(error).lower()
+        if kind == "pdf" and "no text" in message_lower and "ocr" in message_lower:
+            category = "pdf_no_text_ocr_or_manual_review"
+        elif "timed out" in message_lower:
+            category = f"{kind}_timeout"
+        elif "exceed" in message_lower or "limit" in message_lower:
+            category = f"{kind}_output_limit"
+        else:
+            category = f"{kind}_extractor_error"
+        self.failure_categories[category] = self.failure_categories.get(category, 0) + 1
         message = str(error)[:512]
         if message in self.errors or len(self.errors) < 16:
             self.errors[message] = self.errors.get(message, 0) + 1
@@ -2348,7 +2359,13 @@ def run_spooled_import(args: argparse.Namespace, lance_mode: str) -> int:
                 "charset_record_override_replacement_characters": charset_policy.record_replacement_characters,
                 "pdf_extraction": pdf_extractor.summary() if pdf_extractor else {"enabled": False, "attempted": 0, "extracted": 0, "output_bytes": 0},
                 "docx_extraction": docx_extractor.summary() if docx_extractor else {"enabled": False, "attempted": 0, "extracted": 0, "output_bytes": 0},
-                "extraction_retention": {"mode": retention.mode, "metadata_only": retention.metadata_only, "errors": retention.errors, "omitted_errors": retention.omitted_errors},
+                "extraction_retention": {
+                    "mode": retention.mode,
+                    "metadata_only": retention.metadata_only,
+                    "failure_categories": retention.failure_categories,
+                    "errors": retention.errors,
+                    "omitted_errors": retention.omitted_errors,
+                },
                 "vector_rows_expected": (len(vectors) if vectors is not None else spool.db.execute("SELECT count(*) FROM records WHERE text_available=1").fetchone()[0] if args.lance_uri and not args.no_hash_vectors else 0),
                 "records": spool.count,
                 "source_documents": spool.db.execute(
