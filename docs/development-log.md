@@ -1,5 +1,41 @@
 # Development log
 
+## Issue #14 — 출처가 있는 snippet·안전한 highlight (2026-10-31, complete)
+
+- 구조화 대기열이 선행 issue #11과 #13 뒤 P1 issue #14를 선택해 C1–C3를
+  진행했다. 작업은 깨끗한 canonical `development`에서 `.codex/config.toml`의
+  `gpt-6-luna` / `max`를 유지했다. 변경은 client helper, README 사용 예제, 기존
+  chunk DB 회귀에 한정했고 Rust/SQL native 입력은 수정하지 않았다.
+- `tools/search_snippets.py`는 선택된 chunk body에서 bounded excerpt, 원 chunk의
+  Unicode codepoint offset, tokenizer matched span과 HTML-safe `<mark>` fragment를
+  반환한다. 입력 query token은 PostgreSQL `tokenize_korean()`에서 받도록 예제에
+  연결했다. BM25 CJK bigram/ASCII 경계와 같은 span 규칙을 유지하고 1–2,000자 출력,
+  1,000,000자 입력 상한, no-match, query 없는 vector hit을 명시적으로 처리한다.
+  HTML은 client에서만 escape/render하며 RRF source contribution이 개별 span의
+  점수 기여를 뜻하지 않는다고 문서화했다. chunk `char_start`와 `parent_doc_id`,
+  chunk index/version을 이용해 부모 문서 위치로 이동한다.
+- 재사용한 immutable 0.1.25 artifact (`ec88bf4c…9636`)을 설치한 격리·networkless
+  PostgreSQL 16.15 회귀에서 설명 검색의 score가 BM25/vector contribution 합과
+  일치하고, WARC URL/date, source rank, chunk 위치/version, body snippet 및 matched
+  span이 부모 본문으로 되돌아감을 확인했다. Python 전체 535개와 snippet 집중 10개,
+  `make check-docs`, `git diff --check`가 통과했다. SHA-256, 명령 로그와 JSON 결과는
+  비공개 issue #14 validation run에 둔다.
+- 첫 PG16 시도는 empty filter object를 거부하는 검색 함수 계약(`at least one
+  search filter is required`)을 확인해 최소 예제를 `hybrid_search_explain()`으로
+  고쳤다. 다음 실행에서 timestamp `Z` 표기와 PostgreSQL `+00:00` 표기를 문자열로
+  같다고 본 점, underscore로 분리되는 두 검색 token을 한 span으로 예상한 점을
+  고쳤다. 최종 DB 회귀는 통과했으며 앞선 시도와 실패 로그도 같은 비공개 run에
+  보존했다.
+- 최종 `development` source의 `git archive`를 `automation/publish.py`의
+  `inspect()`와 `native_fingerprint()`에 넣어 대조했다.
+  결과 `61651cdab14f3740dc80e1aa86c995964be199674ea159ce626a2082eb8baccd`가 기존
+  PG16 영수증과 일치했고 artifact, Cargo.lock checksum도 맞았으며 영수증의 일곱
+  native 검사 항목이 모두 `true`였다. 따라서 기존 locked build/fresh install/SQL/
+  importer/runtime/populated upgrade/backup-restore를 그대로 재사용한다. 이번 회귀는
+  native artifact build나 populated upgrade를 다시 수행한 것이 아니다. browser UI,
+  independent qrels, 검색 품질/production SLA, binary 배포와 production 승인은
+  검증하지 않았다. 공개 이력/이슈 종료는 별도 publisher gate에 맡긴다.
+
 ## Issue #13 — 후보 한도와 설명 가능한 가중 RRF (2026-10-31)
 
 - 구조화 대기열이 선행 issue #12 이후 P1 issue #13을 선택했다. 이 회차는

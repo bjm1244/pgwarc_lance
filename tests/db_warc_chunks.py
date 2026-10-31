@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
 import math
@@ -20,6 +21,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import check_release_artifacts
 import smoke_release_artifacts
 import warc_importer
+import search_snippets
 
 
 def response(uri: str, date: str, text: str) -> bytes:
@@ -251,21 +253,48 @@ GRANT EXECUTE ON FUNCTION public.bm25_index_document(bigint,text),
         checks["document_update_outbox_jobs_drained"] = deleted_count >= 2
 
         result = sql(
-            f"SELECT h.doc_id || '|' || h.target_uri || '|' || h.warc_date || '|' || "
-            "r.parent_doc_id || '|' || r.chunk_index || '|' || r.char_start || '|' || "
-            "r.char_end || '|' || r.parent_text_len || '|' || r.chunking_version "
-            f"FROM hybrid_warc_search('updated_marker',ARRAY[1,0,0,0]::real[],{warc_importer.sql_string(uri)},5) h "
-            "JOIN pgwarc_lance.warc_record r ON r.doc_id=h.doc_id ORDER BY r.chunk_index LIMIT 1;"
+            "SELECT row_to_json(hit) FROM ("
+            "SELECT h.doc_id, h.score, h.source, h.bm25_rank, h.vector_rank, "
+            "h.bm25_contribution, h.vector_contribution, r.target_uri, r.warc_date, "
+            "r.parent_doc_id, r.chunk_index, r.char_start, r.char_end, "
+            "r.parent_text_len, r.chunking_version, tokenize_korean('updated_marker') AS query_terms, "
+            "body.content "
+            f"FROM hybrid_search_explain('updated_marker',ARRAY[1,0,0,0]::real[],{warc_importer.sql_string(uri)},5,100) h "
+            "JOIN pgwarc_lance.warc_record r ON r.doc_id=h.doc_id "
+            "JOIN pgwarc_lance.bm25_doc body ON body.doc_id=h.doc_id "
+            "ORDER BY h.score DESC, h.doc_id ASC LIMIT 1) AS hit;"
         )
-        fields = result.split("|")
-        if len(fields) != 9 or fields[1] != url or fields[2] != date:
-            raise AssertionError(f"search provenance was incomplete: {result!r}")
-        if int(fields[5]) < 0 or int(fields[6]) <= int(fields[5]) or int(fields[7]) != len(" ".join(shorter_text.split())):
-            raise AssertionError(f"search chunk location was invalid: {result!r}")
-        if fields[8] != "char-window-v1":
-            raise AssertionError(f"search chunk version was lost: {result!r}")
+        hit = json.loads(result)
+        actual_date = datetime.fromisoformat(hit["warc_date"].replace("Z", "+00:00"))
+        expected_date = datetime.fromisoformat(date.replace("Z", "+00:00"))
+        if hit["target_uri"] != url or actual_date != expected_date:
+            raise AssertionError(f"search provenance was incomplete: {hit!r}")
+        if hit["char_start"] < 0 or hit["char_end"] <= hit["char_start"]:
+            raise AssertionError(f"search chunk location was invalid: {hit!r}")
+        if hit["parent_text_len"] != len(" ".join(shorter_text.split())):
+            raise AssertionError(f"parent text length was invalid: {hit!r}")
+        if hit["chunking_version"] != "char-window-v1":
+            raise AssertionError(f"search chunk version was lost: {hit!r}")
+        if hit["bm25_rank"] is None or hit["source"] not in {"bm25", "bm25+vector"}:
+            raise AssertionError(f"search rank/source explanation was incomplete: {hit!r}")
+        if abs(hit["score"] - hit["bm25_contribution"] - hit["vector_contribution"]) > 1e-12:
+            raise AssertionError(f"search score did not equal its source contributions: {hit!r}")
+        snippet = search_snippets.build_snippet(hit["content"], hit["query_terms"], max_chars=80)
+        if len(snippet.text) > 80 or not snippet.matched_spans:
+            raise AssertionError(f"bounded matched snippet was incomplete: {snippet!r}")
+        normalized_parent = " ".join(shorter_text.split())
+        for span in snippet.matched_spans:
+            matched_text = hit["content"][span.start:span.end]
+            if matched_text not in hit["query_terms"]:
+                raise AssertionError(f"client matched span did not select its tokenizer term: {span!r}")
+            parent_start = hit["char_start"] + span.start
+            parent_end = hit["char_start"] + span.end
+            if normalized_parent[parent_start:parent_end] != matched_text:
+                raise AssertionError(f"chunk span did not navigate to the parent text: {span!r}")
         checks["hybrid_search_returns_url_capture_and_chunk_location"] = True
-        checks["unknown_pdf_page_is_not_invented"] = "pdf_page" not in result.lower()
+        checks["client_search_returns_score_source_and_contributions"] = True
+        checks["client_snippet_matched_span_maps_to_parent_document"] = True
+        checks["unknown_pdf_page_is_not_invented"] = "pdf_page" not in json.dumps(hit).lower()
 
         parent_id = update_records[0].parent_doc_id
         subprocess.run(writer_psql, input=f"""

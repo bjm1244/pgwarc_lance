@@ -872,24 +872,59 @@ JOIN pgwarc_lance.warc_record AS record USING (doc_id)
 ORDER BY hit.score DESC, hit.doc_id ASC;
 ```
 
-Snippet/highlight는 extension API로 고정하지 않고, 필요하면 `pgwarc_lance.bm25_doc`를 join해 SQL/client layer에서 만든다.
+Snippet/highlight는 extension 안에서 HTML을 렌더링하지 않는다. 설명 검색 결과를
+`doc_id`로 `warc_record`와 `bm25_doc`에 연결하고, 선택한 chunk의 본문만 client로
+가져온다. PostgreSQL의 `tokenize_korean(query)` 결과를 client helper에 전달하면
+기본 BM25와 같은 검색어 token 경계로 snippet의 matched span을 계산한다.
 
 ```sql
-SELECT h.doc_id, h.score, h.source, h.target_uri,
-       substring(d.content from 1 for 240) AS snippet
-FROM hybrid_warc_search(
-    '검색',
-    ARRAY[0,0,0,0]::float4[],
-    '/tmp/warc.lance',
-    20
-) AS h
-LEFT JOIN pgwarc_lance.bm25_doc d USING (doc_id)
-WHERE h.http_status = 200
-  AND h.content_type ILIKE 'text/html%'
-  AND h.warc_date::timestamptz >= '2026-06-30T00:00:00Z'::timestamptz
-  AND h.source_file = 'sample.warc'
-ORDER BY h.score DESC, h.doc_id ASC;
+WITH request(query_text) AS (VALUES (%s::text))
+SELECT hit.doc_id, hit.score, hit.source,
+       hit.bm25_rank, hit.vector_rank,
+       hit.bm25_contribution, hit.vector_contribution,
+       record.target_uri, record.parent_doc_id, record.chunk_index,
+       record.char_start, record.char_end, record.chunking_version,
+       tokenize_korean(request.query_text) AS query_terms,
+       body.content
+FROM request
+CROSS JOIN LATERAL hybrid_search_explain(
+    request.query_text, %s::real[], %s::text,
+    k => 10, candidate_k => 100,
+    bm25_weight => 1.0, vector_weight => 1.0, rrf_k => 60.0
+) AS hit
+JOIN pgwarc_lance.warc_record AS record USING (doc_id)
+JOIN pgwarc_lance.bm25_doc AS body USING (doc_id)
+ORDER BY hit.score DESC, hit.doc_id ASC;
 ```
+
+Psycopg 같은 DB client에서 위 query의 parameter를 `(query_text, vector, lance_uri)`로
+bind한 뒤 각 row에 다음 helper를 적용한다. `snippet.text`와 `matched_spans`는
+chunk 안의 0부터 시작하는 Unicode codepoint 범위이며, `char_start`를 더하면 정규화된
+부모 본문 위치를 얻는다. `parent_doc_id`, `chunk_index`, `char_start/end`,
+`chunking_version`은 원 문서와 chunk를 다시 찾는 데 쓴다.
+
+```python
+from tools.search_snippets import build_snippet
+
+snippet = build_snippet(row["content"], row["query_terms"], max_chars=240)
+parent_spans = [
+    (row["char_start"] + span.start, row["char_start"] + span.end)
+    for span in snippet.matched_spans
+]
+# HTML 본문 텍스트 위치에는 escaped markup을 쓸 수 있다. 다른 출력 context에는
+# snippet.text를 사용하고 해당 context의 escaping 규칙을 적용한다.
+html_fragment = snippet.highlighted_html
+```
+
+`max_chars`는 1–2,000 codepoint 범위이고 기본값은 240이다. helper는 1,000,000자를
+넘는 단일 chunk를 조용히 잘라내지 않고 오류로 알린다. CJK bigram 등 겹치는 matched
+span은 HTML markup에서 합쳐 표시하지만 `matched_spans`에는 원래 span을 유지한다.
+Vector-only 결과처럼 chunk 안에 query token이 없으면 본문 앞부분을 반환하고 span은
+비어 있다. RRF contribution은 순위 점수의 출처 설명이며 특정 본문 span이 점수에
+기여했다는 뜻은 아니다. 선택된 결과 본문만 가져오므로 DB 내부에서 HTML snippet을
+반복 렌더링하지 않는다. 확장 함수는 설치 후 `PUBLIC EXECUTE`가 회수되어 있으므로
+검색 role에 `hybrid_search_explain(...)`과 `tokenize_korean(text)` 실행,
+`warc_record` 및 `bm25_doc` 조회 권한을 필요한 범위로 부여한다.
 
 Candidate-level filter example:
 

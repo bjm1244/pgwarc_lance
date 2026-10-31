@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-30T23:05:19.644370+00:00",
+  "updated_at": "2026-10-31T04:39:14.842806+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -203,6 +203,7 @@
       ],
       "status": "done",
       "summary": "기존 검색 API를 유지하며 candidate_k·가중 RRF·소스별 순위와 기여를 설명하는 API를 추가하고 PG16 신규 설치·회귀·업그레이드 검증을 통과했다. 독립 relevance label·프로덕션 SLA·승인은 확립되지 않았다.",
+      "public_commit": "54dcf0a4086d7d654c3c06964e8d3a1813880efe",
       "criteria_passed": [
         "C1",
         "C2",
@@ -218,8 +219,13 @@
         11,
         13
       ],
-      "status": "queued",
-      "criteria_passed": []
+      "status": "done",
+      "summary": "검색 설명 결과에 안전한 client-side snippet/highlight와 chunk 출처 offset을 연결하고 README 예제와 회귀를 추가했다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
     },
     {
       "number": 15,
