@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-31T11:02:32.928473+00:00",
+  "updated_at": "2026-10-31T16:44:59.545134+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -240,6 +240,7 @@
       ],
       "status": "done",
       "summary": "실제 Common Crawl segment를 처음부터 EOF까지 read-only 추출 감사로 처리해 66,190건의 형식별·결과별 대사를 맞췄다. 실패 29건과 PDF metadata-only 40건을 보존·분류했고, 실제 WARC 9건으로 checkpoint 재실행을 검증했다. 전체 segment의 durable importer checkpoint는 1,034건에서 시간 한도로 중단되어 partial이며 PostgreSQL 적재는 수행하지 않았다.",
+      "public_commit": "14a66268f057596eddf73891fabe192c3400387a",
       "criteria_passed": [
         "C1",
         "C2",
@@ -256,7 +257,10 @@
         15,
         14
       ],
-      "status": "queued",
+      "status": "awaiting_human",
+      "summary": "BM25·vector·hybrid 비교와 Recall@k·MRR·nDCG 및 입력 checksum 기록을 추가하고 회귀를 통과했다. 운영 corpus의 개별 출처 권리와 독립 human qrels, 고정 split 및 사전 합격 기준이 없어 실제 평가 완료는 보류한다.",
+      "blocker": "Common Crawl 약관만으로 선택 문서별 권리 상태가 확인되지 않았고, 21,873문서 운영 corpus에 독립 human relevance labels가 없다. 별도 SciFact baseline은 대상 corpus의 qrels를 대체하지 않는다. 고정 tuning/holdout, model checksum, 사전 acceptance threshold 및 허용 회귀 범위도 없다.",
+      "resume_condition": "평가할 corpus와 출처별 권리 검토를 확정하고, 고정 질의 및 완전한 pooled candidate qrels를 사람이 판정한다. 질의·qrels·embedding model checksum과 tuning/holdout manifest를 고정하며 holdout 결과를 보기 전에 acceptance threshold와 허용 회귀 범위를 정한 뒤 BM25/vector/hybrid 평가를 실행한다.",
       "criteria_passed": []
     },
     {

@@ -838,9 +838,111 @@ def validate_quality_eval_success_artifact(artifact: str, payload: dict[str, Any
     errors.extend(check_positive_int(payload, "k", artifact))
     errors.extend(check_probability(payload, "hit_rate_at_k", artifact))
     errors.extend(check_probability(payload, "mrr_at_k", artifact))
+    if "recall_at_k" in payload:
+        errors.extend(check_probability(payload, "recall_at_k", artifact))
+    if "ndcg_at_k" in payload:
+        errors.extend(check_probability(payload, "ndcg_at_k", artifact))
 
     results = payload.get("results")
     query_count = payload.get("query_count")
+    errors.extend(validate_quality_eval_result_rows(artifact, results, query_count))
+    methods = payload.get("search_methods")
+    if methods is not None:
+        if (
+            not isinstance(methods, list)
+            or not methods
+            or any(method not in eval_quality.SEARCH_METHODS for method in methods)
+        ):
+            errors.append(
+                f"{artifact}.search_methods must be a non-empty list from "
+                f"{list(eval_quality.SEARCH_METHODS)}"
+            )
+            return errors
+        if len(set(methods)) != len(methods):
+            errors.append(f"{artifact}.search_methods must not contain duplicates")
+        primary = payload.get("search_method")
+        if primary not in methods:
+            errors.append(f"{artifact}.search_method must be listed in search_methods")
+        input_checksums = payload.get("input_checksums")
+        if not isinstance(input_checksums, dict):
+            errors.append(f"{artifact}.input_checksums must be an object")
+        else:
+            for field in (
+                "fixture_sha256",
+                "query_set_sha256",
+                "qrels_sha256",
+                "vectors_sha256",
+            ):
+                if not is_sha256_hex(input_checksums.get(field)):
+                    errors.append(
+                        f"{artifact}.input_checksums.{field} must be a 64-character "
+                        "lowercase hex SHA-256"
+                    )
+            model_sha = input_checksums.get("embedding_model_sha256")
+            if model_sha is not None and not is_sha256_hex(model_sha):
+                errors.append(
+                    f"{artifact}.input_checksums.embedding_model_sha256 must be null "
+                    "or a 64-character lowercase hex SHA-256"
+                )
+
+        metrics_by_method = payload.get("metrics_by_method")
+        results_by_method = payload.get("results_by_method")
+        if not isinstance(metrics_by_method, dict) or set(metrics_by_method) != set(methods):
+            errors.append(
+                f"{artifact}.metrics_by_method keys must match search_methods"
+            )
+        if not isinstance(results_by_method, dict) or set(results_by_method) != set(methods):
+            errors.append(
+                f"{artifact}.results_by_method keys must match search_methods"
+            )
+        if isinstance(metrics_by_method, dict):
+            for method in methods:
+                metrics = metrics_by_method.get(method)
+                label = f"{artifact}.metrics_by_method.{method}"
+                if not isinstance(metrics, dict):
+                    errors.append(f"{label} must be an object")
+                    continue
+                if metrics.get("query_count") != query_count:
+                    errors.append(f"{label}.query_count must match query_count")
+                if not is_positive_int(metrics.get("relevant_label_count")):
+                    errors.append(f"{label}.relevant_label_count must be positive")
+                if metrics.get("relevance_scheme") != "binary_expected_doc_ids":
+                    errors.append(
+                        f"{label}.relevance_scheme must be 'binary_expected_doc_ids'"
+                    )
+                for field in ("hit_rate_at_k", "recall_at_k", "mrr_at_k", "ndcg_at_k"):
+                    errors.extend(check_probability(metrics, field, label))
+        if isinstance(results_by_method, dict):
+            for method in methods:
+                rows = results_by_method.get(method)
+                label = f"{artifact}.results_by_method.{method}"
+                errors.extend(validate_quality_eval_result_rows(label, rows, query_count))
+                if isinstance(rows, list) and any(
+                    not isinstance(row, dict) or row.get("search_method") != method
+                    for row in rows
+                ):
+                    errors.append(f"{label} rows must identify their search_method")
+        if isinstance(results_by_method, dict) and primary in results_by_method:
+            if results != results_by_method[primary]:
+                errors.append(
+                    f"{artifact}.results must match results_by_method[search_method]"
+                )
+        if isinstance(metrics_by_method, dict) and primary in metrics_by_method:
+            primary_metrics = metrics_by_method[primary]
+            if isinstance(primary_metrics, dict):
+                for field in ("hit_rate_at_k", "recall_at_k", "mrr_at_k", "ndcg_at_k"):
+                    if field in payload and payload[field] != primary_metrics.get(field):
+                        errors.append(
+                            f"{artifact}.{field} must match metrics_by_method[search_method]"
+                        )
+
+    return errors
+
+
+def validate_quality_eval_result_rows(
+    artifact: str, results: Any, query_count: Any
+) -> list[str]:
+    errors: list[str] = []
     if not isinstance(results, list) or not results:
         errors.append(f"{artifact}.results must be a non-empty list")
         return errors
@@ -868,6 +970,10 @@ def validate_quality_eval_success_artifact(artifact: str, payload: dict[str, Any
         if not isinstance(result.get("hit"), bool):
             errors.append(f"{label}.hit must be a boolean")
         errors.extend(check_probability(result, "reciprocal_rank", label))
+        if "recall_at_k" in result:
+            errors.extend(check_probability(result, "recall_at_k", label))
+        if "ndcg_at_k" in result:
+            errors.extend(check_probability(result, "ndcg_at_k", label))
     return errors
 
 

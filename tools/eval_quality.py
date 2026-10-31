@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -29,6 +30,7 @@ EXIT_TIMEOUT = 4
 PG_STATEMENT_TIMEOUT_MIN_MS = 1
 PG_STATEMENT_TIMEOUT_MAX_MS = 2147483647
 STATEMENT_TIMEOUT_REASON = "canceling statement due to statement timeout"
+SEARCH_METHODS = ("bm25", "vector", "hybrid")
 STATEMENT_TIMEOUT_SQL_PATTERN = re.compile(r"SET LOCAL statement_timeout = (\d+);")
 TIMEOUT_SOURCE_SERVER = "server_statement"
 TIMEOUT_SOURCE_CLIENT = "client"
@@ -453,9 +455,16 @@ def fixture_from_dict(
         expected = []
         seen_expected: set[int] = set()
         duplicate_expected: list[int] = []
-        expected_doc_ids = require_list(
-            query.get("expected_doc_ids"), f"{source}.queries[{index}].expected_doc_ids"
-        )
+        expected_doc_ids = query.get("expected_doc_ids")
+        if not isinstance(expected_doc_ids, list):
+            raise ValueError(
+                f"{source}.queries[{index}].expected_doc_ids: expected a list"
+            )
+        if not expected_doc_ids:
+            raise ValueError(
+                f"{source}.queries[{index}].expected_doc_ids: "
+                "at least one independently relevant document is required"
+            )
         for expected_index, raw_doc_id in enumerate(expected_doc_ids, start=1):
             doc_id = require_doc_id(
                 raw_doc_id,
@@ -575,14 +584,31 @@ def query_sql(
     lance_uri: str,
     k: int,
     statement_timeout_ms: int | None = None,
+    search_method: str = "hybrid",
 ) -> str:
-    statement = (
-        "SELECT doc_id, round(score::numeric, 6), source "
-        "FROM hybrid_warc_search("
-        f"{sql_string(query['query'])}, {vector_sql(query['vector'])}, "
-        f"{sql_string(lance_uri)}, {k}) "
-        "ORDER BY score DESC, doc_id ASC;\n"
-    )
+    if search_method not in SEARCH_METHODS:
+        raise ValueError(f"unsupported search method: {search_method!r}")
+    if search_method == "bm25":
+        statement = (
+            "SELECT doc_id, round(score::numeric, 6), 'bm25'::text "
+            f"FROM bm25_search({sql_string(query['query'])}, {k}) "
+            "ORDER BY score DESC, doc_id ASC;\n"
+        )
+    elif search_method == "vector":
+        statement = (
+            "SELECT id, round(distance::numeric, 6), 'vector'::text "
+            f"FROM lance_vector_search({sql_string(lance_uri)}, "
+            f"{vector_sql(query['vector'])}, {k}) "
+            "ORDER BY distance ASC, id ASC;\n"
+        )
+    else:
+        statement = (
+            "SELECT doc_id, round(score::numeric, 6), source "
+            "FROM hybrid_warc_search("
+            f"{sql_string(query['query'])}, {vector_sql(query['vector'])}, "
+            f"{sql_string(lance_uri)}, {k}) "
+            "ORDER BY score DESC, doc_id ASC;\n"
+        )
     if statement_timeout_ms is None:
         return statement
     return (
@@ -606,23 +632,151 @@ def parse_hits(output: str) -> list[dict[str, Any]]:
     return hits
 
 
-def score_query(query: dict[str, Any], hits: list[dict[str, Any]]) -> dict[str, Any]:
+def score_query(
+    query: dict[str, Any],
+    hits: list[dict[str, Any]],
+    *,
+    k: int | None = None,
+    search_method: str = "hybrid",
+) -> dict[str, Any]:
     expected = set(query["expected_doc_ids"])
     returned = [hit["doc_id"] for hit in hits]
     reciprocal_rank = 0.0
-    for index, doc_id in enumerate(returned, start=1):
+    cutoff = len(returned) if k is None else k
+    if cutoff <= 0:
+        raise ValueError("k must be positive")
+    ranked = returned[:cutoff]
+    for index, doc_id in enumerate(ranked, start=1):
         if doc_id in expected:
             reciprocal_rank = 1.0 / index
             break
+    recalled = len(set(ranked).intersection(expected))
+    recall = recalled / len(expected) if expected else 0.0
+    gains = 0.0
+    seen: set[int] = set()
+    for rank, doc_id in enumerate(ranked, start=1):
+        if doc_id in expected and doc_id not in seen:
+            gains += 1.0 / math.log2(rank + 1)
+        seen.add(doc_id)
+    ideal_count = min(len(expected), cutoff)
+    ideal_gains = sum(1.0 / math.log2(rank + 1) for rank in range(1, ideal_count + 1))
+    ndcg = gains / ideal_gains if ideal_gains else 0.0
     return {
+        "search_method": search_method,
         "name": query["name"],
         "query": query["query"],
         "expected_doc_ids": query["expected_doc_ids"],
-        "returned_doc_ids": returned,
+        "returned_doc_ids": ranked,
         "hit": reciprocal_rank > 0.0,
         "reciprocal_rank": reciprocal_rank,
+        "recall_at_k": recall,
+        "ndcg_at_k": ndcg,
         "hits": hits,
     }
+
+
+def aggregate_metrics(results: list[dict[str, Any]], k: int) -> dict[str, Any]:
+    if not results:
+        raise ValueError("cannot summarize an empty query result set")
+    count = len(results)
+    return {
+        "query_count": count,
+        "relevant_label_count": sum(len(result["expected_doc_ids"]) for result in results),
+        "hit_rate_at_k": sum(bool(result["hit"]) for result in results) / count,
+        "recall_at_k": sum(float(result["recall_at_k"]) for result in results) / count,
+        "mrr_at_k": sum(float(result["reciprocal_rank"]) for result in results) / count,
+        "ndcg_at_k": sum(float(result["ndcg_at_k"]) for result in results) / count,
+        "relevance_scheme": "binary_expected_doc_ids",
+    }
+
+
+def canonical_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def evaluation_input_checksums(
+    fixture: dict[str, Any], embedding_model_sha256: str | None = None
+) -> dict[str, str | None]:
+    """Fingerprint the exact corpus/query/qrels/vectors used by this evaluation."""
+
+    queries = fixture["queries"]
+    return {
+        "fixture_sha256": canonical_sha256(fixture),
+        "query_set_sha256": canonical_sha256(
+            [{"name": row["name"], "query": row["query"]} for row in queries]
+        ),
+        "qrels_sha256": canonical_sha256(
+            [
+                {
+                    "name": row["name"],
+                    "relevant_doc_ids": sorted(set(row["expected_doc_ids"])),
+                }
+                for row in queries
+            ]
+        ),
+        "vectors_sha256": canonical_sha256(
+            {
+                "documents": [
+                    {"doc_id": row["doc_id"], "vector": row["vector"]}
+                    for row in fixture["docs"]
+                ],
+                "queries": [
+                    {"name": row["name"], "vector": row["vector"]}
+                    for row in queries
+                ],
+            }
+        ),
+        "embedding_model_sha256": embedding_model_sha256,
+    }
+
+
+def evaluate_method_comparison(
+    *,
+    queries: list[dict[str, Any]],
+    search_methods: list[str],
+    psql: str,
+    lance_uri: str,
+    k: int,
+    budget: ExecutionBudget | None = None,
+    query_timeout_seconds: float | None = None,
+    statement_timeout_ms: int | None = None,
+    run_sql_fn: Any | None = None,
+) -> tuple[dict[str, list[dict[str, Any]]], BudgetExhausted | None]:
+    """Evaluate each requested ranker on the same frozen fixture and qrels."""
+
+    if not search_methods or any(method not in SEARCH_METHODS for method in search_methods):
+        raise ValueError(f"search_methods must be a non-empty subset of {SEARCH_METHODS}")
+    if len(set(search_methods)) != len(search_methods):
+        raise ValueError("search_methods must not contain duplicates")
+    by_method: dict[str, list[dict[str, Any]]] = {}
+    for method in search_methods:
+        try:
+            rows, exhausted = evaluate_queries(
+                queries=queries,
+                psql=psql,
+                lance_uri=lance_uri,
+                k=k,
+                budget=budget,
+                query_timeout_seconds=query_timeout_seconds,
+                statement_timeout_ms=statement_timeout_ms,
+                run_sql_fn=run_sql_fn,
+                search_method=method,
+            )
+        except (SqlTimeout, StatementTimeout) as error:
+            prior = [row for rows in by_method.values() for row in rows]
+            error.partial_results = prior + list(error.partial_results or [])
+            raise
+        by_method[method] = rows
+        if exhausted is not None:
+            return by_method, exhausted
+    return by_method, None
 
 
 def budget_from_args(args: argparse.Namespace) -> ExecutionBudget | None:
@@ -784,6 +938,7 @@ def evaluate_queries(
     query_timeout_seconds: float | None = None,
     statement_timeout_ms: Decimal | None = None,
     run_sql_fn: Any = None,
+    search_method: str = "hybrid",
 ) -> tuple[list[dict[str, Any]], BudgetExhausted | None]:
     """Evaluate queries under the shared budget, preserving partial results.
 
@@ -845,7 +1000,13 @@ def evaluate_queries(
         try:
             output = runner(
                 psql,
-                query_sql(query, lance_uri, k, statement_timeout_ms=server_ms),
+                query_sql(
+                    query,
+                    lance_uri,
+                    k,
+                    statement_timeout_ms=server_ms,
+                    search_method=search_method,
+                ),
                 timeout=timeout,
             )
         except SqlTimeout as error:
@@ -862,7 +1023,9 @@ def evaluate_queries(
                 error.effective_statement_timeout_ms = server_ms
                 error.timeout_source = server_source or TIMEOUT_SOURCE_SERVER
             raise
-        results.append(score_query(query, parse_hits(output)))
+        results.append(
+            score_query(query, parse_hits(output), k=k, search_method=search_method)
+        )
     return results, exhausted
 
 
@@ -873,6 +1036,7 @@ def exhausted_payload(
     k: int,
     lance_uri: str,
     exhausted: BudgetExhausted,
+    search_methods: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build a non-success payload that preserves partial query results."""
 
@@ -884,6 +1048,7 @@ def exhausted_payload(
         "vector_dim": fixture["vector_dim"],
         "k": k,
         "lance_uri": lance_uri,
+        "search_methods": search_methods or ["hybrid"],
         "status": execution_budget.STATUS_EXHAUSTED,
         "success": False,
         "budget": exhausted.to_status(partial_results=results),
@@ -938,6 +1103,7 @@ def timeout_payload(
     client_side_only: bool = True,
     statement_outcome: str = STATEMENT_OUTCOME_UNKNOWN,
     extra: dict[str, Any] | None = None,
+    search_methods: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build a non-success payload for a query/setup timeout boundary."""
 
@@ -961,6 +1127,7 @@ def timeout_payload(
         "vector_dim": fixture["vector_dim"],
         "k": k,
         "lance_uri": lance_uri,
+        "search_methods": search_methods or ["hybrid"],
         "status": STATUS_TIMEOUT,
         "success": False,
         "timeout": timeout,
@@ -1031,19 +1198,50 @@ def write_text(path: Path | None, content: str) -> None:
         path.write_text(content, encoding="utf-8")
 
 
-def markdown_report(results: list[dict[str, Any]], hit_rate: float, mrr: float, k: int) -> str:
+def markdown_report(
+    results_by_method: dict[str, list[dict[str, Any]]],
+    metrics_by_method: dict[str, dict[str, Any]],
+    k: int,
+) -> str:
+    primary = "hybrid" if "hybrid" in results_by_method else next(iter(results_by_method))
+    primary_metrics = metrics_by_method[primary]
     lines = [
-        f"hit_rate_at_{k}={hit_rate:.3f} mrr_at_{k}={mrr:.3f}",
-        f"| query | expected | returned | hit@{k} | reciprocal_rank |",
-        "|---|---|---|---:|---:|",
+        f"hit_rate_at_{k}={primary_metrics['hit_rate_at_k']:.3f} "
+        f"mrr_at_{k}={primary_metrics['mrr_at_k']:.3f}",
+        f"recall_at_{k}={primary_metrics['recall_at_k']:.3f} "
+        f"ndcg_at_{k}={primary_metrics['ndcg_at_k']:.3f}",
+        "| method | queries | Hit@k | Recall@k | MRR@k | nDCG@k |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
-    for result in results:
+    for method, metrics in metrics_by_method.items():
         lines.append(
-            f"| {result['name']} | {result['expected_doc_ids']} | "
-            f"{result['returned_doc_ids']} | {int(result['hit'])} | "
-            f"{result['reciprocal_rank']:.3f} |"
+            f"| {method} | {metrics['query_count']} | "
+            f"{metrics['hit_rate_at_k']:.3f} | {metrics['recall_at_k']:.3f} | "
+            f"{metrics['mrr_at_k']:.3f} | {metrics['ndcg_at_k']:.3f} |"
         )
-    return "\n".join(lines) + "\n"
+    lines.extend(
+        [
+            "",
+            "| method | query | relevant IDs | returned IDs | Recall@k | RR | nDCG@k |",
+            "|---|---|---|---|---:|---:|---:|",
+        ]
+    )
+    for method, results in results_by_method.items():
+        for result in results:
+            lines.append(
+                f"| {method} | {result['name']} | {result['expected_doc_ids']} | "
+                f"{result['returned_doc_ids']} | {result['recall_at_k']:.3f} | "
+                f"{result['reciprocal_rank']:.3f} | {result['ndcg_at_k']:.3f} |"
+            )
+    lines.extend(
+        [
+            "",
+            "Relevance is binary: listed expected_doc_ids are relevant; the qrels "
+            "must cover the judged candidate pool before interpreting Recall@k or nDCG@k.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1053,6 +1251,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixture-json", type=Path, help="labeled quality fixture JSON")
     parser.add_argument("--setup-bm25-mode", choices=["function", "bulk", "copy"], default="function", help="fixture-loading SQL path; use bulk/copy for larger corpora")
     parser.add_argument("--k", type=int, default=3)
+    parser.add_argument(
+        "--search-methods",
+        nargs="+",
+        choices=SEARCH_METHODS,
+        default=["hybrid"],
+        help="rankers to compare against the same fixture and labels",
+    )
+    parser.add_argument(
+        "--embedding-model-sha256",
+        help="SHA-256 of the model artifact that produced the stored vectors",
+    )
     parser.add_argument("--max-iterations", type=int, default=None)
     parser.add_argument("--max-queries", type=int, default=None)
     parser.add_argument("--deadline-seconds", type=float, default=None)
@@ -1081,6 +1290,7 @@ def emit_timeout(
         stage=stage,
         limit_seconds=error.timeout_seconds,
         statement_outcome=STATEMENT_OUTCOME_UNKNOWN,
+        search_methods=args.search_methods,
     )
     write_json(args.json_output, payload)
     write_text(args.markdown_output, timeout_markdown(stage, error.timeout_seconds, results))
@@ -1115,6 +1325,7 @@ def emit_server_timeout(
         ),
         client_side_only=False,
         statement_outcome=STATEMENT_OUTCOME_SERVER_TIMEOUT,
+        search_methods=args.search_methods,
         extra={
             "requested_statement_timeout_ms": error.requested_statement_timeout_ms,
             "effective_statement_timeout_ms": effective_ms,
@@ -1137,6 +1348,17 @@ def main() -> int:
     args = parse_args()
     if args.k <= 0:
         raise SystemExit("--k must be positive")
+    if len(set(args.search_methods)) != len(args.search_methods):
+        print("eval-quality search methods must not contain duplicates", file=sys.stderr)
+        return 2
+    if args.embedding_model_sha256 is not None and not re.fullmatch(
+        r"[0-9a-f]{64}", args.embedding_model_sha256
+    ):
+        print(
+            "eval-quality embedding model SHA-256 must be 64 lowercase hex characters",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         query_timeout = validate_query_timeout(args.query_timeout_seconds)
@@ -1161,7 +1383,11 @@ def main() -> int:
         print(f"eval-quality budget rejected: {error}", file=sys.stderr)
         return 2
 
-    fixture = load_fixture(args.fixture_json)
+    try:
+        fixture = load_fixture(args.fixture_json)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"eval-quality fixture rejected: {error}", file=sys.stderr)
+        return 2
 
     try:
         setup_timeout = validate_query_timeout(args.setup_timeout_seconds) if args.setup_timeout_seconds is not None else query_timeout
@@ -1178,6 +1404,7 @@ def main() -> int:
                 k=args.k,
                 lance_uri=args.lance_uri,
                 exhausted=error,
+                search_methods=args.search_methods,
             )
             write_json(args.json_output, payload)
             write_text(args.markdown_output, exhausted_markdown(error, []))
@@ -1195,8 +1422,9 @@ def main() -> int:
         return emit_server_timeout(args, fixture, stage="setup", error=error, results=[])
 
     try:
-        results, exhausted = evaluate_queries(
+        results_by_method, exhausted = evaluate_method_comparison(
             queries=fixture["queries"],
+            search_methods=args.search_methods,
             psql=args.psql,
             lance_uri=args.lance_uri,
             k=args.k,
@@ -1210,7 +1438,7 @@ def main() -> int:
             fixture,
             stage="query",
             error=error,
-            results=error.partial_results or [],
+        results=error.partial_results or [],
         )
     except StatementTimeout as error:
         return emit_server_timeout(
@@ -1222,15 +1450,19 @@ def main() -> int:
         )
 
     if exhausted is not None:
+        partial_results = [
+            row for method_results in results_by_method.values() for row in method_results
+        ]
         payload = exhausted_payload(
             fixture=fixture,
-            results=results,
+            results=partial_results,
             k=args.k,
             lance_uri=args.lance_uri,
             exhausted=exhausted,
+            search_methods=args.search_methods,
         )
         write_json(args.json_output, payload)
-        write_text(args.markdown_output, exhausted_markdown(exhausted, results))
+        write_text(args.markdown_output, exhausted_markdown(exhausted, partial_results))
         write_json(args.budget_status_json, payload["budget"])
         print(
             "quality eval stopped early: "
@@ -1239,8 +1471,13 @@ def main() -> int:
         )
         return 3
 
-    hit_rate = sum(1 for result in results if result["hit"]) / len(results)
-    mrr = sum(float(result["reciprocal_rank"]) for result in results) / len(results)
+    metrics_by_method = {
+        method: aggregate_metrics(method_results, args.k)
+        for method, method_results in results_by_method.items()
+    }
+    primary_method = "hybrid" if "hybrid" in results_by_method else args.search_methods[0]
+    primary_metrics = metrics_by_method[primary_method]
+    results = results_by_method[primary_method]
     payload = {
         "benchmark": "retrieval_quality_smoke",
         "fixture": fixture["name"],
@@ -1249,13 +1486,22 @@ def main() -> int:
         "vector_dim": fixture["vector_dim"],
         "k": args.k,
         "lance_uri": args.lance_uri,
-        "hit_rate_at_k": hit_rate,
-        "mrr_at_k": mrr,
+        "search_method": primary_method,
+        "search_methods": args.search_methods,
+        "input_checksums": evaluation_input_checksums(
+            fixture, args.embedding_model_sha256
+        ),
+        "hit_rate_at_k": primary_metrics["hit_rate_at_k"],
+        "recall_at_k": primary_metrics["recall_at_k"],
+        "mrr_at_k": primary_metrics["mrr_at_k"],
+        "ndcg_at_k": primary_metrics["ndcg_at_k"],
+        "metrics_by_method": metrics_by_method,
         "results": results,
+        "results_by_method": results_by_method,
     }
     if budget is not None:
         payload["budget"] = budget.status()
-    markdown = markdown_report(results, hit_rate, mrr, args.k)
+    markdown = markdown_report(results_by_method, metrics_by_method, args.k)
     print(markdown, end="")
     write_json(args.json_output, payload)
     write_text(args.markdown_output, markdown)

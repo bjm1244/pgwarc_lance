@@ -373,6 +373,35 @@ hit_rate_at_3=1.000 mrr_at_3=1.000
 
 ## Eval Command
 
+`tools/eval_quality.py`는 기본적으로 기존 hybrid smoke를 실행한다. 같은
+fixture와 qrels에서 세 ranker를 나란히 평가하려면 다음처럼 호출한다.
+
+```bash
+python3 tools/eval_quality.py \
+    --fixture-json /path/to/frozen-quality-fixture.json \
+    --search-methods bm25 vector hybrid \
+    --embedding-model-sha256 "replace-with-64-lowercase-hex-sha256" \
+    --k 10 \
+    --json-output /path/to/run/quality.json \
+    --markdown-output /path/to/run/quality.md
+```
+
+JSON에는 fixture, query set, qrels, 실제 document/query vectors의 SHA-256과
+선택적으로 전달한 embedding model artifact SHA-256, ranker별 결과가 기록된다.
+`Recall@k`, `MRR@k`, `nDCG@k`는 `expected_doc_ids`를 binary relevant qrels로
+사용한다. MRR은 첫 relevant 결과의 역순위, Recall은 상위 k의 고유 relevant
+문서 비율, nDCG는 binary gain의 logarithmic discount를 쓴다. 각 ranker는
+BM25 점수 내림차순, vector distance 오름차순, hybrid 점수 내림차순으로
+결정적 동점 순서를 적용한다. 한 비교 호출은 fixture와 qrels를 한 번 읽어
+세 ranker에서 공유한다.
+
+이 도구는 누락된 qrels를 생성하지 않는다. `expected_doc_ids` 밖의 문서를
+비관련으로 해석하므로 Recall/nDCG를 운영 corpus에 적용할 때는 각 질의의
+판정 후보 pool을 먼저 고정하고 그 pool 안의 관련/비관련 판정을 모두
+수집해야 한다. 실제 운영 평가는 독립 human qrels, rights/source manifest,
+holdout split, 사전 고정 acceptance threshold를 별도로 확인한다. 이 문서의
+기존 synthetic fixture는 metric wiring smoke일 뿐 real-corpus 결과가 아니다.
+
 ```bash
 make eval-quality
 
@@ -385,13 +414,19 @@ Baseline:
 
 ```text
 hit_rate_at_3=1.000 mrr_at_3=1.000
+recall_at_3=1.000 ndcg_at_3=1.000
 ```
 
-| query | expected | returned | hit@3 | reciprocal_rank |
-|---|---|---|---:|---:|
-| korean_bm25 | [1001] | [1001, 1002, 1003] | 1 | 1.000 |
-| vector_embeddings | [1002] | [1002, 1001, 1003] | 1 | 1.000 |
-| warc_metadata | [1003] | [1003, 1001, 1002] | 1 | 1.000 |
+| method | query | relevant IDs | returned IDs | Recall@k | RR | nDCG@k |
+|---|---|---|---|---:|---:|---:|
+| hybrid | korean_bm25 | [1001] | [1001, 1002, 1003] | 1.000 | 1.000 | 1.000 |
+| hybrid | vector_embeddings | [1002] | [1002, 1001, 1003] | 1.000 | 1.000 | 1.000 |
+| hybrid | warc_metadata | [1003] | [1003, 1001, 1002] | 1.000 | 1.000 | 1.000 |
+
+The current default run prints Recall@k and nDCG@k alongside the existing
+hit-rate and MRR. Use `--search-methods bm25 vector hybrid` for a paired method
+comparison; a complete quality run budget must allow one SQL query per
+query-method pair.
 
 External fixture smoke:
 
@@ -399,6 +434,7 @@ External fixture smoke:
 QUALITY_FIXTURE=tests/fixtures/quality_fixture.json make eval-quality
 
 hit_rate_at_3=1.000 mrr_at_3=1.000
+recall_at_3=1.000 ndcg_at_3=1.000
 ```
 
 ## Embedding Command Example

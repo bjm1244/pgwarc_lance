@@ -387,7 +387,7 @@ SET pgwarc_lance.allow_destructive_ops = off;
 | **quality-baseline-doctor** | `make doctor-quality-baseline` | `tools/doctor_quality_baseline.py` | quality fixture report와 eval metrics가 baseline 기준을 만족하는지 검사 |
 | **quality-finalize** | `make finalize-quality-run` | quality report + eval + run finalization | quality fixture report, eval result, baseline doctor, metadata, manifest, doctor를 한 run directory에 생성 |
 | **public-quality-finalize** | `make finalize-public-warc-quality-run` | public WARC quality + run finalization | public WARC fixture 생성부터 quality run directory 마감까지 실행 |
-| **quality** | `make eval-quality` | `tools/eval_quality.py` | synthetic 또는 external relevance fixture로 hit-rate/MRR smoke eval |
+| **quality** | `make eval-quality` | `tools/eval_quality.py` | BM25/vector/hybrid ranker 비교, Recall@k/MRR/nDCG 및 fixture/query/qrels/vector checksum 기록 |
 | **quality-budget** | `make eval-quality-budget` | `tools/execution_budget.py` + `tools/eval_quality.py` | run-scoped iteration/query/deadline 예산을 검증하고 초과 시 `budget_exhausted` non-success로 중단 |
 | **docs** | `make check-docs` | `tools/check_docs.py` | Markdown 링크, README 하네스 목록, roadmap 검증 명령 drift 확인 |
 | **pg-version** | `make smoke-pg-version` | Dockerfile + `CREATE EXTENSION` | 선택한 PostgreSQL major image를 빌드하고 extension fresh install smoke 실행 |

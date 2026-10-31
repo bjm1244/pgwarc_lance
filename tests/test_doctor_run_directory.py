@@ -1436,6 +1436,63 @@ class QualityEvalNonSuccessArtifactTests(unittest.TestCase):
             [],
         )
 
+    def test_method_comparison_success_requires_matching_hashes_and_rows(self):
+        row = {
+            "search_method": "hybrid",
+            "name": "q1",
+            "query": "query",
+            "expected_doc_ids": [1],
+            "returned_doc_ids": [1],
+            "hit": True,
+            "reciprocal_rank": 1.0,
+            "recall_at_k": 1.0,
+            "ndcg_at_k": 1.0,
+            "hits": [],
+        }
+        metrics = {
+            "query_count": 1,
+            "relevant_label_count": 1,
+            "hit_rate_at_k": 1.0,
+            "recall_at_k": 1.0,
+            "mrr_at_k": 1.0,
+            "ndcg_at_k": 1.0,
+            "relevance_scheme": "binary_expected_doc_ids",
+        }
+        payload = {
+            "benchmark": "retrieval_quality_smoke",
+            "fixture": "frozen",
+            "doc_count": 1,
+            "query_count": 1,
+            "vector_dim": 2,
+            "k": 5,
+            "lance_uri": "/tmp/frozen.lance",
+            "search_method": "hybrid",
+            "search_methods": ["hybrid"],
+            "input_checksums": {
+                "fixture_sha256": "a" * 64,
+                "query_set_sha256": "b" * 64,
+                "qrels_sha256": "c" * 64,
+                "vectors_sha256": "d" * 64,
+                "embedding_model_sha256": None,
+            },
+            "hit_rate_at_k": 1.0,
+            "recall_at_k": 1.0,
+            "mrr_at_k": 1.0,
+            "ndcg_at_k": 1.0,
+            "metrics_by_method": {"hybrid": metrics},
+            "results": [row],
+            "results_by_method": {"hybrid": [row]},
+        }
+
+        self.assertEqual(
+            doctor_run_directory.validate_quality_eval_artifact("quality.json", payload),
+            [],
+        )
+
+        payload["input_checksums"]["qrels_sha256"] = "bad"
+        errors = doctor_run_directory.validate_quality_eval_artifact("quality.json", payload)
+        self.assertTrue(any("input_checksums.qrels_sha256" in error for error in errors), errors)
+
     def test_setup_timeout_artifact_reports_status_specific_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

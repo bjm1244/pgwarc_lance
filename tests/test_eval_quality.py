@@ -77,6 +77,63 @@ class EvalQualityFixtureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown expected doc_id"):
             eval_quality.fixture_from_dict(fixture, "fixture")
 
+    def test_rejects_query_without_relevant_labels(self):
+        fixture = {
+            "vector_dim": 1,
+            "docs": [{"doc_id": 1, "text": "doc", "vector": [1.0]}],
+            "queries": [
+                {
+                    "name": "unlabeled",
+                    "query": "doc",
+                    "vector": [1.0],
+                    "expected_doc_ids": [],
+                }
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "at least one independently relevant"):
+            eval_quality.fixture_from_dict(fixture, "fixture")
+
+    def test_score_query_computes_binary_recall_mrr_and_ndcg_at_k(self):
+        query = {
+            "name": "two-relevant",
+            "query": "query",
+            "expected_doc_ids": [11, 12],
+        }
+        hits = [
+            {"doc_id": 7, "score": 3.0, "source": "test"},
+            {"doc_id": 11, "score": 2.0, "source": "test"},
+            {"doc_id": 12, "score": 1.0, "source": "test"},
+        ]
+        result = eval_quality.score_query(query, hits, k=2, search_method="bm25")
+
+        self.assertEqual(result["search_method"], "bm25")
+        self.assertEqual(result["returned_doc_ids"], [7, 11])
+        self.assertTrue(result["hit"])
+        self.assertEqual(result["reciprocal_rank"], 0.5)
+        self.assertEqual(result["recall_at_k"], 0.5)
+        expected_ndcg = (1 / math.log2(3)) / (1 + 1 / math.log2(3))
+        self.assertAlmostEqual(result["ndcg_at_k"], expected_ndcg)
+
+    def test_query_sql_uses_rank_direction_for_each_method(self):
+        query = {
+            "name": "q",
+            "query": "search term",
+            "vector": [1.0, 0.0],
+            "expected_doc_ids": [1],
+        }
+
+        bm25_sql = eval_quality.query_sql(query, "/tmp/q.lance", 5, search_method="bm25")
+        vector_sql = eval_quality.query_sql(query, "/tmp/q.lance", 5, search_method="vector")
+        hybrid_sql = eval_quality.query_sql(query, "/tmp/q.lance", 5, search_method="hybrid")
+
+        self.assertIn("FROM bm25_search('search term', 5)", bm25_sql)
+        self.assertIn("ORDER BY score DESC, doc_id ASC", bm25_sql)
+        self.assertIn("FROM lance_vector_search('/tmp/q.lance'", vector_sql)
+        self.assertIn("ORDER BY distance ASC, id ASC", vector_sql)
+        self.assertIn("FROM hybrid_warc_search(", hybrid_sql)
+        with self.assertRaisesRegex(ValueError, "unsupported search method"):
+            eval_quality.query_sql(query, "/tmp/q.lance", 5, search_method="other")
+
     def test_rejects_duplicate_expected_doc_ids(self):
         fixture = {
             "vector_dim": 1,
@@ -625,6 +682,62 @@ class QueryTimeoutTests(unittest.TestCase):
         self.assertEqual(payload["hit_rate_at_k"], 1.0)
         self.assertEqual(payload["mrr_at_k"], 1.0)
         self.assertEqual(seen, [None, None, None])
+
+    def test_main_compares_all_rankers_with_shared_input_fingerprints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture_path = self.write_fixture(tmp, query_count=2)
+            output = Path(tmp) / "quality.json"
+            markdown = Path(tmp) / "quality.md"
+            model_sha = "a" * 64
+
+            def fake_run_sql(psql, sql, timeout=None):
+                if "bm25_search" in sql:
+                    return "1|0.9|bm25\n"
+                if "lance_vector_search" in sql:
+                    return "1|0.1|vector\n"
+                if "hybrid_warc_search" in sql:
+                    return "1|0.5|hybrid\n"
+                return ""
+
+            argv = [
+                "eval_quality.py",
+                "--fixture-json",
+                str(fixture_path),
+                "--search-methods",
+                "bm25",
+                "vector",
+                "hybrid",
+                "--embedding-model-sha256",
+                model_sha,
+                "--json-output",
+                str(output),
+                "--markdown-output",
+                str(markdown),
+            ]
+            with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                eval_quality, "run_sql", side_effect=fake_run_sql
+            ):
+                exit_code = eval_quality.main()
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            markdown_text = markdown.read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["search_method"], "hybrid")
+        self.assertEqual(payload["search_methods"], ["bm25", "vector", "hybrid"])
+        self.assertEqual(set(payload["metrics_by_method"]), {"bm25", "vector", "hybrid"})
+        for method in ("bm25", "vector", "hybrid"):
+            self.assertEqual(payload["metrics_by_method"][method]["recall_at_k"], 1.0)
+            self.assertEqual(payload["metrics_by_method"][method]["ndcg_at_k"], 1.0)
+            self.assertEqual(len(payload["results_by_method"][method]), 2)
+        fingerprints = payload["input_checksums"]
+        self.assertEqual(fingerprints["embedding_model_sha256"], model_sha)
+        self.assertEqual(len(fingerprints["query_set_sha256"]), 64)
+        self.assertEqual(len(fingerprints["qrels_sha256"]), 64)
+        self.assertEqual(len(fingerprints["vectors_sha256"]), 64)
+        self.assertIn("| bm25 |", markdown_text)
+        self.assertIn("| vector |", markdown_text)
+        self.assertIn("| hybrid |", markdown_text)
 
     def test_setup_timeout_can_differ_without_relaxing_query_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:

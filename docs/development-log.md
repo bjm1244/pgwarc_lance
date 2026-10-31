@@ -1,5 +1,44 @@
 # Development log
 
+## Issue #16 — operating-corpus independent relevance evaluation (2026-11-01)
+
+- The structured queue selected P1 issue #16 after prerequisites #13, #15 and
+  #14; it takes precedence over the prior development-log next step. Work stayed
+  on canonical `development` with the configured `gpt-6-luna` / `max` model.
+- Confirmed that the prior Common Crawl 2026-39 clone and 384-dimensional E5
+  vectors are real inputs: 21,873 documents, 8,240,889 BM25 postings, 21,873
+  WARC rows and 21,825 vectors. The source segment is 938,695,574 bytes with
+  SHA-256
+  `4b6b55dc25afdb8ef9bb0e48213faa73cf07756f195b0863ba2693638bf784f8`;
+  the read-only archive audit accounted for all 66,190 WARC records. No WARC,
+  existing database, Lance dataset or model artifact was changed.
+- Reviewed Common Crawl's current Terms of Use. The terms say crawled pages may
+  carry separate terms from their owners, so the crawl alone does not establish
+  rights for a selected evaluation sample. This run had no source-owner rights
+  review or independent human qrels for that corpus. The existing 50-query
+  SciFact quality baseline is a separate benchmark and was not substituted for
+  Common Crawl labels.
+- Extended `tools/eval_quality.py` to evaluate BM25, vector and hybrid against
+  one frozen fixture, with per-query and aggregate Recall@k, MRR@k and nDCG@k;
+  it records canonical fixture/query/qrels/vector hashes and accepts the
+  embedding-model artifact SHA-256. The run-directory doctor validates the
+  comparative artifact fields. The tool does not create labels or establish a
+  tuning/holdout split. No Common Crawl relevance scores were run; model hash,
+  split manifest and predeclared acceptance/regression thresholds remain
+  unprovided, so C1–C3 are incomplete and the issue is waiting for human input.
+- An initial focused assertion showed empty qrels were rejected with a generic
+  error; the parser now rejects them explicitly as missing independent labels.
+  Final checks passed: 56 focused evaluator tests, 60 run-directory tests, all
+  544 Python tests, `make check-docs`, `py_compile` for the changed Python files,
+  and `git diff --check` (Python 3; full outputs are retained in the private
+  validation run). No Rust, SQL or PostgreSQL runtime inputs changed, so no new
+  native build or PG16 claim is made for this Python-only change.
+- Next: obtain source-level rights clearance and a fixed human-judged Common
+  Crawl candidate pool, freeze query/qrels/model checksums and tuning/holdout
+  membership, then predeclare acceptance and regression limits before scoring
+  the holdout with all three rankers. Keep this issue open until those results
+  and evidence exist.
+
 ## Issue #15 — full WARC and extraction safety accounting (2026-10-31)
 
 - The structured queue selected P1 issue #15 after prerequisites #2, #7 and #11;
