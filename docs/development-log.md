@@ -1,5 +1,121 @@
 # Development log
 
+## Issue #19 — indexing operations doctor and metrics (2026-11-01, complete)
+
+- The runner-selected P1 issue #19 and its C1–C3 criteria took precedence over
+  the prior log's next-work note. Work stayed on the clean canonical
+  `development` branch with `.codex/config.toml` at `gpt-6-luna` / `max`; no
+  other checkout, writer, queue file or runner-managed status was changed.
+- Extended `tools/doctor_pg_lance.py` with queue depth and pending/ready/
+  processing/failed counts, oldest unfinished delay, latest applied outbox and
+  Lance dataset versions, count delta, and duplicate/missing/stale/orphan
+  findings. An optional validated collection manifest reports its active
+  logical version. JSON and Prometheus output omit paths, credentials, failure
+  details, source names and document text. Prometheus findings use one bounded
+  metric family. Inline connection passwords are rejected; errors are
+  sanitized. Reports are read-only and include state-specific dry-run guidance.
+- Added a doctor-only `pgwarc_doctor` role with table/column reads and two
+  version/state functions, plus a maintenance-window runbook for metrics,
+  bounds, exit codes and recovery. The runbook distinguishes the extension-wide
+  PostgreSQL count from a single Lance URI. Cross-store snapshots are not
+  atomic; a complete scan without observed findings currently exits `4`, and
+  this remains an operations preview rather than production approval.
+- Actual fault injection on isolated PostgreSQL 16.15 installed the unchanged
+  0.1.25 artifact, triggered a Lance dimension failure, and verified 25 checks:
+  least-privilege detection of count delta, duplicate/orphan rows, pending and
+  terminal-failed events, queue delay/version metrics, redaction, Prometheus
+  output and headers, read-only behavior, and dry-run guidance. The final full
+  Python suite passed 552 tests (13 focused doctor tests); documentation checks,
+  `cargo fmt --all --check`, Python compilation and `git diff --check` passed.
+- A broader outbox test attempt stopped before doctor assertions because the
+  immutable artifact's installed schema lacks provenance columns expected by
+  the current importer test fixture. The first isolated fault fixture left the
+  injected dimension error pending; the final fixture preloaded the bounded
+  exhausted-attempt state and then triggered the same real dimension failure to
+  verify terminal handling. That run exposed
+  and fixed failed-only recovery text that had incorrectly suggested retrying
+  ready work. A Prometheus review also fixed repeated HELP/TYPE headers, and
+  the documentation checker’s initial false positive on the phrase “make them”
+  was removed; final checks passed.
+- Native inputs (`src/`, `sql/`, `Cargo.toml`/`Cargo.lock`, `vendor/`, control
+  and Dockerfile) did not change. The source-archive native fingerprint
+  `61651cdab14f3740dc80e1aa86c995964be199674ea159ce626a2082eb8baccd`, artifact
+  SHA-256 `ec88bf4c7cc8afd3171603bdbfd9459b31868005b676a58ffc4399c905cf9636`,
+  and Cargo.lock SHA-256
+  `227a6c85056478a560259ea20a7993d76df2c2262b6869fac7c6012bc0055079` match the
+  passed PG16 receipt. It was reused; this issue did not claim a new locked
+  package build, SQL regression suite or populated upgrade. Implementation
+  commit: `86e7edc36d84a2b1ff12ee8bc4bdf198c3483743`.
+- No source WARC, production service, existing database/Lance data, model,
+  binary, release or deployment was changed. Private PG16 and regression outputs
+  remain in the run evidence. No labels, SLA, cross-store atomicity or production
+  approval is inferred. The external reviewed publisher owns GitHub reflection;
+  there was no direct push, issue closure or status/queue edit in this run.
+- Next: the runner selects the next eligible queue item. Revisit this doctor at
+  production-corpus scale only after adding a paged inventory and validating its
+  cost/consistency bounds; do not treat the current 250,000-row ceiling or
+  synthetic fault fixture as full-corpus operational qualification.
+
+## Issue #17 — scale qualification and frequency-index decision (2026-11-01, blocked)
+
+- The structured queue selected P1 issue #17 after prerequisites #13 and #15. Work
+  stayed on canonical `development` with `.codex/config.toml` set to
+  `gpt-6-luna` / `max` (configuration SHA-256
+  `9cb045f6981fdb64ce630508f5a91577f7bf2852f6f6cce4ad70632992e24dc1`). The
+  reviewed WARC, prior PostgreSQL/Lance data, models, vectors and immutable
+  artifacts stayed read-only.
+- C1: registered the PG16.15/Linux x86_64, 4-CPU/16-GiB workload before any new
+  scale run. It fixes the existing whole-document length distribution, 384-d
+  vectors, eight frozen query/vector pairs, BM25/vector/hybrid `k=5`, clients 1/8,
+  eight warmups, 128 requests per client and five alternating rounds, with a
+  host-load validity gate. Ingest arms use identical distinct input through BULK
+  and COPY in three fresh databases per mode with synchronous durability. The
+  relative acceptance budget is in `BENCHMARKS.md`; it is not an absolute
+  customer SLA. No supported scale is advertised before both target sizes pass.
+- C2: rehashed the original 938,695,574-byte Common Crawl WARC
+  (`4b6b55dc25afdb8ef9bb0e48213faa73cf07756f195b0863ba2693638bf784f8`) and
+  matched the existing 0.1.5 corpus evidence: 21,873 documents, 8,240,889
+  postings, 21,873 WARC rows and 21,825 384-dimensional vectors. The complete
+  archive audit accounts for 66,190 raw WARC records, still below 100,000 unique
+  documents. The authorized inputs therefore cannot produce either required
+  scale. No repeated or synthetic rows were used; 100k/1m search and ingest runs
+  were not attempted. C2 is blocked pending additional approved actual documents
+  and matching vectors.
+- C3: revalidated the preserved same-corpus PG16.15 index comparison and all
+  read/write result files. In three 8-client rounds, 1,024 requests per mode and
+  round completed without errors and all result fingerprints matched. BM25 p95
+  median was 114.32→100.71 ms (−11.9%), p99 161.21→141.75 ms (−12.1%), and
+  backend CPU 13.50→12.99 ms/request (−3.8%). Hybrid p95 was 221.15→240.26 ms
+  (+8.6%), p99 281.00→309.18 ms (+10.0%), and backend CPU 46.58→46.43 ms/request
+  (−0.3%). Host load ranged 1.95–25.02, so latency attribution is inconclusive;
+  the q6 count scan did directly fall from 16,429 to 61 shared-hit blocks.
+- The fresh-load comparison used identical actual-content SQL per mode and four
+  CPU/16-GiB isolated PostgreSQL 16.15 arms with fsync, full-page writes and
+  synchronous commit enabled. The frequency index added 116,023,296 bytes. BULK
+  CPU/WAL increased 21.0%/23.3%; COPY CPU/WAL increased 45.6%/33.3%. The
+  regenerated importer output had 18 additional postings and total-tf rows
+  compared with the preserved source; the difference remains unexplained and is
+  not attributed to the index. Sequential-arm host load varied 3.10–16.23, and
+  these measurements excluded fresh raw-WARC parsing and Lance vector writes.
+- Decision: prepare the frequency index as optional before production default
+  promotion. Keep the present development candidate unchanged until the locked
+  100k→1m profile can validate the trade-off. This is a configuration decision,
+  not an implemented native change or production approval. The current native
+  fingerprint, PG16 artifact SHA-256 and Cargo.lock SHA-256 matched the existing
+  validation receipt, so the immutable artifact was reused; no native build,
+  install, SQL regression, importer DB or upgrade was claimed for this docs-only
+  change.
+- Checks run: `python3 tools/check_docs.py` and `git diff --check` (results are
+  recorded in the private run evidence). The first private profile aggregator
+  attempt stopped on a scalar-vs-sequence host-load field assumption; its parser
+  was corrected and the final report recomputed from the preserved files without
+  modifying them. No release, production SLA, independent relevance result, or
+  100k/1m performance claim was produced.
+- Next: resume the scale arms only after an approved corpus supplies at least
+  100,000 and then 1,000,000 distinct documents and immutable matching 384-d
+  vectors (or generation from an approved existing model is authorized). Preserve
+  per-document length/provenance and use the registered workload and budget.
+
 ## Issue #16 — operating-corpus independent relevance evaluation (2026-11-01)
 
 - The structured queue selected P1 issue #16 after prerequisites #13, #15 and

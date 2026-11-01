@@ -83,7 +83,7 @@ pgwarc_lance/
 │   ├── check_docs.py           # 문서 링크와 하네스 drift 검증
 │   ├── preflight_quality_inputs.py # WARC/query/qrels와 real-corpus manifest read-only preflight
 │   ├── audit_bm25_index.py    # 저장 본문과 BM25 posting read-only 일관성 검사
-│   ├── doctor_pg_lance.py     # PostgreSQL/Lance ID·metadata·outbox read-only 대사
+│   ├── doctor_pg_lance.py     # PostgreSQL/Lance 운영 metrics와 read-only 대사
 │   ├── collection_manifest.py # operator-owned collection/model-version manifest
 │   ├── audit_warc_import.py   # raw WARC import accounting과 fingerprint manifest
 │   └── warc_importer.py       # WARC/WARC.GZ -> metadata/BM25/Lance SQL importer
@@ -101,6 +101,7 @@ pgwarc_lance/
     ├── test_collection_manifest.py # collection profile·stage·activate·rollback 회귀
     ├── test_lance_outbox_worker.py # outbox worker 단위 테스트
     ├── db_outbox.py           # PG16 committed-only/restart outbox 통합 테스트
+    ├── db_operations_doctor.py # PG16 운영 doctor/metrics/장애 주입 통합 테스트
     ├── test_eval_quality.py   # quality fixture 단위 테스트
     ├── test_execution_budget.py # 분석 실행 예산 gate 단위 테스트
     ├── test_make_quality_fixture.py # quality fixture builder 단위 테스트
@@ -311,12 +312,18 @@ python3 tools/warc_importer.py archive.warc.gz --chunking-strategy char_window \
 만들지 않는다. 현재 `--checkpoint-db`는 한 WARC record당 한 checkpoint ID를
 전제하므로 `char_window` mode를 실행 전에 거부한다.
 
-### PG–Lance read-only doctor (Issue #6 progress)
+### PG–Lance read-only doctor and operations metrics (Issues #6 and #19)
 
 `tools/doctor_pg_lance.py`는 PostgreSQL read-only transaction에서 BM25/WARC ID,
 URI별 기대 document revision, Lance ID/label/실제 revision, 미완료 outbox를 대사한다.
 중복 Lance ID, revision mapping이 기대하는 벡터 중 누락·오래된 revision, PG에 없는
-Lance/revision 행, mapping이 없는 벡터, WARC metadata와 다른 label, 대기/실패 outbox를 보고한다.
+Lance/revision 행, mapping이 없는 벡터, WARC metadata와 다른 label, outbox 대기·실패,
+PostgreSQL/Lance row-count delta를 보고한다. Queue depth, pending/ready/failed count,
+가장 오래된 반영 지연, 마지막 outbox 적용 version, 현재 Lance dataset version도 함께 낸다.
+PostgreSQL count는 extension 전체 BM25/WARC document ID 수다. 선택한 URI가 같은 전체 corpus를
+나타내는 경우에만 Lance count와 직접 비교할 수 있다.
+`--collection-manifest`를 주면 URI가 manifest의 active dataset과 일치하는지 확인하고
+collection ID/generation/active logical version을 보고한다.
 `--max-rows`는 기본 100,000행이고 250,000행을 넘길 수 없다. Lance scan은 벡터 배열을
 backend에서 물질화하므로 행 제한을 넘긴 corpus는 `incomplete`로 보고하고 합격 판정을
 내리지 않는다. 전체 corpus 대규모 대사에는 paged scanner가 필요하다.
@@ -328,27 +335,39 @@ identity는 포함하지 않는다. 기존 Lance dataset은
 row의 revision을 기록한다. 직접 revision 없는 Lance API를 쓰면 이 문서 mapping의 벡터는
 unversioned/stale로 표시된다. `reconciliation_complete`는 PostgreSQL과 Lance 사이에
 공통 원자 snapshot이 없으므로 계속 `false`다. 이 도구는 read-only 점검이며 자동 복구
-명령을 제공하지 않는다. 출력은 변경 전 dry-run 진단으로 취급한다. source 변경을
-확인한 뒤에는 같은 trusted embedding 입력으로 importer의 `outbox` 모드를 다시 실행하고,
-PG commit 뒤 worker가 revisioned ID upsert를 적용하게 한다. Lance 쓰기 뒤 PG
-acknowledgment가 실패해 job이 `pending`으로 돌아온 경우, 오류 원인과 doctor 결과를
-검토한 다음 `python3 tools/lance_outbox_worker.py --once --psql "$WORKER_PSQL"`로
-명시적으로 재생하고 doctor를 다시 실행한다. doctor 자체는 `--repair` 옵션이나 행 삭제를
-수행하지 않는다.
-Exit code `0`은 관측 mismatch가 없다는 뜻이지 대사 완료가 아니다. `1`은 관측된
-mismatch, `2`는 조회 실패, `3`은 row limit 초과, `4`는 관측 mismatch는 없지만 구조적
-검증 한계가 남았음을 뜻한다.
-
-PostgreSQL 조회는 `REPEATABLE READ READ ONLY`, Lance 조회는 단일 dataset scan으로
-고정하지만 두 시스템 사이의 원자적 snapshot은 아니다. 운영 중 writer가 돌고 있으면
-결과가 한 시점의 cross-store 상태를 뜻하지 않으므로 importer/worker와 외부 Lance writer를
-멈춘 점검 창에서 실행해야 한다.
+명령을 제공하지 않는다. 출력은 변경 전 dry-run 진단으로 취급한다. Prometheus 형식은
+숫자 집계와 제한된 finding 이름만 내보내며 dataset URI, 로컬 경로, credential,
+`last_error`, source 파일명, 원문을 출력하지 않는다. JSON은 finding별 최대 20개 document ID를
+포함한다. Inline password는 `--psql`에서 거부한다. 검색 권한이 필요 없는
+`pgwarc_doctor` 전용 역할 예시는 [OPERATIONS.md](OPERATIONS.md)에 있다. 이 역할은 count/revision/outbox
+조회와 `lance_scan_document_state`, `lance_dataset_versions` 실행만 허용한다.
 
 ```bash
 python3 tools/doctor_pg_lance.py --uri "$LANCE_URI" \
-    --psql "$READ_ONLY_PSQL" --max-rows 100000 \
-    > "$PRIVATE_EVIDENCE_DIR/pg-lance-doctor.json"
+    --collection-manifest "$COLLECTION_MANIFEST" \
+    --psql "$DOCTOR_PSQL" --max-rows 100000
+python3 tools/doctor_pg_lance.py --uri "$LANCE_URI" \
+    --collection-manifest "$COLLECTION_MANIFEST" \
+    --psql "$DOCTOR_PSQL" --format prometheus --max-rows 100000
 ```
+
+Pending 작업은 commit된 입력이 유효함을 확인한 뒤
+`python3 tools/lance_outbox_worker.py --once --psql "$WORKER_PSQL"`로 명시적으로 재생한다.
+Failed 작업은 오류를 비공개로 확인하고 replay 안전성을 검토한 뒤에만 runbook 절차로
+재시도한다. 수동으로 `completed`로 바꾸지 않는다. ID/count 불일치나 고아 상태는 writer를
+멈추고 PostgreSQL과 Lance를 함께 보존한 뒤 격리 restore에서 조사한다. doctor 자체는
+`--repair` 옵션이나 행 삭제를 수행하지 않는다.
+현재 cross-store 원자 대사를 보장할 수 없어, 이상이 관측되지 않은 완전한 스캔도 exit `4`로
+끝나며 `reconciliation_complete=false`를 유지한다. Exit `0`은 이 도구에서 현재 사용되지 않는다.
+Exit `1`은 관측 mismatch, `2`는 조회 실패, `3`은 row limit 초과, `4`는 관측 mismatch가
+없어도 구조적 검증 한계가 남았음을 뜻한다.
+
+PostgreSQL 조회는 `REPEATABLE READ READ ONLY`, Lance version listing과 row scan은 별도
+관측이며 두 시스템 사이의 원자적 snapshot은 아니다. 운영 중 writer가 돌고 있으면
+결과가 한 시점의 cross-store 상태를 뜻하지 않으므로 importer/worker와 외부 Lance writer를
+멈춘 점검 창에서 실행해야 한다.
+`--max-rows` 기본값은 100,000이고 250,000을 넘길 수 없다. `status=incomplete` 또는 exit `3`은
+합격 판정이 아니다. 운영 예시와 제한 권한 SQL은 [OPERATIONS.md](OPERATIONS.md)를 참고한다.
 
 ### 보안/운영 설정 (GUC)
 

@@ -4,6 +4,62 @@
 
 이 문서는 로컬 Docker 개발 환경에서 얻은 기준선과 성능 관련 결정을 기록한다. 수치는 노트북/컨테이너 상태에 민감하므로 release benchmark가 아니라 회귀 비교용 smoke baseline이다.
 
+## Issue #17 — PostgreSQL 16 scale qualification profile (2026-11-01)
+
+이 프로파일은 1.0 성능 자격 심사 기준이다. 사용자에게 약속하는 절대 latency SLA가
+아니며, 별도의 제품 목표가 승인되기 전에는 p95/p99 절대값으로 서비스 수준을
+광고하지 않는다.
+
+- 기준 corpus는 Common Crawl 2026-39에서 확인한 실제 whole-document 입력이다.
+  문서 21,873개, BM25 posting 8,240,889개, WARC metadata 21,873개, 384차원 E5
+  vector 21,825개, importer 입력 text 186,924,823 bytes다. 기존 최대 정규화 본문은
+  5,234,243자였다. chunk splitting이나 길이 절단을 하지 않고 문서별 길이를 보존한다.
+- 목표 규모는 고유한 실제 문서 100,000개와 1,000,000개다. source가 충분하지 않으면
+  같은 행을 복제하거나 합성해 규모를 채우지 않는다. 현재 승인된 corpus만으로는
+  두 목표 규모의 검색·적재 측정을 시작할 수 없다.
+- 서버 조건은 Linux x86_64, PostgreSQL 16.15, 격리 container 4 CPU / 16 GiB,
+  network 없음이다. DB image는
+  `docker.io/library/postgres:16-bookworm@sha256:d81f7b51697014367236d07ec58b54153fc28f828b72bf247fe5c7487520bcb0`으로
+  고정한다. `fsync`, `full_page_writes`, `synchronous_commit`을 켜고,
+  `shared_buffers=128MB`, `work_mem=4MB`, `effective_cache_size=4GB`,
+  `max_parallel_workers_per_gather=0`, `checkpoint_timeout=1h`, `max_wal_size=16GB`,
+  `track_io_timing=on`으로 고정한다. 실행 전 container image digest도 pin해 보존한다.
+- 검색 mix는 고정된 8개 query/vector 쌍이며 BM25, vector, hybrid를 각각 실행한다.
+  `k=5`, client 1개와 8개, client당 warmup 8회와 측정 128회를 사용하고, arm마다
+  5회 교차 실행한다. 비교 arm의 1분 host load가 각각 4 이하이고 쌍 간 차이가
+  1 이하인 round만 유효하다. Query 내용은 공개 문서에 싣지 않고 결과 fingerprint를 남긴다.
+- 적재는 같은 distinct input으로 BULK와 COPY를 각각 fresh PostgreSQL instance에
+  실행하고 mode/index 조합마다 fresh instance를 3회 만든다. importer 시간과 최종
+  checkpoint를 분리해 재고, cgroup CPU, peak RSS, PostgreSQL temp bytes, WAL bytes,
+  database/index 크기를 함께 수집한다.
+
+frequency index를 기본으로 유지하기 위한 사전 등록 비교 예산은 다음과 같다.
+
+- 각 arm의 row accounting과 검색 결과 fingerprint가 같고, query/import 오류가 없어야
+  한다. 이는 점수 계산의 수학적 일치이지 relevance 품질 판정은 아니다.
+- 8-client 검색에서 BM25 p95가 최소 10% 개선되고 p99 퇴보는 5% 이하여야 한다.
+  vector와 hybrid p95/p99 퇴보도 각각 5% 이하여야 한다. 이 조건은 두 목표 규모에서
+  모두 성립해야 한다.
+- BULK와 COPY 모두 적재 시간·cgroup CPU·WAL 증가가 index 없는 arm 대비 10% 이하여야
+  하며, checkpoint 후 database 전체 증가량은 5% 이하여야 한다. peak RSS는 16 GiB
+  container의 80% 이하로 두고 OOM, temp limit, disk full이 없어야 한다.
+- 모든 측정치는 기록하되 이 상대 비교 budget을 절대 production SLA로 해석하지 않는다.
+  100,000 및 1,000,000 고유 문서에서 통과하기 전에는 지원 규모를 주장하지 않는다.
+
+### Frequency index — current-corpus decision evidence
+
+기존 PostgreSQL 16.15의 21,873-document 비교에서는 narrow count scan의 shared-hit이
+16,429에서 61로 줄었고 BM25 p95 중앙값은 114.32에서 100.71 ms로 낮아졌다. 같은
+8-query profile의 hybrid p95는 221.15에서 240.26 ms로 높아졌으며 4-CPU host load는
+1.95–25.02로 흔들렸다. 따라서 end-to-end latency 변화는 원인 귀속이 불가능하다.
+
+동일 실제 corpus의 fresh-load 비교에서 index는 116,023,296 bytes를 차지했다. BULK에서
+cgroup CPU와 WAL은 각각 21.0%, 23.3% 증가했고 COPY에서는 45.6%, 33.3% 증가했다.
+적재 arm은 순차 실행되어 host load와 storage contention 영향을 완전히 분리하지
+못했다. 현재 evidence에 따른 결정은 production 기본값으로 승격하지 않고 optional
+구성으로 준비하는 것이다. 100,000 및 1,000,000 문서 실측 전에는 source schema를
+바꾸거나 운영 지원을 주장하지 않는다.
+
 ## 환경
 
 - Repo: `<local checkout>`

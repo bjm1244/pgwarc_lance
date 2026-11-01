@@ -1,4 +1,41 @@
-# Source publication review — updated 2026-10-31
+# Source publication review — updated 2026-11-01
+
+## Issue #19 — read-only indexing operations doctor and metrics (2026-11-01)
+
+`tools/doctor_pg_lance.py` now reports URI queue depth, pending/ready/processing/
+failed counts, oldest unfinished delay, latest applied outbox version, current
+Lance dataset version, PostgreSQL/Lance count delta, duplicate IDs, and missing,
+stale or orphaned state. An optional validated collection manifest reports the
+logical active collection version and checks that its dataset matches the URI.
+JSON and Prometheus output omit paths, credentials, source filenames, failure
+details and document text; Prometheus finding families use fixed names. The
+doctor and exports are dry-run only. `OPERATIONS.md` documents reader-role
+grants, maintenance-window use, exit codes, recovery guidance, and the rule to
+investigate count/ID mismatches in an isolated restore.
+
+The isolated PostgreSQL 16.15 fault-injection fixture used the unchanged 0.1.25
+artifact (SHA-256 `ec88bf4c7cc8afd3171603bdbfd9459b31868005b676a58ffc4399c905cf9636`)
+and unchanged Cargo.lock (SHA-256
+`227a6c85056478a560259ea20a7993d76df2c2262b6869fac7c6012bc0055079`). It
+installed the extension into a fresh disposable database, injected a real
+Lance vector-dimension failure, and confirmed failed work remained unacknowledged.
+With a least-privilege reader it detected count delta, duplicate and orphan
+rows, pending and failed work, queue delay and dataset version. It verified
+path/credential/source/body redaction, valid aggregate Prometheus family
+headers, dry-run guidance consistent with the runbook, and unchanged database
+state after both reports. The final Python regression run passed 552 tests;
+documentation checks, Rust formatting, compilation and whitespace checks passed.
+
+An earlier `tests/db_outbox.py` attempt stopped in its broader importer fixture:
+the preserved artifact lacks provenance columns expected by the current source
+fixture. It did not reach the doctor checks; the isolated operations fixture
+above exercised this issue's checks independently. PostgreSQL and Lance still
+do not share an atomic snapshot, row scans are capped at 250,000, and the
+PostgreSQL count is global to the extension while one Lance URI may cover only
+part of that corpus. A clean observed scan therefore exits `4` and is not
+production approval. Native inputs did not change; the existing PG16 native
+validation receipt was reused, with no new package build, SQL regression suite,
+populated upgrade, binary release or production deployment claimed.
 
 ## Issue #13 — candidate limits and explainable weighted RRF in 0.1.25 (2026-10-31)
 

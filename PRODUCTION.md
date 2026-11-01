@@ -21,6 +21,15 @@ The initial validation profile is PostgreSQL 16, a single instance, local Lance
 storage, trusted operators, and a separate disposable validation database.
 Confirm the intended workload and corpus before assigning release thresholds.
 
+Issue #19 adds a read-only indexing doctor and Prometheus export for queue delay,
+queue depth, failures, applied/dataset versions, count deltas and bounded
+duplicate/orphan/revision findings. Its least-privilege PG16.15 fault-injection
+fixture and dry-run/runbook checks passed with synthetic rows. The tool cannot
+observe a cross-store atomic snapshot, scans at most 250,000 rows, and compares
+the extension-wide PostgreSQL document count with one caller-selected Lance
+URI. Use only for maintenance-window diagnosis; these checks do not establish
+a production monitoring SLA, recovery time objective or production approval.
+
 ## Required evidence
 
 | Gate | Acceptance evidence |
@@ -37,7 +46,7 @@ Confirm the intended workload and corpus before assigning release thresholds.
 | Backup and recovery | Coordinated PostgreSQL and Lance snapshots; restore into a clean instance and verify row counts, dataset versions and retrieval results. |
 | Outbox consistency | Verify committed-only delivery, duplicate replay, per-URI ordering, failure blocking, event version/lag reporting and pending-queue backup recovery. |
 | Release and upgrade | PG16 candidate has a versioned artifact, checksum-bound Cargo/native/compiler notices and SBOM, fresh install, and populated upgrade evidence. Binary redistribution and production approval remain separate decisions. Test an actual upgrade whenever a supported previous version exists; reconnect sessions after replacing the shared library. |
-| Operations | Least-privilege roles, managed credentials, OS-controlled dataset root, monitoring, cancellation limits and tested incident procedures. |
+| Operations | Least-privilege roles, managed credentials, OS-controlled dataset root, monitoring, cancellation limits and tested incident procedures. Issue #19 adds `tools/doctor_pg_lance.py`, a sanitized Prometheus format and a read-only `pgwarc_reader` runbook; verify queue/failure alerts and mismatch recovery against an operating corpus before production. |
 
 ## Validation commands
 

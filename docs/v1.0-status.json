@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-10-31T16:44:59.545134+00:00",
+  "updated_at": "2026-11-01T04:47:53.093182+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -261,6 +261,7 @@
       "summary": "BM25·vector·hybrid 비교와 Recall@k·MRR·nDCG 및 입력 checksum 기록을 추가하고 회귀를 통과했다. 운영 corpus의 개별 출처 권리와 독립 human qrels, 고정 split 및 사전 합격 기준이 없어 실제 평가 완료는 보류한다.",
       "blocker": "Common Crawl 약관만으로 선택 문서별 권리 상태가 확인되지 않았고, 21,873문서 운영 corpus에 독립 human relevance labels가 없다. 별도 SciFact baseline은 대상 corpus의 qrels를 대체하지 않는다. 고정 tuning/holdout, model checksum, 사전 acceptance threshold 및 허용 회귀 범위도 없다.",
       "resume_condition": "평가할 corpus와 출처별 권리 검토를 확정하고, 고정 질의 및 완전한 pooled candidate qrels를 사람이 판정한다. 질의·qrels·embedding model checksum과 tuning/holdout manifest를 고정하며 holdout 결과를 보기 전에 acceptance threshold와 허용 회귀 범위를 정한 뒤 BM25/vector/hybrid 평가를 실행한다.",
+      "public_commit": "a74af61b31921bba81e35f9acf32ecfdc9ec26fc",
       "criteria_passed": []
     },
     {
@@ -272,7 +273,7 @@
         13,
         15
       ],
-      "status": "queued",
+      "status": "blocked",
       "criteria_passed": []
     },
     {
@@ -296,8 +297,13 @@
         6,
         10
       ],
-      "status": "queued",
-      "criteria_passed": []
+      "status": "done",
+      "summary": "읽기 전용 색인 doctor에 queue 지연·실패·버전·count 대사와 민감정보를 배제한 Prometheus 출력, 제한 권한 실행 역할 및 dry-run 운영 절차를 추가하고 PG16 고장 주입으로 검증했다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
     },
     {
       "number": 20,

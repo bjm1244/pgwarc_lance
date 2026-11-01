@@ -63,6 +63,20 @@ GRANT EXECUTE ON FUNCTION
     TO pgwarc_reader;
 GRANT EXECUTE ON FUNCTION public.lance_scan_document_state(text,integer)
     TO pgwarc_reader;
+GRANT EXECUTE ON FUNCTION public.lance_dataset_versions(text)
+    TO pgwarc_reader;
+
+-- Doctor-only role: no search-term access or write privileges are needed.
+CREATE ROLE pgwarc_doctor NOLOGIN;
+GRANT USAGE ON SCHEMA public, pgwarc_lance TO pgwarc_doctor;
+GRANT SELECT ON pgwarc_lance.bm25_doc, pgwarc_lance.warc_record,
+    pgwarc_lance.lance_outbox_status TO pgwarc_doctor;
+GRANT SELECT (uri, doc_id, expected_revision, is_deleted)
+    ON pgwarc_lance.lance_document_revision TO pgwarc_doctor;
+GRANT SELECT (id, uri, state, ids)
+    ON pgwarc_lance.lance_outbox TO pgwarc_doctor;
+GRANT EXECUTE ON FUNCTION public.lance_scan_document_state(text,integer),
+    public.lance_dataset_versions(text) TO pgwarc_doctor;
 
 GRANT SELECT, INSERT, UPDATE ON pgwarc_lance.bm25_doc,
     pgwarc_lance.warc_record TO pgwarc_writer;
@@ -92,10 +106,15 @@ GRANT EXECUTE ON FUNCTION public.lance_outbox_process_next() TO pgwarc_outbox_wo
 GRANT pgwarc_reader TO archive_reader_login;
 GRANT pgwarc_writer TO archive_writer_login;
 GRANT pgwarc_outbox_worker TO archive_worker_login;
+GRANT pgwarc_doctor TO archive_doctor_login;
 ALTER ROLE archive_reader_login SET statement_timeout = '2s';
 ALTER ROLE archive_reader_login SET idle_in_transaction_session_timeout = '30s';
 ALTER ROLE archive_reader_login SET work_mem = '4MB';
 ALTER ROLE archive_reader_login SET temp_file_limit = '256MB';
+ALTER ROLE archive_doctor_login SET statement_timeout = '5min';
+ALTER ROLE archive_doctor_login SET idle_in_transaction_session_timeout = '30s';
+ALTER ROLE archive_doctor_login SET work_mem = '4MB';
+ALTER ROLE archive_doctor_login SET temp_file_limit = '256MB';
 ALTER ROLE archive_writer_login SET statement_timeout = '120s';
 ALTER ROLE archive_writer_login SET idle_in_transaction_session_timeout = '30s';
 ```
@@ -600,6 +619,57 @@ known document IDs, vector/metadata contents and labelled queries after imports
 and restores. A missing Lance data object can leave `lance_count` unchanged;
 compare saved file hashes and exercise representative content reads during recovery.
 Avoid full `lance_scan` in routine monitoring.
+
+### Read-only doctor and exportable metrics
+
+`tools/doctor_pg_lance.py` reports PostgreSQL/Lance row-count delta, duplicate,
+missing, stale and orphan findings, outbox queue depth and ready/pending/failed
+counts, oldest unfinished delay, latest outbox-applied version, and the current
+Lance dataset version. `--collection-manifest` additionally reports the
+validated logical collection ID, generation and active version; the active
+dataset path must match `--uri`. The report omits dataset paths, model details,
+credentials, `last_error`, source filenames and document text. JSON includes at
+most 20 sample document IDs per finding. Prometheus output contains aggregate
+gauges and fixed finding names; the optional active collection/version labels
+come from the identifier-validated manifest. A value of `-1` in Prometheus
+means a version is unavailable. Outbox applied version and Lance dataset tip
+are separate observations: direct writes and an unacknowledged Lance write can
+cause different observations.
+
+Run it in a maintenance window after stopping importers, workers and external
+Lance writers. PostgreSQL is read in a `REPEATABLE READ READ ONLY` transaction;
+Lance row scan and version listing are separate observations and do not share an
+atomic snapshot. The default scan bound is 100,000 rows and the maximum is
+250,000. A larger dataset returns an incomplete result and must not be treated
+as clean. The command never repairs state. Prefer a login inheriting the
+doctor-only `pgwarc_doctor` role shown above, with protected libpq
+service/credential files. This role has the required reads and version-listing
+functions but no write privileges. The example login also has a five-minute
+server `statement_timeout`; keep it no greater than `--timeout-seconds`.
+Do not put a password in the `--psql` value.
+
+```bash
+python3 tools/doctor_pg_lance.py --uri "$LANCE_URI" \
+    --collection-manifest "$COLLECTION_MANIFEST" \
+    --psql "$DOCTOR_PSQL" --max-rows 100000
+python3 tools/doctor_pg_lance.py --uri "$LANCE_URI" \
+    --collection-manifest "$COLLECTION_MANIFEST" \
+    --psql "$DOCTOR_PSQL" --format prometheus --max-rows 100000
+```
+
+Because the tool cannot prove an atomic cross-store reconciliation, a complete
+scan with no observed mismatch currently exits `4` and keeps
+`reconciliation_complete=false`; exit `0` is not currently used. Exit `1`
+reports findings, `2` means the read-only query could not complete, and `3`
+means the row bound was exceeded. A clean observed scan is not production
+approval.
+For pending work, verify the committed input before explicitly retrying with
+`python3 tools/lance_outbox_worker.py --once --psql "$WORKER_PSQL"`. For a
+terminal failure, inspect its error privately through the worker-role
+`lance_outbox_failures` view and only reset it after confirming replay safety.
+Never mark an event completed manually. For any count/ID mismatch, stop writers,
+preserve PostgreSQL and Lance together, and investigate in an isolated restore;
+do not infer a safe repair from counts alone.
 
 If a writer times out or disconnects, preserve its inputs/embeddings and logs,
 stop conflicting writers, and retry the same input with `upsert`. Compare the
