@@ -21,6 +21,12 @@ The initial validation profile is PostgreSQL 16, a single instance, local Lance
 storage, trusted operators, and a separate disposable validation database.
 Confirm the intended workload and corpus before assigning release thresholds.
 
+The Issue #17 scale gate remains open: the verified corpus has 21,873 distinct
+documents and 21,825 matching 384-dimensional vectors, below the registered
+100,000 and 1,000,000-document runs. The synthetic 100,000-document memory
+fixture is not corpus-scale qualification. No supported-scale claim or absolute
+latency SLA is established; see the performance checkpoint in PUBLICATION.md.
+
 Issue #19 adds a read-only indexing doctor and Prometheus export for queue delay,
 queue depth, failures, applied/dataset versions, count deltas and bounded
 duplicate/orphan/revision findings. Its least-privilege PG16.15 fault-injection

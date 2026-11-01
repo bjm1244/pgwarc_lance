@@ -1,5 +1,46 @@
 # Development log
 
+## Issue #17 — performance evidence ownership recovery (2026-11-02, blocked)
+
+- The runner rejected the preceding issue result because its C1/C3 evidence
+  pointed into a different support run. This checkpoint reattached the
+  preserved measurements to a new private validation-run receipt. No runner
+  state, queue definition, source WARC, database, Lance dataset, model, vector
+  or native artifact was changed.
+- C1 remains passed: the PG16.15/Linux x86_64, 4-CPU/16-GiB profile and relative
+  search/ingest budget are fixed before the 100k/1m trials. The whole-document
+  length distribution, 384-dimension, eight-query/vector mix, k=5, clients 1/8,
+  warmup/request counts, BULK/COPY arms, durability, repetitions and CPU/RSS/
+  temp/WAL/disk metrics are recorded. The absolute customer SLA remains unset.
+- C2 remains blocked. The one available WARC archive is 938,695,574 bytes and
+  its SHA-256 still matches the preserved source audit:
+  4b6b55dc25afdb8ef9bb0e48213faa73cf07756f195b0863ba2693638bf784f8.
+  The verified input has 66,190 raw records, 21,873 distinct documents,
+  8,240,889 BM25 postings and 21,825 matching 384-dimensional vectors. Its
+  audit and conversion/ingest report checksums also matched. The registered
+  100k/1m trials and their p95/p99, ingest, CPU/RSS/temp/WAL/disk measurements
+  were not run; no repeated or synthetic rows or new vectors were used.
+- C3 remains passed for the current-corpus decision only. All 18 preserved
+  comparison artifacts matched their recorded checksums, and the current
+  native fingerprint 61651cdab14f3740dc80e1aa86c995964be199674ea159ce626a2082eb8baccd
+  matches the existing PG16 receipt. The earlier same-workload read/write
+  measurements remain limited to 21,873 documents; variable host load prevents
+  causal latency attribution, and the import comparison retains an unexplained
+  18-posting difference. The decision is to make the frequency index optional
+  before production default; the current source remains unchanged.
+- The public publication and production notes now state the scale limitation
+  and distinguish the synthetic 100k memory fixture from corpus qualification.
+  The tracked source update is commit
+  2606a6b78a17dc67578d060d8e8260a654ed559d. python3 tools/check_docs.py and
+  git diff --check passed for this documentation-only change. No PG16 build,
+  SQL regression, importer DB run, populated upgrade, or new performance trial
+  is claimed.
+- Resume condition: supply approved real inputs covering 100,000 and then
+  1,000,000 distinct documents with matching immutable 384-dimensional vectors,
+  or explicitly authorize generation with an approved existing model. Preserve
+  provenance and exact document lengths, then run the registered 100k stage
+  before 1m. No supported-scale or production SLA claim is made.
+
 ## Issue #20 — 새 API 최소 권한·경로·필터 보안 회귀 (2026-11-02, complete)
 
 - Runner가 선택한 P0 issue #20의 C1–C3 및 완료된 선행 #8, #12, #19를

@@ -1,5 +1,48 @@
 # Source publication review — updated 2026-11-02
 
+## Issue #17 — scale qualification checkpoint (2026-11-02, blocked)
+
+The registered engineering profile uses 21,873 whole-document rows with
+186,924,823 text bytes (mean 8,545.9 bytes per document), preserves the original
+length distribution without truncation or chunk splitting (maximum normalized
+length 5,234,243 characters), and fixes 384-dimensional vectors. The server
+profile is Linux x86_64 / PostgreSQL 16.15, 4 CPUs and 16 GiB. Search uses an
+eight query/vector mix, BM25/vector/hybrid
+modes, k=5, clients 1 and 8, eight warmups and 128 timed requests per client
+over five alternating read rounds. Ingest compares BULK and COPY in three fresh
+databases per index arm, with identical distinct input and synchronous
+durability. The relative budget requires zero request/import errors and equal
+result fingerprints. Mode-wise p50/p95/p99 and QPS, ingest wall time, cgroup CPU,
+peak RSS, PostgreSQL temp files/bytes, WAL and post-checkpoint database/index
+size are measured. At eight clients BM25 p95 must improve at least 10% with no
+more than 5% p99 regression, while vector and hybrid p95/p99 may regress no more
+than 5%. BULK/COPY elapsed time, CPU and WAL overhead are capped at 10%,
+post-checkpoint database bytes at 5%, and peak RSS at 80% of container memory.
+Temporary usage must be reported, with no OOM, temp-limit or disk-full errors.
+Every threshold applies at both target scales. These are preregistered
+engineering thresholds, not an absolute customer SLA.
+
+The verified source corpus has 21,873 distinct documents, 8,240,889 BM25
+postings and 21,825 matching 384-dimensional vectors. It is below the first
+100,000-document target, so neither the 100k nor the 1m search/ingest stage was
+run. No scale support claim is made. The 100,000-row synthetic search-memory
+fixture elsewhere in this history is not a current-corpus scale result.
+
+The preserved same-workload 0.1.18/0.1.19 frequency-index comparison on this
+corpus reduced the q6 count-scan shared hits from 16,429 to 61. BM25 p95/p99
+fell 11.9%/12.1%, while hybrid p95/p99 rose 8.6%/10.0%. Host load ranged from
+1.95 to 25.02 on four CPUs, so end-to-end latency cannot be attributed to the
+index. In fresh-load
+comparisons the index used 116,023,296 bytes; BULK elapsed time fell 2.2% while
+CPU/WAL rose 21.0%/23.3%, and COPY elapsed time/CPU/WAL rose 45.4%/45.6%/33.3%.
+The regenerated import
+also contained 18 more postings than the preserved source, an unresolved
+difference not attributed to the index. The decision is to make the index
+optional before any production default; it remains in the current development
+candidate and has not been optionized. This decision is not production
+approval. Detailed dated
+measurements and limits follow below.
+
 ## Issue #20 — least privilege, path policy, and cancellation regression (2026-11-02)
 
 The operational grant example now defines an explicit no-login `pgwarc_admin`
