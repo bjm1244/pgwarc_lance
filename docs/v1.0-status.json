@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-11-01T04:47:53.093182+00:00",
+  "updated_at": "2026-11-01T10:39:05.500367+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -274,7 +274,13 @@
         15
       ],
       "status": "blocked",
-      "criteria_passed": []
+      "summary": "The PostgreSQL 16.15 qualification profile and current-corpus frequency-index decision are evidence-backed. The verified source contains 21,873 distinct documents, below both required scale stages, so no 100k or 1m support claim is made.",
+      "blocker": "The authorized, verified Common Crawl corpus contains 21,873 distinct indexed documents and 21,825 matching 384-dimensional vectors. It cannot support the required 100,000 and 1,000,000 distinct-document search and ingest stages. Repeated or synthesized rows would not represent the current corpus.",
+      "resume_condition": "Provide approved real inputs covering at least 1,000,000 distinct documents and matching immutable 384-dimensional vectors, or provide additional real documents and explicitly authorize vector generation with an approved existing model. Preserve provenance and document lengths, then run the registered 100k stage before 1m.",
+      "criteria_passed": [
+        "C1",
+        "C3"
+      ]
     },
     {
       "number": 18,
@@ -299,6 +305,7 @@
       ],
       "status": "done",
       "summary": "읽기 전용 색인 doctor에 queue 지연·실패·버전·count 대사와 민감정보를 배제한 Prometheus 출력, 제한 권한 실행 역할 및 dry-run 운영 절차를 추가하고 PG16 고장 주입으로 검증했다.",
+      "public_commit": "af763a78b45c1fee12654934f7a9b10c0b7536de",
       "criteria_passed": [
         "C1",
         "C2",

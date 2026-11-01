@@ -111,6 +111,11 @@
   was corrected and the final report recomputed from the preserved files without
   modifying them. No release, production SLA, independent relevance result, or
   100k/1m performance claim was produced.
+- This queue cycle rechecked the complete WARC checksum against the preserved
+  archive audit and verified all 18 checksummed inputs cited by the index review.
+  The registered profile and relative budget remain in the current source. The
+  verified corpus still has only 21,873 distinct documents, so no 100k/1m
+  database arm was started and C2 remains blocked on approved source capacity.
 - Next: resume the scale arms only after an approved corpus supplies at least
   100,000 and then 1,000,000 distinct documents and immutable matching 384-d
   vectors (or generation from an approved existing model is authorized). Preserve
