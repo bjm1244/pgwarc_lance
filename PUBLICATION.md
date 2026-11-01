@@ -1,4 +1,53 @@
-# Source publication review — updated 2026-11-01
+# Source publication review — updated 2026-11-02
+
+## Issue #20 — least privilege, path policy, and cancellation regression (2026-11-02)
+
+The operational grant example now defines an explicit no-login `pgwarc_admin`
+role. It inherits the documented reader, writer, outbox-worker, and doctor roles
+and receives a short allowlist for direct dataset administration. This role
+cannot install or alter the extension or change superuser-only settings. The
+security policy and operations runbook describe the trusted OS-owner and
+shared-corpus boundary; collection manifests remain operator-owned files rather
+than tenant access controls.
+
+The PG16 security regression checks `PUBLIC EXECUTE` across every extension
+function and checks selective function and table privileges for reader, writer,
+worker, doctor, and admin roles. It exercises reader state/version inspection,
+writer BM25 indexing, admin dataset creation, and denial of write, enqueue, and
+DBA-only settings from roles without those capabilities. The URI regression
+covers traversal, sibling-prefix, relative, percent-encoded, and remote URIs;
+the Rust path-policy unit fixture resolves internal symlinks and rejects
+escaping and dangling links. Filter injection, oversized JSON filters, and the
+10,001-document fan-out limit are covered by the search regression. That
+regression also rejects a 2,500,001-byte BM25 query at the configured 2,500,000
+UTF-8 byte bound.
+
+Worker SIGINT/SIGTERM cancellation now reports `cancelled` for an interrupted
+`--once` SQL call rather than `idle`. A subprocess regression verifies that the
+signal reaches and terminates the in-flight `psql` child. PostgreSQL 16.15
+integration checks also cancelled an active 10,000-vector upsert, retried on the
+same backend, and verified unique current rows, committed SQL state, and no late
+Lance version change.
+
+The source native fingerprint remained
+`61651cdab14f3740dc80e1aa86c995964be199674ea159ce626a2082eb8baccd`, matching
+the validated 0.1.25 PostgreSQL 16 artifact (SHA-256
+`ec88bf4c7cc8afd3171603bdbfd9459b31868005b676a58ffc4399c905cf9636`) and
+Cargo.lock (`227a6c85056478a560259ea20a7993d76df2c2262b6869fac7c6012bc0055079`).
+That existing artifact was installed in a fresh disposable PostgreSQL 16.15
+database; SQL regressions `setup`, `functions`, `search`, and `security` passed
+4/4. Runtime safety passed 18/18 checks, database write cancellation passed
+10/10 checks, and the full Python suite passed 553 tests. The current available
+RustSec database revision `2295466c4e9df26647fd67d8fa1c705ac2fc7f81` contains
+1,395 advisories; the locked Linux PG16 dependency graph has zero vulnerable,
+unsound, or yanked findings and retains three unmaintained warnings. The
+publisher's tracked-source inspection found no internal paths or credential
+patterns in the reviewed snapshot.
+
+These checks qualify the permission and cancellation cases exercised by this
+issue. The extension remains a trusted-operator shared-corpus prototype without
+tenant isolation or distributed PostgreSQL/Lance atomic commits; no production
+approval or binary release follows from this result.
 
 ## Issue #19 — read-only indexing operations doctor and metrics (2026-11-01)
 

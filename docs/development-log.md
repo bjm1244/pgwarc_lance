@@ -1,5 +1,66 @@
 # Development log
 
+## Issue #20 — 새 API 최소 권한·경로·필터 보안 회귀 (2026-11-02, complete)
+
+- Runner가 선택한 P0 issue #20의 C1–C3 및 완료된 선행 #8, #12, #19를
+  진행했다. 시작 시 `development`는 clean이었고 `.codex/config.toml`은
+  `gpt-6-luna` / `max`였다. 별도 publication checkout·publisher의 GitHub 작업은
+  이 검증 중 실행하지 않았다.
+- 변경: `OPERATIONS.md`에 선택 함수 grant만 추가하는 no-login
+  `pgwarc_admin`을 정의했다. reader/writer/outbox-worker/doctor 역할을
+  상속하고 직접 dataset create/write/scan/restore 함수는 개별 grant한다.
+  DBA 전용 GUC·extension 소유권·설치/alter 권한은 주지 않는다. Collection
+  manifest의 파일 소유권과 신뢰 OS 운영자, 공유 corpus, 비-tenant 경계를
+  `OPERATIONS.md`·`SECURITY.md`에 명시했다.
+- ACL 회귀는 extension의 모든 함수에서 `PUBLIC EXECUTE`가 없는지 검사하고
+  reader/writer/worker/doctor/admin별 함수·테이블 권한을 확인한다. 실제 역할로
+  admin dataset create와 reader state/version 조회, writer BM25 indexing을
+  실행하고 제한된 역할의 create/enqueue/쓰기/DBA 설정 변경을 거부했다.
+- 취소 점검 중 `lance_outbox_worker.py --once`가 SIGTERM으로 진행 중 SQL을
+  중단해도 `idle`을 출력하던 상태 혼동을 고쳤다. 실제 자식 `psql` 프로세스에
+  signal이 전달되고 종료되는 회귀를 추가하고, `cancelled` 상태를 출력하게 했다.
+  실제 PG16 취소·재시도 시험에서는 10,000개 벡터 upsert가 취소된 뒤 같은
+  backend에서 재시도되어 고유 행·최신 label·commit·Lance 버전 안정성을 확인했다.
+- 경로 검사는 URI 경계/상대·원격/percent encoding과 실제 filesystem symlink
+  unit fixture를 확인했다. 검색 pg_regress는 filter injection, oversized JSON,
+  10,001건 초과 fan-out, 2,500,001-byte query 거부를 포함한다.
+  2026-11-02 현재 제공된 RustSec DB
+  commit `2295466c4e9df26647fd67d8fa1c705ac2fc7f81` (1,395 advisories)에서
+  vulnerability/unsound/yanked는 각각 0건이고 unmaintained 경고 3건이 남았다.
+- 기존 0.1.25 PostgreSQL 16.15 artifact SHA-256
+  `ec88bf4c7cc8afd3171603bdbfd9459b31868005b676a58ffc4399c905cf9636`,
+  Cargo.lock SHA-256
+  `227a6c85056478a560259ea20a7993d76df2c2262b6869fac7c6012bc0055079`, native
+  fingerprint
+  `61651cdab14f3740dc80e1aa86c995964be199674ea159ce626a2082eb8baccd`가 기존
+  PG16 영수증과 일치했다. `src/`, `sql/`, Cargo/vendor/control/Dockerfile은
+  변경하지 않아 해당 artifact를 격리 PostgreSQL 16.15의 fresh install과 SQL
+  regression에서 재사용했다. `setup/functions/search/security` 4/4,
+  `db_runtime_safety.py` 18/18, `db_write_cancellation.py` 10/10을 통과했다.
+  새 locked native build, populated upgrade, backup/restore를 수행했다고
+  주장하지 않는다.
+- 검증 명령: `make test-uri-policy` (5/5),
+  `python3 -m unittest discover -s tests -p 'test_*.py'` (553 tests),
+  `python3 -m py_compile tools/*.py tests/*.py`, `python3 tools/check_docs.py`,
+  `git diff --check`, PG16.15 `pg_regress` (4/4), 최신 제공된 cargo-audit, 및
+  publisher의 tracked-source sensitivity/path inspection을 통과했다. 첫
+  regression retry는 이미 설치된 extension DB를 재사용해 setup과 dataset
+  version이 달라졌다. 해당 diff를 보존하고 새 DB·새 Lance fixture로 다시
+  실행해 통과했다. oversized query 회귀를 추가한 첫 실행은 컨테이너에 갱신한
+  SQL 파일이 읽기 불가능한 소유/모드로 복사되어 중단됐다. 파일 권한을
+  수정하고 새 DB에서 다시 실행해 SQL 결과를 확인한 뒤 기대 출력을 갱신해
+  `pg_regress` 4/4를 통과했다. pg_regress padded output의 trailing whitespace도
+  result 표를 `DO` assertion으로 바꿔 diff check를 통과시켰다.
+- 비공개 검증 결과만으로 production 승인을 뜻하지 않는다. admin API는
+  신뢰 OS 운영자와 공유 corpus를 대상으로 하며 다중 tenant 격리와 PostgreSQL/
+  Lance 분산 atomic commit은 제공하지 않는다. native 소스/버전/의존성은
+  바뀌지 않았고 binary release·production 배포는 하지 않았다. 구현 commit은
+  `fd5794cdee17670bc85dfd59ac27499830777972`이다. 이 검증 로그는 결과 정리
+  commit으로 별도 누적한다.
+- 다음 작업은 runner가 queue에서 선택한다.
+- 구현 commit: `fd5794cdee17670bc85dfd59ac27499830777972`; oversized query
+  경계 회귀 commit: `21701fdb585464ceed5b65469baf8f78cef40e21`.
+
 ## Issue #19 — indexing operations doctor and metrics (2026-11-01, complete)
 
 - The runner-selected P1 issue #19 and its C1–C3 criteria took precedence over

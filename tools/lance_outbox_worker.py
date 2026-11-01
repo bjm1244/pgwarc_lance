@@ -76,7 +76,7 @@ def process_one(psql: list[str], timeout: float) -> dict[str, Any] | None:
         _child = None
     if process.returncode:
         if _stop.is_set():
-            return None
+            return {"status": "cancelled"}
         detail = stderr.strip().splitlines()[-1] if stderr.strip() else "psql failed"
         raise RuntimeError(detail)
     return parse_result(stdout)

@@ -106,6 +106,15 @@ BEGIN
         NULL;
     END;
 END $$;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM 1 FROM bm25_search(repeat('x', 2500001), 10);
+        RAISE EXCEPTION 'query above the byte limit was accepted';
+    EXCEPTION WHEN program_limit_exceeded THEN
+        NULL;
+    END;
+END $$;
 -- Reindexing removes the posting even though the dictionary may retain its key.
 COPY (
     SELECT bm25_index_document(3, 'replacement ordinary') IS NOT NULL

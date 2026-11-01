@@ -102,11 +102,27 @@ GRANT SELECT ON pgwarc_lance.lance_outbox_status,
     pgwarc_lance.lance_outbox_failures TO pgwarc_outbox_worker;
 GRANT EXECUTE ON FUNCTION public.lance_outbox_process_next() TO pgwarc_outbox_worker;
 
+-- Operational administrator: an explicit superset role, still not a DBA.
+CREATE ROLE pgwarc_admin NOLOGIN;
+GRANT pgwarc_reader, pgwarc_writer, pgwarc_outbox_worker, pgwarc_doctor
+    TO pgwarc_admin;
+GRANT EXECUTE ON FUNCTION
+    public.lance_create_table(text,integer,boolean),
+    public.lance_insert(text,bigint,real[],text),
+    public.lance_insert_many(text,bigint[],real[],integer,text[]),
+    public.lance_count(text),
+    public.lance_scan(text,integer),
+    public.lance_vector_dim(text),
+    public.lance_vector_search(text,real[],integer),
+    public.lance_restore_version(text,bigint)
+    TO pgwarc_admin;
+
 -- Replace these existing managed login names with your service identities.
 GRANT pgwarc_reader TO archive_reader_login;
 GRANT pgwarc_writer TO archive_writer_login;
 GRANT pgwarc_outbox_worker TO archive_worker_login;
 GRANT pgwarc_doctor TO archive_doctor_login;
+GRANT pgwarc_admin TO archive_admin_login;
 ALTER ROLE archive_reader_login SET statement_timeout = '2s';
 ALTER ROLE archive_reader_login SET idle_in_transaction_session_timeout = '30s';
 ALTER ROLE archive_reader_login SET work_mem = '4MB';
@@ -134,6 +150,34 @@ application roles receive no payload-table write rights. The delivery role can
 inspect aggregate status and failed-event diagnostics without reading vector
 payloads. Readers need no write-log grant. The worker does not need BM25
 content-table write grants.
+
+`pgwarc_admin` inherits the four operational roles and receives only the
+additional direct dataset functions listed above. It can create datasets and
+perform direct writes, scans, and restore operations. It is not a PostgreSQL
+superuser, extension owner, or tenant boundary: it cannot install or alter the
+extension or change the superuser-only `pgwarc_lance.*` settings. Keep database
+creation, extension installation, GUC changes, role membership, and OS data
+root ownership with a DBA. With `pgwarc_lance.allow_destructive_ops = off`,
+overwrite, document deletion, and restore remain blocked even for this role.
+Enable that setting only in a controlled maintenance session when the intended
+destructive action has been reviewed.
+
+The worker role can execute only the outbox delivery function from the extension
+API; it receives aggregate status and failed-event diagnostics but no vector
+payload table write privilege. A cancelled SQL call can leave an already
+committed Lance write behind; outbox delivery is at-least-once and retries by
+document ID. Stop the worker with its normal SIGINT/SIGTERM handling, then
+inspect queue state before resuming. If `--once` is stopped during its SQL call,
+it reports `{"status":"cancelled"}` so an interrupted job is not reported as an
+idle poll.
+
+Collection manifests are trusted operator files, not PostgreSQL row policies.
+Restrict manifest directories and files to the OS account that owns collection
+administration. `stage`, `prepare`, `activate`, and `rollback` use the caller's
+database connection plus filesystem access; assign the operational admin role
+and trusted OS identity only to collection operators. Sharing one database or
+Lance root shares the corpus across every role with access. This extension does
+not provide tenant isolation or distributed PostgreSQL/Lance atomic commits.
 
 ## Commit-safe vector ingestion
 

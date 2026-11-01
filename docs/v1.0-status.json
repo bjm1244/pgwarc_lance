@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-11-01T10:39:05.500367+00:00",
+  "updated_at": "2026-11-01T16:52:39.580421+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -277,6 +277,7 @@
       "summary": "The PostgreSQL 16.15 qualification profile and current-corpus frequency-index decision are evidence-backed. The verified source contains 21,873 distinct documents, below both required scale stages, so no 100k or 1m support claim is made.",
       "blocker": "The authorized, verified Common Crawl corpus contains 21,873 distinct indexed documents and 21,825 matching 384-dimensional vectors. It cannot support the required 100,000 and 1,000,000 distinct-document search and ingest stages. Repeated or synthesized rows would not represent the current corpus.",
       "resume_condition": "Provide approved real inputs covering at least 1,000,000 distinct documents and matching immutable 384-dimensional vectors, or provide additional real documents and explicitly authorize vector generation with an approved existing model. Preserve provenance and document lengths, then run the registered 100k stage before 1m.",
+      "public_commit": "6e06ad5a2881bb5a71c3f5ed9e25175c5e261eb0",
       "criteria_passed": [
         "C1",
         "C3"
@@ -322,8 +323,13 @@
         19,
         8
       ],
-      "status": "queued",
-      "criteria_passed": []
+      "status": "done",
+      "summary": "PG16 실제 회귀에서 reader/writer/worker/doctor/admin의 최소 권한과 PUBLIC EXECUTE 회수를 확인하고, 경로·symlink·필터·과대 입력·작업 취소 및 신뢰 OS 운영자와 공유 corpus의 보안 경계를 검증했다. 최신 RustSec 감사는 취약점 0건이며 비유지보수 경고 3건을 기록했다. 민감정보 검사와 기존 동일 fingerprint 네이티브 증거 재사용을 확인했다.",
+      "criteria_passed": [
+        "C1",
+        "C2",
+        "C3"
+      ]
     },
     {
       "number": 21,

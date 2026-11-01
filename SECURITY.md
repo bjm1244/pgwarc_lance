@@ -16,6 +16,23 @@
 6. **Lance 데이터셋 쓰기는 PostgreSQL 트랜잭션 밖에서 수행된다.** `ROLLBACK`으로 되돌려지지 않으며, 동일 URI의 쓰기는 트랜잭션 단위 advisory lock으로 직렬화한다. 경로 제한을 설정하면 실제 로컬 경로를 잠금 키로 사용한다. 제한이 비어 있을 때 서로 다른 URI로 같은 데이터셋을 가리키는 경우와 외부 writer는 이 잠금으로 조정되지 않는다. 인덱스 정합성은 애플리케이션이 보장해야 한다. (`src/lance_store.rs`)
 7. **대용량 스캔은 취소가 즉시 반영되지 않는다.** Lance future 대기는 약 50ms 주기로 PostgreSQL 인터럽트를 확인하고 스캔은 배치 경계에서도 확인한다. 취소된 쓰기가 이미 Lance에 반영됐을 수 있으므로, 취소는 파일 변경의 롤백을 보장하지 않는다.
 
+### 운영 API의 권한 경계
+
+확장 함수는 설치 시 `PUBLIC EXECUTE`를 회수하며 reader, writer, worker,
+doctor, admin 권한은 운영자가 함수와 테이블별로 부여한다. `pgwarc_admin`은
+명시적으로 허용한 dataset API의 operational role이며 PostgreSQL superuser나
+extension owner가 아니다. 확장 설치·역할 부여·`pgwarc_lance.*` GUC 변경은 DBA
+권한으로 남는다. 역할과 함수별 grant 예제 및 실제 PG16 회귀 범위는
+[OPERATIONS.md](OPERATIONS.md)를 참고한다.
+
+이 권한 모델은 신뢰한 운영자와 하나의 공유 corpus를 대상으로 한다. 파일 루트
+제한은 OS 파일 권한을 대신하지 않으며, 역할·필터·collection manifest는 행별
+또는 tenant별 격리를 제공하지 않는다. 여러 tenant를 격리해야 하면 데이터베이스와
+OS 소유 dataset root를 분리한다. Collection manifest는 OS 소유자가 보호하는
+operator 설정 파일이며 파일을 바꿀 수 있는 사용자는 collection 전환을 통제할 수
+있다. PostgreSQL과 Lance 사이에는 분산 atomic commit이 없다. Worker 취소나 DB
+세션 종료가 파일 변경을 되돌린다고 가정하지 말고 queue와 Lance 상태를 대사한다.
+
 SQL 쓰기 로그는 파일 변경 전에 INSERT한다. 로그 테이블·sequence 권한 오류는
 Lance를 변경하기 전에 실패하고, 복구(`restore`)도 기록한다. 다만 이후 SQL
 ROLLBACK·세션 종료·파일 변경 직후 오류는 Lance 변경을 되돌리지 못한다.
