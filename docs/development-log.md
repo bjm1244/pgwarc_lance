@@ -1,5 +1,42 @@
 # Development log
 
+## Issue #17 — current input and evidence-path recheck (2026-11-02, blocked)
+
+- Runner selected issue #17 again after the hold elapsed. The canonical
+  `development` checkout was clean at start, and `.codex/config.toml` still
+  selected `gpt-6-luna` / `max`. The earlier evidence-path error was checked
+  against the queue validator; this result points only to existing validation
+  evidence and a new receipt under the approved private validation-run tree.
+- Rechecked the current Common Crawl source file against the preserved audit:
+  its size and SHA-256 still match, and it remains the only WARC archive in the
+  authorized source directory. The completed input report records 66,190 raw
+  records, 21,873 distinct indexed documents, 8,240,889 BM25 postings, and
+  21,825 matching 384-dimensional vectors. No new approved corpus or vector
+  generation authorization was available.
+- C1 remains passed: the PG16.15/Linux x86_64 resource profile, query mix,
+  concurrency, import arms, metrics and relative budgets were fixed before
+  scale trials. The current model-config checksum still matches its evidence.
+- C2 remains blocked: the current source does not reach 100,000 distinct
+  documents, so neither the 100k nor 1m search/ingest trial ran. Scale p95/p99,
+  ingest, CPU, RSS, temporary files, WAL and disk at those sizes remain
+  unmeasured. No synthetic or repeated rows and no new vectors were added.
+- C3 remains passed for the current corpus decision only. All 18 preserved
+  comparison artifact hashes match. The frequency index reduced the q6 count
+  scan from 16,429 to 61 shared-hit blocks. Recorded eight-client BM25 p95/p99
+  changed by -11.9%/-12.1%; hybrid changed by +8.6%/+10.0%. Host load varied
+  from 1.95 to 25.02 on four CPUs, so end-to-end latency cannot be attributed
+  to the index. The index occupied 116,023,296 bytes; BULK CPU/WAL overhead was
+  21.0%/23.3%, while COPY overhead was 45.6%/33.3%. Keep it optional before a
+  production default decision; the native source is unchanged.
+- This was read-only with respect to the WARC, existing database, Lance data,
+  models, vectors and immutable artifacts. `python3 tools/check_docs.py` and
+  `git diff --check` passed for this log update. No native build, SQL/import
+  regression, 100k/1m trial, or production qualification is claimed.
+- Resume only when approved real inputs provide 100,000 and then 1,000,000
+  distinct documents with corresponding immutable 384-dimensional vectors, or
+  explicit authorization permits generation with the already approved model.
+  Preserve provenance and document lengths, then run 100k before 1m.
+
 ## Issue #21 — SQL/CLI contract and installation examples (2026-11-02, progress)
 
 - The selected 1.0 issue is #21. C1–C3 remain open; this cycle records only
