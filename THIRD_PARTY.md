@@ -18,7 +18,7 @@ the 0.1.23 artifact. A matching 0.1.24 artifact-bound SBOM and bundle have not
 been generated; this source preview does not grant binary redistribution or
 production approval.
 
-## Current 0.1.23 PG16 validation artifact notices and SBOM (2026-10-30)
+## Latest artifact-bound 0.1.23 PG16 validation notices and SBOM (2026-10-30)
 
 Strict target-filtered notices collected primary texts for all 436 reachable
 Cargo packages with no missing entries against Cargo.lock SHA-256

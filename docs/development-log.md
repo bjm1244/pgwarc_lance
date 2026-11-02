@@ -1,5 +1,32 @@
 # Development log
 
+## Issue #21 — SQL/CLI contract and installation examples (2026-11-02, progress)
+
+- The selected 1.0 issue is #21. C1–C3 remain open; this cycle records only
+  verified findings and does not change the extension API or claim release
+  readiness.
+- A clean PostgreSQL 16.15 database installed the existing 0.1.25 artifact.
+  Its SQL probe found that `lance_insert` reports SQLSTATE `XX000` when a
+  required argument is NULL, while the neighboring dimension helper returns
+  NULL. This is a concrete error-contract mismatch for C1. A tentative native
+  fix was not retained: the locked package command produced package files but
+  its disposable Docker run did not return an exit status, and Docker control
+  requests stopped responding before a fresh install and regression could be
+  run against that change. The source was restored; the fix is unverified.
+- C3 review found stale current-version statements: the English README named
+  0.1.23, and PACKAGING named 0.1.21 despite `Cargo.toml` and the recorded
+  current PG16 candidate being 0.1.25. The README now points to 0.1.25,
+  PACKAGING marks the 0.1.21 evidence historical and states the present PG16.15
+  scope, and THIRD_PARTY labels the 0.1.23 notice/SBOM as the latest
+  artifact-bound evidence. Binary redistribution and production approval
+  remain open.
+- `python3 tools/check_docs.py` and `git diff --check` passed for the retained
+  documentation changes. C2's full clean-install, embedding, search, update,
+  delete, and recovery example has not been completed. Next: resume #21 by
+  resolving the required-NULL SQL contract with a responsive disposable PG16
+  test environment, then exercise the complete documented install/search
+  lifecycle before revisiting the remaining C3 status statements.
+
 ## Issue #17 — performance evidence ownership recovery (2026-11-02, blocked)
 
 - The runner rejected the preceding issue result because its C1/C3 evidence

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-11-01T22:37:56.603054+00:00",
+  "updated_at": "2026-11-02T05:02:09.814163+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -277,7 +277,7 @@
       "summary": "사전 규모 profile과 합격 예산을 고정하고 frequency index의 기존 동일 workload 읽기·적재 근거를 재검증했다. 승인된 실제 corpus는 21,873개 문서로 10만·100만 단계에 부족해 해당 성능을 주장하지 않는다.",
       "blocker": "현재 승인·검증된 corpus에는 고유 문서 21,873개와 대응하는 384차원 벡터 21,825개만 있어 첫 100,000개 기준도 충족하지 못한다. 등록된 100k 및 1m 검색·적재 trial은 실행할 수 없다.",
       "resume_condition": "최소 100,000개 후 1,000,000개의 승인된 고유 실제 문서와 대응하는 불변 384차원 벡터를 제공하거나, 추가 실제 문서와 기존 승인 모델을 사용한 새 벡터 생성 권한을 명시적으로 제공한다. 출처와 문서 길이를 보존하고 100k 단계를 먼저 실행한다.",
-      "public_commit": "6e06ad5a2881bb5a71c3f5ed9e25175c5e261eb0",
+      "public_commit": "6ee5324e628ec02d000d43a70094e41c79b6bd1e",
       "criteria_passed": [
         "C1",
         "C3"
@@ -344,7 +344,8 @@
         19,
         20
       ],
-      "status": "queued",
+      "status": "in_progress",
+      "summary": "문서의 현재 후보 버전과 PG16 검증·미승인 상태를 0.1.25 근거에 맞췄다. PG16 SQL probe에서 필수 NULL 입력의 XX000 오류 계약 drift를 발견했으나, 변경 소스의 설치 회귀는 Docker 실행기 제어 불응으로 확인하지 못했다. C1–C3는 계속 진행한다.",
       "criteria_passed": []
     },
     {

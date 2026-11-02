@@ -4,7 +4,7 @@
 
 이 문서는 로컬 Docker 기반으로 `pgwarc_lance` extension artifact를 만들고 설치하는 절차와 version upgrade 정책을 정리한다.
 
-## Current 0.1.21 PG16 package and notice validation (2026-10-28)
+## 0.1.21 PG16 package and notice validation (historical, 2026-10-28)
 
 The corrected 0.1.21 source was packaged on Linux x86_64 with PostgreSQL
 16.15/Bookworm, Rust 1.96.0, cargo-pgrx 0.19.1 and the pinned PostgreSQL 16
@@ -109,12 +109,12 @@ not covered by this notice/SBOM evidence.
 
 ## Version Coordinates
 
-- Current extension/crate version: `0.1.21` development candidate (`Cargo.toml`); the corrected source has passed the recorded PG16 native package gate for this issue #4 cycle.
+- Current extension/crate version: `0.1.25` source development candidate (`Cargo.toml`). The Linux x86_64 / PostgreSQL 16.15 artifact and native checks for this candidate are recorded in [PUBLICATION.md](PUBLICATION.md).
 - Control file version: `default_version = '@CARGO_VERSION@'`
 - PostgreSQL build target: PostgreSQL 16 by default; optional Docker build arg `PG_MAJOR=13..17`
 - Rust toolchain: `1.96.0`
 - cargo-pgrx: `0.19.1`
-- The verified 0.1.20 package remains historical and passed its recorded PG16 checks. The pre-fix 0.1.21 artifact passed artifact checks, fresh install, four SQL regressions, importer/runtime tests and populated 0.1.20→0.1.21 upgrade, but its outbox worker and pending-event restore failed; it does not validate the corrected current source. Other majors were not verified. Binary redistribution and production approval remain open.
+- The 0.1.21 package sections above are historical and do not describe the current source. Current package validation covers Linux x86_64 / PostgreSQL 16.15 only; other PostgreSQL majors and distribution profiles are not verified by that evidence. The 0.1.25 artifact does not have a matching artifact-bound notice bundle and SBOM in [THIRD_PARTY.md](THIRD_PARTY.md), so binary redistribution remains uncleared. No package result grants production approval.
 
 `Cargo.toml`에는 `pg13`부터 `pg17` feature gate가 남아 있다. Dockerfile은 `PG_MAJOR` build arg로 `postgres:${PG_MAJOR}`, 해당 server dev package, `cargo pgrx init --pg${PG_MAJOR}`, matching `pg${PG_MAJOR}` Cargo feature를 함께 선택한다. 기본 local verification은 PostgreSQL 16 기준이며, 다른 major는 `make smoke-pg-version` 또는 `make pg-version-matrix`로 fresh install smoke를 확인한다.
 
