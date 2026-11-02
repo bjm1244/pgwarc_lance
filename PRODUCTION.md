@@ -1,18 +1,20 @@
 # Production readiness
 
 This is still a source preview. Passing unit tests is not production approval.
-The current source candidate is 0.1.25. It adds separate explain APIs with
-independent candidate and final-result limits, weighted RRF, and per-source
-ranks/contributions while preserving the existing search signatures. On the
-locked PostgreSQL 16.15 target, fresh installation, four SQL regressions, a
-populated 0.1.24-to-0.1.25 upgrade, importer database checks, runtime-safety
-checks and backup/restore passed on disposable fixtures. PostgreSQL and Lance
-still do not share an atomic commit. Cargo dependencies are unchanged from
-0.1.24. The publisher's fixed RustSec audit passed against a database with
-1,395 advisories: zero vulnerabilities, unsound or yanked findings, with three
-unmaintained-package warnings. The separate publication gate reruns its
-current audit. The checked-in SBOM and full notice bundle remain bound to the
-0.1.23 artifact, so binary redistribution is not cleared. See [PACKAGING.md](PACKAGING.md),
+The current source candidate is 0.1.26. On the locked Linux x86_64/PostgreSQL
+16.15 target, its package passed fresh installation, all four SQL regressions,
+the importer database fixture, 19 runtime-safety checks, 15 backup/restore
+checks, and a populated 0.1.25-to-0.1.26 upgrade. A separate disposable
+PostgreSQL 16.15 run imported and reimported a WARC capture using actual
+384-dimensional embeddings, searched BM25 and Lance, recovered committed
+outbox work after worker restart, and materialized a revisioned delete. These
+are bounded contract and recovery checks, not corpus relevance or operational
+SLA evidence. PostgreSQL and Lance still do not share an atomic commit. The
+0.1.26 artifact has no matching SBOM and complete artifact-bound notice bundle,
+so binary redistribution is not cleared. The exact 0.1.26 lockfile's RustSec
+audit passed with zero vulnerabilities, unsound packages or yanked packages;
+three unmaintained-package warnings remain. The publication gate reruns its
+current audit when it reviews this snapshot. See [PACKAGING.md](PACKAGING.md),
 [PUBLICATION.md](PUBLICATION.md) and [THIRD_PARTY.md](THIRD_PARTY.md) for the
 verified scope and remaining gaps.
 Install the complete consecutive upgrade chain and reconnect existing backends.

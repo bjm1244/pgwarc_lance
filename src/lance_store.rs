@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::fmt::{Display, Formatter};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -30,10 +31,34 @@ pub struct SearchResult {
     pub distance: f32,
 }
 
+#[derive(Debug)]
+pub struct VectorDimensionMismatch {
+    pub expected: usize,
+    pub actual: usize,
+}
+
+impl Display for VectorDimensionMismatch {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "vector dimension mismatch: expected {}, got {}",
+            self.expected, self.actual
+        )
+    }
+}
+
+impl std::error::Error for VectorDimensionMismatch {}
+
+#[derive(Debug)]
+enum VectorSearchError {
+    DimensionMismatch(VectorDimensionMismatch),
+    Operation(String),
+}
+
 /// A Lance search started while the PostgreSQL backend runs its BM25 work.
 /// Dropping the handle aborts the worker task, including on PostgreSQL errors.
 pub struct PendingVectorSearch {
-    task: JoinHandle<Result<Vec<SearchResult>, String>>,
+    task: JoinHandle<Result<Vec<SearchResult>, VectorSearchError>>,
 }
 
 impl PendingVectorSearch {
@@ -41,7 +66,14 @@ impl PendingVectorSearch {
         let joined = block_on(&mut self.task).map_err(|error| {
             Box::new(std::io::Error::other(error.to_string())) as Box<dyn std::error::Error>
         })?;
-        joined.map_err(|error| Box::new(std::io::Error::other(error)) as Box<dyn std::error::Error>)
+        joined.map_err(|error| match error {
+            VectorSearchError::DimensionMismatch(error) => {
+                Box::new(error) as Box<dyn std::error::Error>
+            }
+            VectorSearchError::Operation(error) => {
+                Box::new(std::io::Error::other(error)) as Box<dyn std::error::Error>
+            }
+        })
     }
 }
 
@@ -260,12 +292,10 @@ pub fn insert_rows(
     let mut flat = Vec::with_capacity(vectors.len() * vector_dim as usize);
     for v in &vectors {
         if v.len() != vector_dim as usize {
-            return Err(format!(
-                "vector dimension mismatch: expected {}, got {}",
-                vector_dim,
-                v.len()
-            )
-            .into());
+            return Err(Box::new(VectorDimensionMismatch {
+                expected: vector_dim as usize,
+                actual: v.len(),
+            }));
         }
         flat.extend_from_slice(v);
     }
@@ -291,11 +321,10 @@ pub fn insert_flat_rows(
     ensure_revision_column(&mut dataset)?;
     let dataset_dim = dataset_vector_dim(&dataset)?;
     if vector_dim != dataset_dim {
-        return Err(format!(
-            "vector dimension mismatch: dataset expects {}, got {}",
-            dataset_dim, vector_dim
-        )
-        .into());
+        return Err(Box::new(VectorDimensionMismatch {
+            expected: dataset_dim as usize,
+            actual: vector_dim as usize,
+        }));
     }
 
     let batch = make_batch(ids, flat_vectors, labels, vec![None; row_count], vector_dim)?;
@@ -326,8 +355,12 @@ pub fn upsert_flat_rows(
     let dataset = open_dataset(uri)?;
     let mut dataset = dataset;
     ensure_revision_column(&mut dataset)?;
-    if dataset_vector_dim(&dataset)? != vector_dim {
-        return Err("vector dimension mismatch in upsert".into());
+    let dataset_dim = dataset_vector_dim(&dataset)?;
+    if dataset_dim != vector_dim {
+        return Err(Box::new(VectorDimensionMismatch {
+            expected: dataset_dim as usize,
+            actual: vector_dim as usize,
+        }));
     }
     let filter = format!(
         "id IN ({})",
@@ -502,12 +535,10 @@ pub fn vector_search(
     let dataset = open_dataset(uri)?;
     let vector_dim = dataset_vector_dim(&dataset)?;
     if query.len() != vector_dim as usize {
-        return Err(format!(
-            "query dimension mismatch: expected {}, got {}",
-            vector_dim,
-            query.len()
-        )
-        .into());
+        return Err(Box::new(VectorDimensionMismatch {
+            expected: vector_dim as usize,
+            actual: query.len(),
+        }));
     }
 
     let query_array = Float32Array::from(query);
@@ -572,7 +603,7 @@ async fn vector_search_async(
     uri: String,
     query: Vec<f32>,
     k: usize,
-) -> Result<Vec<SearchResult>, String> {
+) -> Result<Vec<SearchResult>, VectorSearchError> {
     if k == 0 {
         return Ok(Vec::new());
     }
@@ -580,13 +611,15 @@ async fn vector_search_async(
     let dataset = DatasetBuilder::from_uri(&uri)
         .load()
         .await
-        .map_err(|error| error.to_string())?;
-    let vector_dim = dataset_vector_dim(&dataset).map_err(|error| error.to_string())?;
+        .map_err(|error| VectorSearchError::Operation(error.to_string()))?;
+    let vector_dim = dataset_vector_dim(&dataset)
+        .map_err(|error| VectorSearchError::Operation(error.to_string()))?;
     if query.len() != vector_dim as usize {
-        return Err(format!(
-            "query dimension mismatch: expected {}, got {}",
-            vector_dim,
-            query.len()
+        return Err(VectorSearchError::DimensionMismatch(
+            VectorDimensionMismatch {
+                expected: vector_dim as usize,
+                actual: query.len(),
+            },
         ));
     }
 
@@ -596,27 +629,28 @@ async fn vector_search_async(
     let has_revision = dataset.schema().field("revision").is_some();
     scanner
         .nearest("vector", query_ref, k)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| VectorSearchError::Operation(error.to_string()))?;
     if has_revision {
         scanner
             .project(&["id", "label", "revision", "_distance"])
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| VectorSearchError::Operation(error.to_string()))?;
     } else {
         scanner
             .project(&["id", "label", "_distance"])
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| VectorSearchError::Operation(error.to_string()))?;
     }
 
     let mut stream = Box::pin(
         scanner
             .try_into_stream()
             .await
-            .map_err(|error| error.to_string())?,
+            .map_err(|error| VectorSearchError::Operation(error.to_string()))?,
     );
     let mut results = Vec::new();
     while let Some(batch) = stream.next().await {
-        let batch = batch.map_err(|error| error.to_string())?;
-        append_vector_batch(&batch, &mut results).map_err(|error| error.to_string())?;
+        let batch = batch.map_err(|error| VectorSearchError::Operation(error.to_string()))?;
+        append_vector_batch(&batch, &mut results)
+            .map_err(|error| VectorSearchError::Operation(error.to_string()))?;
     }
     results.sort_by(|a, b| {
         let distance_order = a
@@ -632,7 +666,7 @@ async fn vector_search_filtered_async(
     uri: String,
     query: Vec<f32>,
     eligible_doc_ids: Vec<i64>,
-) -> Result<Vec<SearchResult>, String> {
+) -> Result<Vec<SearchResult>, VectorSearchError> {
     if eligible_doc_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -640,13 +674,15 @@ async fn vector_search_filtered_async(
     let dataset = DatasetBuilder::from_uri(&uri)
         .load()
         .await
-        .map_err(|error| error.to_string())?;
-    let vector_dim = dataset_vector_dim(&dataset).map_err(|error| error.to_string())?;
+        .map_err(|error| VectorSearchError::Operation(error.to_string()))?;
+    let vector_dim = dataset_vector_dim(&dataset)
+        .map_err(|error| VectorSearchError::Operation(error.to_string()))?;
     if query.len() != vector_dim as usize {
-        return Err(format!(
-            "query dimension mismatch: expected {}, got {}",
-            vector_dim,
-            query.len()
+        return Err(VectorSearchError::DimensionMismatch(
+            VectorDimensionMismatch {
+                expected: vector_dim as usize,
+                actual: query.len(),
+            },
         ));
     }
 
@@ -665,30 +701,31 @@ async fn vector_search_filtered_async(
     scanner
         .prefilter(true)
         .filter(&id_filter)
-        .map_err(|error| error.to_string())?
+        .map_err(|error| VectorSearchError::Operation(error.to_string()))?
         .nearest("vector", query_ref, eligible_doc_ids.len())
-        .map_err(|error| error.to_string())?
+        .map_err(|error| VectorSearchError::Operation(error.to_string()))?
         .use_index(false);
     if has_revision {
         scanner
             .project(&["id", "label", "revision", "_distance"])
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| VectorSearchError::Operation(error.to_string()))?;
     } else {
         scanner
             .project(&["id", "label", "_distance"])
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| VectorSearchError::Operation(error.to_string()))?;
     }
 
     let mut stream = Box::pin(
         scanner
             .try_into_stream()
             .await
-            .map_err(|error| error.to_string())?,
+            .map_err(|error| VectorSearchError::Operation(error.to_string()))?,
     );
     let mut results = Vec::new();
     while let Some(batch) = stream.next().await {
-        let batch = batch.map_err(|error| error.to_string())?;
-        append_vector_batch(&batch, &mut results).map_err(|error| error.to_string())?;
+        let batch = batch.map_err(|error| VectorSearchError::Operation(error.to_string()))?;
+        append_vector_batch(&batch, &mut results)
+            .map_err(|error| VectorSearchError::Operation(error.to_string()))?;
     }
     results.sort_by(|a, b| {
         let distance_order = a

@@ -1,10 +1,10 @@
 # pgwarc_lance
 
-> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 개발 후보는 **0.1.25**이다. URI별 document revision, tombstone, ordered vector upsert/delete outbox로 삭제·재생성 중 stale vector 노출을 막으며, 필터 검색은 동일 eligibility 집합을 BM25와 정확 vector 후보 탐색에 적용한다. 새 설명 API는 최종 결과 수와 소스별 후보 수, 가중 RRF 기여를 반환한다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며 outbox 갱신은 commit 뒤 eventual consistency를 제공한다. 현재 후보의 실제 PG16 검증 범위와 한계는 [PUBLICATION.md](PUBLICATION.md)에 기록한다. 과거 artifact의 설치·upgrade·SQL·importer·runtime·backup 검증 및 artifact-bound 의존성 고지는 [THIRD_PARTY.md](THIRD_PARTY.md)에 보존한다. 검증은 binary 재배포·프로덕션 승인을 뜻하지 않는다.
+> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 개발 후보는 **0.1.26**이다. URI별 document revision, tombstone, ordered vector upsert/delete outbox로 삭제·재생성 중 stale vector 노출을 막으며, 필터 검색은 동일 eligibility 집합을 BM25와 정확 vector 후보 탐색에 적용한다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며 outbox 갱신은 commit 뒤 eventual consistency를 제공한다. SQL/CLI 동작과 SemVer 정책은 [SQL/CLI 계약](docs/sql-cli-contract.md)에 고정한다. 후보의 실제 PG16 검증 범위와 한계는 [PUBLICATION.md](PUBLICATION.md)에 기록한다. artifact-bound 의존성 고지는 [THIRD_PARTY.md](THIRD_PARTY.md)에 보존한다. 검증은 binary 재배포·프로덕션 승인을 뜻하지 않는다.
 >
 > 라이선스: Apache-2.0 ([LICENSE](LICENSE)). 기여 전 [CONTRIBUTING.md](CONTRIBUTING.md)·[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)를 참고하라.
 
-이전 0.1.18 실험, 0.1.19 인덱스, 0.1.20–0.1.25 후보의 결과·한계는 [개발 기록](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), [THIRD_PARTY.md](THIRD_PARTY.md)에 기록한다.
+이전 0.1.18 실험, 0.1.19 인덱스, 0.1.20–0.1.26 후보의 결과·한계는 [개발 기록](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), [THIRD_PARTY.md](THIRD_PARTY.md)에 기록한다.
 
 `pgwarc_lance`는 WARC/Web archive 데이터를 PostgreSQL 안에서 검색 가능한 레코드로 다루기 위한 pgrx 기반 확장이다. 현재 구현은 PostgreSQL 테이블 기반 BM25, Lance dataset 기반 벡터 검색, RRF 기반 hybrid search, 그리고 초기 WARC/WARC.GZ SQL importer를 제공한다.
 
@@ -15,6 +15,19 @@
 완료된 구현 이력은 [ROADMAP.md](ROADMAP.md), 미완료 항목의 선택 기준은 [BLUEPRINT.md](BLUEPRINT.md)에 정리한다.
 
 공개 검토 범위와 Common Crawl 검증은 [PUBLICATION.md](PUBLICATION.md)에 정리한다.
+
+## 검증 지원 범위
+
+| 항목 | 현재 상태 |
+|---|---|
+| Linux x86_64 / PostgreSQL 16.15 | 이번 소스 후보의 검증 대상. 실제 package·설치·회귀 결과는 [PUBLICATION.md](PUBLICATION.md)에 기록한다. |
+| PostgreSQL 13–15, 17 및 다른 CPU/OS | Cargo feature/build 경로만 존재하며 현재 후보의 release 지원으로 검증되지 않았다. |
+| 원격/object-store Lance, multi-node 동시 쓰기, tenant isolation, PostgreSQL–Lance 분산 commit | 지원하지 않는다. |
+| Binary 재배포 | 현재 후보에 결합된 SBOM·license notice 검토가 없어 허가되지 않았다. |
+| Production | 미승인. 독립 relevance labels, 대상 규모 성능, 장시간 운영 검증이 남아 있다. |
+
+ROADMAP/BLUEPRINT의 완료 표시는 구현 작업 이력이다. release readiness는 위
+지원 범위와 [v1.0 계획](docs/v1.0-plan.md), publisher가 관리하는 gate를 따른다.
 
 ## 개발 DB와 함수 권한
 
@@ -35,7 +48,7 @@ export PGWARC_DEV_PASSWORD="$(openssl rand -base64 24)"
 
 ```
 pgwarc_lance/
-├── Cargo.toml                 # pgrx 익스텐션 크레이트 (pg13~17 기능 게이트)
+├── Cargo.toml                 # pgrx 크레이트 (pg13~17 feature gate; 현재 검증 대상은 위 표 참조)
 ├── ROADMAP.md                 # 현재 상태와 단계별 작업 계획
 ├── BLUEPRINT.md               # Phase 1-5 이후 미래 청사진과 작업 선택 기준
 ├── PACKAGING.md               # 로컬 release artifact, install, upgrade 정책
@@ -134,6 +147,9 @@ pgwarc_lance/
 
 ## SQL 함수
 
+각 SQL API의 NULL·차원·오류·순서·취소·일관성 계약은
+[SQL/CLI 계약](docs/sql-cli-contract.md)을 따른다.
+
 `src/lib.rs`에 정의된 pgrx 함수 (SQL에서 호출 가능):
 
 | 함수 | 설명 |
@@ -150,10 +166,12 @@ pgwarc_lance/
 | `greeting(name, age=20)` | default 인수 예제 (`default!()` 매크로) |
 | `tokenize_korean(text)` | CJK bigram + ASCII tokenization |
 | `bm25_index_document(doc_id, content)` | 문서를 `pgwarc_lance.bm25_*` 테이블에 색인 |
+| `bm25_doc_count()` / `bm25_avg_doc_len()` | BM25 corpus 문서 수 / 평균 token 길이 조회 |
 | `bm25_search(query, k=10)` | BM25 검색 결과 `(doc_id, score)` 반환 |
 | `lance_create_table(uri, vector_dim=3, overwrite=false)` | Lance dataset 생성 |
 | `lance_insert(uri, id, vector, label)` | Lance dataset에 벡터 row 삽입 |
 | `lance_insert_many(uri, ids, flat_vectors, vector_dim, labels)` | Lance dataset에 여러 벡터 row를 한 번의 batch append로 삽입 |
+| `lance_upsert_many(uri, ids, flat_vectors, vector_dim, labels)` | 고유 document ID를 기준으로 반복 가능한 vector merge |
 | `lance_outbox_enqueue(uri, ids, flat_vectors, vector_dim, labels)` | caller transaction에 재시도 안전한 비버전 벡터 upsert 작업을 저장 |
 | `lance_outbox_enqueue_revision(uri, ids, flat_vectors, vector_dim, labels, revisions)` | URI별 예상 문서 revision mapping과 벡터 작업을 같은 caller transaction에 저장 |
 | `lance_document_delete(uri, ids, expected_revisions)` | 예상 revision이 현재 상태와 일치할 때 metadata/BM25를 지우고 tombstone과 순서가 보장된 Lance delete 작업을 커밋 |
@@ -161,6 +179,7 @@ pgwarc_lance/
 | `lance_outbox_process_next()` | 독립 transaction에서 가장 오래된 완료 가능 작업을 Lance에 반영하고 결과 버전/지연을 반환 |
 | `lance_scan(uri, limit=100)` | Lance row 스캔 |
 | `lance_scan_document_state(uri, limit=100)` | Lance row의 document ID, label, 실제 저장 revision을 읽기 전용으로 조회 |
+| `lance_count(uri)` | Lance dataset의 현재 row 수 반환 |
 | `lance_vector_dim(uri)` | Lance dataset의 vector 차원 반환 |
 | `lance_vector_search(uri, query, k=10)` | Lance nearest-neighbor 검색 |
 | `hybrid_search(query, vector_query, lance_uri, k=10)` | BM25와 벡터 검색을 RRF로 결합 |

@@ -3,6 +3,87 @@ SELECT lance_create_table('/tmp/pgwarc_lance_regress.lance', 4, true);
 
 SELECT lance_vector_dim('/tmp/pgwarc_lance_regress.lance') AS dim;
 
+DO $$
+BEGIN
+    PERFORM lance_create_table('/tmp/pgwarc_lance_null_contract.lance', 4, true);
+    PERFORM lance_insert('/tmp/pgwarc_lance_null_contract.lance', 4, ARRAY[0,1,0,0]::float4[], NULL);
+END $$;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM lance_insert(NULL::text, 99, ARRAY[0,0,0,0]::float4[], NULL);
+        RAISE EXCEPTION 'NULL URI was accepted';
+    EXCEPTION WHEN null_value_not_allowed THEN NULL;
+    END;
+    BEGIN
+        PERFORM lance_insert('/tmp/pgwarc_lance_null_contract.lance', NULL::bigint, ARRAY[0,0,0,0]::float4[], NULL);
+        RAISE EXCEPTION 'NULL document ID was accepted';
+    EXCEPTION WHEN null_value_not_allowed THEN NULL;
+    END;
+    BEGIN
+        PERFORM lance_insert('/tmp/pgwarc_lance_null_contract.lance', 99, NULL::real[], NULL);
+        RAISE EXCEPTION 'NULL vector was accepted';
+    EXCEPTION WHEN null_value_not_allowed THEN NULL;
+    END;
+    BEGIN
+        PERFORM lance_insert('/tmp/pgwarc_lance_null_contract.lance', 99, ARRAY[0,0]::real[], NULL);
+        RAISE EXCEPTION 'wrong vector dimension was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM lance_insert('/tmp/pgwarc_lance_null_contract.lance', 99, ARRAY['NaN',0,0,0]::real[], NULL);
+        RAISE EXCEPTION 'non-finite vector was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM 1 FROM lance_vector_search('/tmp/pgwarc_lance_null_contract.lance', ARRAY[0,0]::real[], 1);
+        RAISE EXCEPTION 'wrong query dimension was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM 1 FROM hybrid_search(
+            'contract', ARRAY[0,0]::real[], '/tmp/pgwarc_lance_null_contract.lance', 1
+        );
+        RAISE EXCEPTION 'wrong hybrid query dimension was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM lance_insert_many('/tmp/pgwarc_lance_null_contract.lance', ARRAY[99]::bigint[], ARRAY[0]::real[], 4, ARRAY['bad']::text[]);
+        RAISE EXCEPTION 'wrong batch vector length was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM lance_upsert_many('/tmp/pgwarc_lance_null_contract.lance', ARRAY[99]::bigint[], ARRAY[0,0]::real[], 2, ARRAY['bad']::text[]);
+        RAISE EXCEPTION 'wrong upsert vector dimension was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+    BEGIN
+        PERFORM lance_outbox_enqueue('/tmp/pgwarc_lance_null_contract.lance', ARRAY[99]::bigint[], ARRAY['Infinity',0,0,0]::real[], 4, ARRAY['bad']::text[]);
+        RAISE EXCEPTION 'non-finite outbox vector was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+END $$;
+
+COPY (
+    SELECT count(*) = 0
+    FROM lance_scan_document_state('/tmp/pgwarc_lance_null_contract.lance', 10)
+    WHERE doc_id = 99
+) TO STDOUT;
+COPY (
+    SELECT count(*) = 1
+    FROM lance_scan_document_state('/tmp/pgwarc_lance_null_contract.lance', 10)
+    WHERE doc_id = 4 AND label IS NULL
+) TO STDOUT;
+DO $$
+BEGIN
+    PERFORM lance_insert_many('/tmp/pgwarc_lance_null_contract.lance', ARRAY[20,19]::bigint[], ARRAY[1,0,0,0,1,0,0,0]::real[], 4, ARRAY['tie20','tie19']::text[]);
+END $$;
+COPY (
+    SELECT array_agg(id ORDER BY distance, id) = ARRAY[19,20]::bigint[]
+    FROM lance_vector_search('/tmp/pgwarc_lance_null_contract.lance', ARRAY[1,0,0,0]::real[], 2)
+) TO STDOUT;
+
 SELECT lance_insert('/tmp/pgwarc_lance_regress.lance', 1, ARRAY[0,0,0,0]::float4[], 'doc1');
 
 SELECT lance_insert_many(
@@ -297,8 +378,8 @@ DO $$
 BEGIN
     BEGIN
         PERFORM 1 FROM hybrid_search_explain(
-            'rankingneedle', ARRAY[0,0,0]::float4[],
-            '/tmp/pgwarc_lance_ranking_regress.lance',
+            'rankingneedle', ARRAY[0,0,0,0]::float4[],
+            '/tmp/pgwarc_lance_issue21_missing.lance',
             1, 3, 1.0, 1.0, 60.0
         );
         RAISE EXCEPTION 'enabled vector-source failure was hidden';

@@ -1,5 +1,59 @@
 # Development log
 
+## Issue #21 — SQL/CLI contract and PG16 installation example (2026-11-03, validated)
+
+- The serialized runner selected issue #21 only. The `development` branch and
+  requested `.codex/config.toml` model (`gpt-6-luna`, reasoning `max`) remained
+  in use; no competing source writer or change to another repository was found.
+- Version 0.1.26 now preserves the `lance_insert` call through SQL NULL input
+  so each required NULL raises `22004`; its label remains nullable. Synchronous
+  vector dimension errors retain a typed Rust cause through direct and async
+  hybrid search and raise `22023`. Batch writes require exactly rows times
+  vector dimension values, and outbox vectors are checked for finite values
+  before PostgreSQL writes them. The 0.1.25-to-0.1.26 migration replaces the
+  function's STRICT wrapper without changing its SQL signature.
+- `docs/sql-cli-contract.md` fixes the SQL surface, NULL and error behavior,
+  vector dimension/finite constraints, ordering, cancellation and cross-store
+  consistency limits, importer and worker options and exits, installation and
+  real-embedding usage, and SemVer policy. README, English README, ROADMAP,
+  BLUEPRINT, PACKAGING, PRODUCTION, PUBLICATION, and THIRD_PARTY now report the
+  0.1.26 development candidate and distinguish verified PG16 scope from
+  release, redistribution and production approval.
+- A locked offline PG16 package built with Rust 1.96.0/cargo-pgrx 0.19.1; the
+  Cargo.lock SHA-256 was unchanged at
+  `23391a1e49a4899ef6db9f37bb442388e52c72ec36b5159d1ec2cffb5068a6c1`, and the
+  shared-library SHA-256 is
+  `a99d374d67615db5db4de6ee926dd01bfece99cc2462d488af44a25f95e7def5`. A
+  clean PostgreSQL 16.15 container installed version 0.1.26; all four SQL
+  regressions passed. The full Python suite passed 553 tests. Documentation
+  checks, Rust formatting and whitespace checks passed.
+- Live disposable PG16 tests passed the WARC importer database fixture,
+  19/19 runtime-safety checks, and 15/15 backup/restore checks. A separate
+  one-record WARC workflow used actual 384-dimensional embeddings to exercise
+  import, BM25/vector search, same-ID text revision, worker restart recovery,
+  and revision-aware delete/tombstone. A populated upgrade from 0.1.25 retained
+  its BM25 and Lance rows/search result, and the upgraded `lance_insert` returned
+  `22004` for a required NULL. CLI exit probes returned the documented 0, 2,
+  and 1 codes.
+- The SQL regression first exposed an existing ranking test that relied on a
+  three-dimensional query against a four-dimensional dataset to produce an
+  internal error. The fixture now uses a four-dimensional query and triggers
+  the intended enabled-source failure with an absent dataset. The first live
+  embedding-import attempt stopped before SQL because its private spool
+  directory had not been created; after creating that disposable directory,
+  the full example passed. An early diagnostic query used the wrong
+  `regprocedure` signature after upgrade; the follow-up catalog query verified
+  the migrated function and the upgrade checks passed. The final regression
+  run and corrected probes are preserved in private evidence.
+- Independent relevance labels, corpus-scale performance, full raw-WARC
+  ingestion, another PG major/OS, long soak, artifact-bound 0.1.26 notices/SBOM,
+  production approval, and public GitHub publication remain unverified. A
+  current `cargo-audit` 0.22.2 run against this exact lockfile passed with RustSec
+  DB commit `263a4d951a0867d4bddc29dddd6d59427c78f9a7` (1,402 advisories), zero
+  vulnerabilities/unsound/yanked findings, and three unmaintained warnings.
+  The publication worker reruns its current gates and publishes only the
+  reviewed tracked snapshot. The runner selects the next issue.
+
 ## Issue #17 — current input and evidence-path recheck (2026-11-02, blocked)
 
 - Runner selected issue #17 again after the hold elapsed. The canonical

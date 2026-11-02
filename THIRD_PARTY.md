@@ -1,5 +1,25 @@
 # Dependency notice review
 
+## 0.1.26 source candidate status (2026-11-03)
+
+The locked PostgreSQL 16 package candidate updates the root crate entry in
+`Cargo.lock` to `0.1.26`; dependency versions are unchanged from `0.1.25`. The
+current lockfile SHA-256 is
+`23391a1e49a4899ef6db9f37bb442388e52c72ec36b5159d1ec2cffb5068a6c1`. The
+`cargo-audit` 0.22.2 scanned this exact lockfile using the publisher's deny
+policy against RustSec database revision
+`263a4d951a0867d4bddc29dddd6d59427c78f9a7` (1,402 advisories, updated
+2026-11-02). The audit exited 0 with zero vulnerabilities, unsound packages,
+or yanked packages. Three unmaintained warnings remain: `paste` 1.0.15,
+`proc-macro-error2` 2.0.1, and `serde_cbor` 0.11.2. The external publisher
+reruns this gate at publication time.
+
+The checked-in CycloneDX SBOM and complete notice bundle remain bound to the
+`0.1.23` PG16 artifact below. No matching `0.1.26` artifact-bound SBOM or
+complete notice bundle is recorded here. RustSec success is a dependency
+advisory result, not a license inventory or clearance. Source and package
+validation do not grant binary redistribution rights or production approval.
+
 ## 0.1.24 development lockfile recheck (2026-10-30)
 
 Strict target-filtered notice collection covered all 436 reachable Linux

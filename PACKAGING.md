@@ -109,12 +109,20 @@ not covered by this notice/SBOM evidence.
 
 ## Version Coordinates
 
-- Current extension/crate version: `0.1.25` source development candidate (`Cargo.toml`). The Linux x86_64 / PostgreSQL 16.15 artifact and native checks for this candidate are recorded in [PUBLICATION.md](PUBLICATION.md).
+- Current extension/crate version: `0.1.26` source development candidate (`Cargo.toml`). Its exact PG16 package/build/install evidence is recorded in [PUBLICATION.md](PUBLICATION.md); this does not authorize production or binary redistribution.
 - Control file version: `default_version = '@CARGO_VERSION@'`
 - PostgreSQL build target: PostgreSQL 16 by default; optional Docker build arg `PG_MAJOR=13..17`
 - Rust toolchain: `1.96.0`
 - cargo-pgrx: `0.19.1`
-- The 0.1.21 package sections above are historical and do not describe the current source. Current package validation covers Linux x86_64 / PostgreSQL 16.15 only; other PostgreSQL majors and distribution profiles are not verified by that evidence. The 0.1.25 artifact does not have a matching artifact-bound notice bundle and SBOM in [THIRD_PARTY.md](THIRD_PARTY.md), so binary redistribution remains uncleared. No package result grants production approval.
+- The 0.1.21 package sections above are historical and do not describe the current source. The current package validation target is Linux x86_64 / PostgreSQL 16.15; other PostgreSQL majors and distribution profiles are not verified. The 0.1.26 artifact does not have a matching artifact-bound notice bundle and SBOM in [THIRD_PARTY.md](THIRD_PARTY.md), so binary redistribution remains uncleared. No package result grants production approval.
+
+| Target | Status |
+|---|---|
+| Linux x86_64 / PostgreSQL 16.15 | Current candidate validation target; see [PUBLICATION.md](PUBLICATION.md) for exact artifact and checks. |
+| PostgreSQL 13–15 and 17 | Cargo feature gates exist; current release artifact/install/upgrade evidence does not cover them. |
+| ARM, Windows, macOS, other Linux distributions | Not validated for this candidate. |
+| Remote/object-store Lance, multi-node concurrent writes, tenant isolation, distributed PostgreSQL–Lance commit | Not supported. |
+| Binary redistribution / production | Not approved; artifact-bound notices/SBOM and remaining 1.0 gates are open. |
 
 `Cargo.toml`에는 `pg13`부터 `pg17` feature gate가 남아 있다. Dockerfile은 `PG_MAJOR` build arg로 `postgres:${PG_MAJOR}`, 해당 server dev package, `cargo pgrx init --pg${PG_MAJOR}`, matching `pg${PG_MAJOR}` Cargo feature를 함께 선택한다. 기본 local verification은 PostgreSQL 16 기준이며, 다른 major는 `make smoke-pg-version` 또는 `make pg-version-matrix`로 fresh install smoke를 확인한다.
 

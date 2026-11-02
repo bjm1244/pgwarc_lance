@@ -4,6 +4,10 @@
 
 이 문서는 Phase 1-5 이후 `pgwarc_lance`를 어떤 순서로 키울지 정리한다. 목적은 기능 아이디어를 많이 쌓는 것이 아니라, 다음 작업을 선택할 때 품질, 성능, 운영 안정성, 패키징 중 어느 증거가 부족한지 빠르게 판단하는 것이다.
 
+Blueprint/ROADMAP의 완료 체크는 구현 이력이다. 1.0 readiness, 실제 PostgreSQL
+지원 대상, binary 재배포와 production 승인은 [README 지원 범위](README.md#검증-지원-범위),
+[PUBLICATION.md](PUBLICATION.md), runner 관리 v1.0 gate로 별도 판정한다.
+
 ## Product Shape
 
 `pgwarc_lance`는 PostgreSQL 안에서 WARC/Web archive 검색을 만들기 위한 작은 extension으로 유지한다. Extension은 BM25, Lance vector search, hybrid ranking, WARC metadata table 같은 검색 primitive를 제공하고, 대형 WARC parsing, embedding provider 호출, batch import orchestration은 외부 importer와 하네스가 담당한다.

@@ -76,7 +76,22 @@ fn fail(code: PgSqlErrorCode, message: &str) -> ! {
     ereport!(ERROR, code, message.to_string());
 }
 
+fn require_non_null<T>(value: Option<T>, argument: &str) -> T {
+    value.unwrap_or_else(|| {
+        fail(
+            PgSqlErrorCode::ERRCODE_NULL_VALUE_NOT_ALLOWED,
+            &format!("lance_insert argument {argument} must not be NULL"),
+        )
+    })
+}
+
 fn fail_operation(operation: &str, error: Box<dyn std::error::Error>) -> ! {
+    if let Some(mismatch) = error.downcast_ref::<lance_store::VectorDimensionMismatch>() {
+        fail(
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            &format!("{operation}: {mismatch}"),
+        );
+    }
     fail(
         PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
         &format!("{operation} failed: {error}"),
@@ -904,7 +919,15 @@ fn lance_create_table(uri: &str, vector_dim: default!(i32, 3), overwrite: defaul
 }
 
 #[pg_extern]
-fn lance_insert(uri: &str, id: i64, vector: Vec<f32>, label: Option<String>) {
+fn lance_insert(
+    uri: Option<&str>,
+    id: Option<i64>,
+    vector: Option<Vec<f32>>,
+    label: Option<String>,
+) {
+    let uri = require_non_null(uri, "uri");
+    let id = require_non_null(id, "id");
+    let vector = require_non_null(vector, "vector");
     require_finite_vector(&vector);
     let authorized_uri = authorize_uri(uri);
     let uri = authorized_uri.as_ref();
@@ -939,6 +962,12 @@ fn lance_insert_many(
                 ids.len(),
                 labels.len()
             ),
+        );
+    }
+    if ids.len().checked_mul(vector_dim as usize) != Some(flat_vectors.len()) {
+        fail(
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "insert requires exactly rows * vector_dim values",
         );
     }
     ensure_documents_untracked(uri, &ids);
@@ -1051,6 +1080,7 @@ fn enqueue_outbox(
             "outbox enqueue requires 1..10000 matching IDs/labels and exactly rows * vector_dim values",
         );
     }
+    require_finite_vector(&flat_vectors);
     let unique: std::collections::HashSet<i64> = ids.iter().copied().collect();
     if unique.len() != ids.len() {
         fail(
@@ -1066,7 +1096,6 @@ fn enqueue_outbox(
             );
         }
     }
-    require_finite_vector(&flat_vectors);
     let authorized_uri = authorize_uri(uri);
     let uri = authorized_uri.as_ref();
     // Serializing enqueue transactions gives each dataset a stable committed

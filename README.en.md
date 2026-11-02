@@ -2,7 +2,19 @@
 
 PostgreSQL extension (built with [pgrx](https://github.com/pgcentralfoundation/pgrx)) that adds table-backed BM25 search, Lance-based vector search, and RRF hybrid search for WARC / web-archive records — all callable from SQL. Korean documentation is in [README.md](README.md).
 
-> **Status: research prototype — not production-ready.** The current source development candidate is **0.1.25**. URI-scoped revisions, tombstones, and an ordered vector upsert/delete outbox prevent stale vectors from resurfacing during deletion and recreation. PostgreSQL and Lance still have no distributed atomic commit. See [PUBLICATION.md](PUBLICATION.md) for the candidate's PG16 validation and limits, and [THIRD_PARTY.md](THIRD_PARTY.md) for the latest artifact-bound dependency notices and SBOM, which still describe a 0.1.23 validation artifact. Binary redistribution and production approval remain open. Independent relevance evaluation, operational SLA and full raw-WARC ingestion also remain open. Read [SECURITY.md](SECURITY.md) for security and transaction boundaries.
+> **Status: research prototype — not production-ready.** The current source development candidate is **0.1.26**. URI-scoped revisions, tombstones, and an ordered vector upsert/delete outbox prevent stale vectors from resurfacing during deletion and recreation. PostgreSQL and Lance still have no distributed atomic commit. See [the SQL/CLI contract](docs/sql-cli-contract.md) for inputs, errors, ordering, cancellation, consistency and version policy, [PUBLICATION.md](PUBLICATION.md) for this candidate's PG16 validation scope, and [THIRD_PARTY.md](THIRD_PARTY.md) for the latest artifact-bound dependency notices and SBOM, which still describe a 0.1.23 validation artifact. Binary redistribution and production approval remain open. Independent relevance evaluation, operational SLA and full raw-WARC ingestion also remain open. Read [SECURITY.md](SECURITY.md) for security and transaction boundaries.
+
+## Verified support scope
+
+| Target or feature | Status |
+|---|---|
+| Linux x86_64 / PostgreSQL 16.15 | Current validation target; package and SQL evidence is recorded in [PUBLICATION.md](PUBLICATION.md). |
+| PostgreSQL 13–15/17, ARM, Windows, macOS, other Linux distributions | Build paths exist for some targets, but this candidate has no verified release support for them. |
+| Remote/object-store Lance, multi-node concurrent writes, tenant isolation, distributed PostgreSQL–Lance commit | Not supported. |
+| Binary redistribution / production | Not approved; artifact-bound notices and the v1.0 and human release gates remain open. |
+
+ROADMAP and BLUEPRINT checkmarks record implementation history. They do not
+mean that the v1.0 release gates or production support have passed.
 
 Production acceptance gates are recorded in [PRODUCTION.md](PRODUCTION.md).
 Earlier 0.1.18 posting-window and IDF trials are recorded separately in the development log. The 0.1.19 term-frequency-index candidate reduces work in the q6 document-frequency scan, while its end-to-end latency and write costs remain inconclusive. Result fingerprints matched, but no independent qrels were available. See the [development log](docs/development-log.md), [PUBLICATION.md](PUBLICATION.md), [PRODUCTION.md](PRODUCTION.md), and [THIRD_PARTY.md](THIRD_PARTY.md) for scope and limitations.

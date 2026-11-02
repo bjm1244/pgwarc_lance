@@ -4,12 +4,17 @@
 
 이 문서는 현재 코드 기준으로 `pgwarc_lance`를 WARC/Web archive 검색용 PostgreSQL 확장으로 안정화하기 위한 작업 순서를 정리한다. 원격 CI는 전제하지 않고, 기본 검증 기준은 로컬 Docker 환경의 `make test-all`이다.
 
+아래 phase checkbox는 각 구현 작업의 이력을 나타내며 1.0 release 완료나
+production 지원을 뜻하지 않는다. 현재 source/package 검증과 실제 지원 대상은
+[README 지원 범위](README.md#검증-지원-범위), [PUBLICATION.md](PUBLICATION.md),
+그리고 runner가 관리하는 v1.0 gate를 따른다.
+
 ## 현재 기준선
 
 - PostgreSQL 확장명과 크레이트명은 `pgwarc_lance`다.
 - 핵심 SQL 표면은 BM25 색인/검색, Lance dataset 생성/삽입/검색, RRF hybrid search, WARC metadata table로 구성되어 있다.
 - WARC importer는 Python stdlib만 사용하며 WARC/WARC.GZ 파싱, metadata upsert, BM25 색인, deterministic hash vector, external embedding command, precomputed embedding JSONL을 지원한다.
-- Lance 적재 모드는 `create`, `overwrite`, `append`로 분리되어 있다. 반복 테스트나 재생성 import는 `overwrite`, 기존 dataset 누적 import는 `append`를 사용한다.
+- Lance 적재 모드는 `create`, `overwrite`, `append`, `upsert`, `outbox`를 지원한다. 반복 테스트나 재생성 import는 `overwrite`, 기존 dataset 누적 import는 `append`, 재시도 가능한 문서 갱신은 `upsert` 또는 ordered `outbox`를 사용한다.
 - 테스트 하네스는 smoke SQL, tokenizer unit, WARC importer unit, pg_regress, retrieval quality eval 축이다.
 - 문서 하네스는 Markdown 링크, README 하네스 목록, roadmap 검증 명령 drift를 확인한다.
 - 벤치마크 하네스는 BM25 document indexing, Lance row-by-row vs batch insert, synthetic WARC parse/SQL generation/execution split을 다룬다.

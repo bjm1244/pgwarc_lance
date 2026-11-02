@@ -1,4 +1,58 @@
-# Source publication review — updated 2026-11-02
+# Source publication review — updated 2026-11-03
+
+## Issue #21 — SQL/CLI contract and PG16 package (2026-11-03)
+
+The 0.1.26 development candidate fixes `lance_insert`'s required-NULL error
+contract (`22004`), preserves nullable labels, validates row-major batch shape,
+and reports synchronous vector-dimension mismatches as `22023`. The public
+[SQL/CLI contract](docs/sql-cli-contract.md) now records function inputs,
+NULL and vector behavior, SQLSTATEs, result ordering, cancellation and
+cross-store consistency limits, importer/worker options and exit codes, and
+the pre-1.0 and post-1.0 SemVer policy. `ROADMAP.md`, `BLUEPRINT.md`, the
+READMEs, `PACKAGING.md`, and this publication record distinguish implementation
+history from current support and release approval.
+
+The Linux x86_64 package was built in the pinned PostgreSQL 16 Bookworm
+environment with Rust 1.96.0 and cargo-pgrx 0.19.1 using Cargo's locked offline
+mode. The package command completed with the same Cargo.lock SHA-256 before
+and after (`23391a1e49a4899ef6db9f37bb442388e52c72ec36b5159d1ec2cffb5068a6c1`).
+The shared library SHA-256 is
+`a99d374d67615db5db4de6ee926dd01bfece99cc2462d488af44a25f95e7def5`.
+PostgreSQL 16.15 in a fresh disposable official container installed the
+extracted package, created extension version 0.1.26, and confirmed
+`lance_insert` is not STRICT while `bm25_search` and `lance_vector_search`
+remain STRICT. All four `setup`, `functions`, `search`, and `security`
+`pg_regress` cases passed. The SQL regression fixes three required NULL inputs,
+nullable label storage, invalid row shape, non-finite values, direct/hybrid
+dimension errors and explicit vector tie ordering. It also replaces an old
+three-dimensional vector in a four-dimensional error fixture with a correctly
+shaped query and a genuinely missing dataset, preserving the intended
+enabled-source-failure check.
+
+A disposable PostgreSQL 16.15 example used actual 384-dimensional
+`all-MiniLM-L6-v2` embeddings for a one-record WARC import and same-identity
+revision. BM25 and vector search returned the record; a separate worker process
+applied the committed outbox event after restart; the revised text replaced the
+old BM25 terms and vector revision; a revision-checked delete produced a
+tombstone and removed the Lance row. Required-NULL and vector-dimension calls
+returned `22004` and `22023`. The existing importer DB fixture passed, as did
+19 runtime-safety checks and 15 backup/restore checks. A populated upgrade from
+the preserved 0.1.25 artifact to 0.1.26 kept BM25 document 41 and its Lance
+vector searchable and verified the new non-STRICT `lance_insert` contract.
+CLI probes confirmed help/invalid-argument/missing-input exit codes of
+0/2/1 and worker invalid-interval/psql-failure codes of 2/1.
+
+These results establish a bounded PG16 contract and recovery path. They do not
+establish independently labelled relevance, full-corpus ingest or query
+performance, a sustained operational SLA, another platform/major-version
+support target, production approval, or 24–72-hour soak completion. The 0.1.26
+artifact does not yet have a matching notice bundle and SBOM; binary
+redistribution remains uncleared. `cargo-audit` 0.22.2 also passed against
+this exact lockfile using database revision
+`263a4d951a0867d4bddc29dddd6d59427c78f9a7` (1,402 advisories): there were no
+vulnerabilities, unsound packages or yanked packages, and three unmaintained
+warnings remain. The external publication gate reruns the audit against its
+current database when it reviews this snapshot.
 
 ## Issue #17 — scale qualification checkpoint (2026-11-02, blocked)
 
