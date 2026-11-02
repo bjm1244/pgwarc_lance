@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-11-02T17:30:52.725238+00:00",
+  "updated_at": "2026-11-02T22:36:01.693356+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -274,9 +274,9 @@
         15
       ],
       "status": "blocked",
-      "summary": "PG16 규모 프로파일과 frequency index의 기존 동일 workload 근거를 재확인했다. 현재 승인된 실제 입력은 21,873개 문서와 21,825개 대응 벡터로 100k·1m 단계에 미달하며 해당 규모의 성능은 주장하지 않는다.",
-      "blocker": "현재 승인된 실제 corpus는 고유 문서 21,873개와 대응하는 384차원 벡터 21,825개뿐이어서 첫 100,000문서 단계에 미달한다. 100k·1m 검색/적재 및 해당 규모의 p95/p99·자원 지표를 측정하지 않았다.",
-      "resume_condition": "최소 100,000개 후 1,000,000개의 승인된 고유 실제 문서와 대응하는 불변 384차원 벡터를 제공하거나, 추가 실제 문서와 기존 승인 모델을 사용한 새 벡터 생성 권한을 명시적으로 제공한다. 출처와 문서 길이를 보존하고 100k 단계를 먼저 실행한다.",
+      "summary": "승인 입력 inventory와 기존 PG16 증거를 확인했다. C1의 사전 profile과 현재 corpus의 C3 index 비용 판단은 유지되지만, 승인된 실제 입력은 21,873개 문서로 100k·1m 시험을 수행하지 못해 C2는 차단 상태다.",
+      "blocker": "현재 승인·검증된 실제 입력은 고유 문서 21,873개와 이에 대응하는 384차원 벡터 21,825개뿐이다. 첫 100,000문서 단계보다 78,127개 부족해 100k·1m 검색 및 적재와 해당 규모 p95/p99·CPU/RSS/temp/WAL/disk를 측정하지 않았다.",
+      "resume_condition": "최소 100,000개 후 1,000,000개의 승인된 고유 실제 문서와 대응하는 불변 384차원 벡터를 제공하거나, 추가 실제 문서에 대해 이미 승인된 모델로 새 벡터를 생성할 권한을 명시적으로 제공한다. 출처와 정확한 문서 길이를 보존하고 100k 단계를 먼저 수행한다.",
       "public_commit": "72915622eb2459a1d8505ef3e7d1805d2b3d06b4",
       "criteria_passed": [
         "C1",
@@ -346,7 +346,7 @@
       ],
       "status": "done",
       "summary": "The 0.1.26 SQL/CLI contract, PostgreSQL 16 package, real-embedding importer/search/recovery example, and support/release documentation were completed and validated.",
-      "public_commit": "3458420ac217141060aa68a437cbc03e55823a17",
+      "public_commit": "4532f0564e2c9505b643f314f370532c38ba00a8",
       "criteria_passed": [
         "C1",
         "C2",

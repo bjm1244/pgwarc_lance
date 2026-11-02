@@ -54,6 +54,37 @@
   The publication worker reruns its current gates and publishes only the
   reviewed tracked snapshot. The runner selects the next issue.
 
+## Issue #17 — approved-input inventory checkpoint (2026-11-03, blocked)
+
+- The serialized runner selected issue #17 on the canonical `development`
+  branch with `gpt-6-luna` / `max`. The project model configuration and source
+  tree were unchanged at start; the only active writer was this run.
+- A fresh read-only inventory found the same single authorized WARC archive,
+  938,695,574 bytes with its prior modification time. Its checksum was last
+  verified against the preserved input audit in the preceding capacity review;
+  this checkpoint did not reread or hash the raw archive.
+- The verified corpus receipts still describe 66,190 raw WARC records, 21,873
+  distinct documents, 8,240,889 BM25 postings and 21,825 matching 384-dimensional
+  vectors. That is 78,127 documents short of the first 100,000-document stage.
+  No new real corpus or vector-generation authorization was supplied, and no
+  duplicate or synthetic rows were used.
+- C1 remains satisfied by the registered PG16.15/Linux x86_64 profile, fixed
+  document-length and query mix, concurrency, repetitions, resource metrics and
+  predeclared relative budgets. An absolute customer SLA remains unset. C3
+  remains supported only by the preserved same-workload 0.1.18/0.1.19 index
+  comparison on this corpus: the index stays optional before a production
+  default decision. Those measurements do not qualify 100k/1m capacity or the
+  later 0.1.26 filtered-search path.
+- No search, ingest or resource trial ran at 100k or 1m. No product or native
+  input changed; the new private checkpoint records only source inventory and
+  the existing verified capacity receipts. Documentation checks and whitespace
+  checks are recorded for this log update.
+- C2 remains blocked. Resume with approved real inputs for at least 100,000 and
+  then 1,000,000 distinct documents and matching immutable 384-dimensional
+  vectors, or explicit authorization to generate vectors with an already
+  approved model. Preserve provenance and exact document lengths, and run the
+  100k stage first.
+
 ## Issue #17 — current input and evidence-path recheck (2026-11-02, blocked)
 
 - Runner selected issue #17 again after the hold elapsed. The canonical
