@@ -1,5 +1,37 @@
 # Development log
 
+## Issue #17 — result evidence reconciliation (2026-11-03, blocked)
+
+- The serialized runner continued the selected issue #17 on canonical
+  `development` with `gpt-6-luna` / `max`. The registered C1 profile still fixes
+  the PostgreSQL 16.15 workload, actual document lengths, 384-dimensional
+  vectors, query mix, concurrency, ingest arms, resource metrics and relative
+  budgets; it does not set an absolute customer SLA.
+- To avoid repeating a raw-archive scan or another sub-100k trial, this run used
+  the latest approved-input inventory and preserved comparison reports. They
+  still account for 21,873 distinct documents and 21,825 matching vectors, which
+  leaves 78,127 documents before the first 100,000-document stage. No additional
+  real corpus or vector-generation authorization was supplied. Neither the
+  100k nor 1m search/ingest/resource trial ran, so C2 remains blocked.
+- The same-corpus frequency-index comparison continues to support keeping the
+  index optional before a production default decision: the count scan fell from
+  16,429 to 61 shared-hit blocks, while the index occupied 116,023,296 bytes and
+  raised CPU/WAL in the measured write arms. Variable host load prevents causal
+  attribution of the latency changes. These 21,873-document 0.1.18/0.1.19 arms
+  do not qualify 100k/1m capacity or the later filtered-search path. The current
+  host was above the registered load gate, so no new latency run was started.
+- A read-only invocation of the issue-result validator accepted the existing
+  C1/C3 evidence under the configured private evidence root; the earlier path
+  error did not reproduce. This run created current C1/C2/C3 receipts under its
+  private run directory. It did not change native inputs, runner/queue gates,
+  input data, vectors or production state.
+- `python3 tools/check_docs.py` and `git diff --check` passed for this log update.
+  No PG16 build, SQL/import regression, database trial, or 100k/1m measurement is
+  claimed. Resume with approved distinct real documents and matching immutable
+  384-dimensional vectors at 100k and then 1m, or explicit authorization to
+  generate those vectors with the already approved model; preserve provenance
+  and exact lengths and run 100k first.
+
 ## Issue #21 — SQL/CLI contract and PG16 installation example (2026-11-03, validated)
 
 - The serialized runner selected issue #21 only. The `development` branch and

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-11-02T22:36:01.693356+00:00",
+  "updated_at": "2026-11-03T10:40:13.540528+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -274,10 +274,10 @@
         15
       ],
       "status": "blocked",
-      "summary": "승인 입력 inventory와 기존 PG16 증거를 확인했다. C1의 사전 profile과 현재 corpus의 C3 index 비용 판단은 유지되지만, 승인된 실제 입력은 21,873개 문서로 100k·1m 시험을 수행하지 못해 C2는 차단 상태다.",
-      "blocker": "현재 승인·검증된 실제 입력은 고유 문서 21,873개와 이에 대응하는 384차원 벡터 21,825개뿐이다. 첫 100,000문서 단계보다 78,127개 부족해 100k·1m 검색 및 적재와 해당 규모 p95/p99·CPU/RSS/temp/WAL/disk를 측정하지 않았다.",
+      "summary": "PG16의 사전 등록 profile과 현 corpus frequency-index 비용 판단을 재검증했다. 승인된 실제 입력은 고유 문서 21,873개와 384차원 벡터 21,825개로 100k·1m 시험에 부족해 C2를 차단 상태로 남겼다.",
+      "blocker": "현재 승인·검증된 입력은 21,873개의 고유 실제 문서와 대응하는 384차원 벡터 21,825개다. 첫 100,000문서 단계보다 78,127개 부족해 100k·1m 검색 및 적재와 해당 규모 p95/p99·CPU/RSS/temp/WAL/disk를 측정하지 않았다.",
       "resume_condition": "최소 100,000개 후 1,000,000개의 승인된 고유 실제 문서와 대응하는 불변 384차원 벡터를 제공하거나, 추가 실제 문서에 대해 이미 승인된 모델로 새 벡터를 생성할 권한을 명시적으로 제공한다. 출처와 정확한 문서 길이를 보존하고 100k 단계를 먼저 수행한다.",
-      "public_commit": "72915622eb2459a1d8505ef3e7d1805d2b3d06b4",
+      "public_commit": "2960dcd3bfb2c36612ffeaf7441f2912e843e065",
       "criteria_passed": [
         "C1",
         "C3"
