@@ -1,5 +1,42 @@
 # Development log
 
+## Issue #17 — current source-bound scale audit (2026-11-04, blocked)
+
+- The serialized runner continued issue #17 on clean canonical `development`
+  with the configured `gpt-6-luna` / `max`. The current PostgreSQL 16 scale
+  profile and its distinct-document, no-resampling rule were rechecked.
+- The authorized Common Crawl source currently has one WARC file. Its 938,695,574
+  bytes and SHA-256 match the preserved input audit, which counts 66,190 raw
+  records. The full-import verification records 21,873 document rows, including
+  48 metadata-only rows. The registered 0.1.5 benchmark baseline has 21,825
+  matching 384-dimensional E5 vectors. Even the archive's total raw-record
+  count is below the 100,000-document first stage, so these inputs cannot
+  satisfy the fixed scale profile. No 100k or 1m search, ingest or resource
+  trial ran; C2 remains blocked.
+- C1 remains passed: the PG16.15/Linux x86_64 server profile, whole-document
+  lengths, eight-query BM25/vector/hybrid mix, client counts, BULK/COPY arms,
+  measured resource fields and relative budgets remain fixed. No absolute
+  customer SLA or supported scale is claimed.
+- C3 remains passed for the existing corpus decision. All 17 frequency-index
+  measurement artifacts still match their recorded checksums. The eighteenth
+  item in the old check was a snapshot of the active native-validation receipt,
+  whose contents have since been updated; the current source fingerprint,
+  PG16 artifact, Cargo.lock and receipt match independently. The historical
+  same-workload results still support keeping the index optional before a
+  production default decision. Their host-load variation and unresolved
+  18-posting importer difference remain limitations.
+- The original `validate_cc015.py` was read but not rerun: its current code
+  rewrites preserved report files and inserts vectors into the existing
+  candidate database and Lance URI. This run rehashed the raw archive and used
+  existing read-only audit reports instead. The raw WARC, prior database,
+  Lance data, models and vector files remained unchanged.
+- `python3 tools/check_docs.py` and `git diff --check` passed for this
+  documentation update. No native build, database regression, importer run,
+  benchmark or product change is claimed. Resume C2 with approved actual
+  distinct documents and matching immutable 384-dimensional vectors at 100k
+  and then 1m, or explicit authorization to generate them with the already
+  approved model; retain provenance and exact lengths and run 100k first.
+
 ## Issue #17 — result evidence reconciliation (2026-11-03, blocked)
 
 - The serialized runner continued the selected issue #17 on canonical

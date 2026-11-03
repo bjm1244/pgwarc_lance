@@ -1,4 +1,4 @@
-# Source publication review — updated 2026-11-03
+# Source publication review — updated 2026-11-04
 
 ## Issue #21 — SQL/CLI contract and PG16 package (2026-11-03)
 
@@ -75,6 +75,22 @@ post-checkpoint database bytes at 5%, and peak RSS at 80% of container memory.
 Temporary usage must be reported, with no OOM, temp-limit or disk-full errors.
 Every threshold applies at both target scales. These are preregistered
 engineering thresholds, not an absolute customer SLA.
+
+A read-only source recheck on 2026-11-04 found the same single 938,695,574-byte
+WARC archive and confirmed its checksum against the preserved input audit. The
+archive contains 66,190 total raw records, below the first 100,000 distinct
+document target. The registered profile disallows resampling, so neither the
+100k nor 1m trial can be run from the currently available archive. The full
+import audit still records 21,873 document rows and 21,825 searchable documents;
+the separate 0.1.5 benchmark corpus has 21,825 matching 384-dimensional vectors.
+No scale support claim follows from these counts.
+
+The current C3 recheck confirmed all 17 frequency-index measurement artifacts
+against their recorded checksums. An eighteenth historical check entry was a
+snapshot of the active native-validation receipt; that receipt has since been
+updated. Its current source fingerprint, Cargo.lock and PG16 artifact were
+checked separately and match. The same-corpus decision and its limits below
+remain unchanged. No new 100k/1m benchmark ran.
 
 The verified source corpus has 21,873 distinct documents, 8,240,889 BM25
 postings and 21,825 matching 384-dimensional vectors. It is below the first

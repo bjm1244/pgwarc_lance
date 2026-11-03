@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-11-03T10:40:13.540528+00:00",
+  "updated_at": "2026-11-03T22:45:26.136307+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -274,10 +274,10 @@
         15
       ],
       "status": "blocked",
-      "summary": "PG16의 사전 등록 profile과 현 corpus frequency-index 비용 판단을 재검증했다. 승인된 실제 입력은 고유 문서 21,873개와 384차원 벡터 21,825개로 100k·1m 시험에 부족해 C2를 차단 상태로 남겼다.",
-      "blocker": "현재 승인·검증된 입력은 21,873개의 고유 실제 문서와 대응하는 384차원 벡터 21,825개다. 첫 100,000문서 단계보다 78,127개 부족해 100k·1m 검색 및 적재와 해당 규모 p95/p99·CPU/RSS/temp/WAL/disk를 측정하지 않았다.",
-      "resume_condition": "최소 100,000개 후 1,000,000개의 승인된 고유 실제 문서와 대응하는 불변 384차원 벡터를 제공하거나, 추가 실제 문서에 대해 이미 승인된 모델로 새 벡터를 생성할 권한을 명시적으로 제공한다. 출처와 정확한 문서 길이를 보존하고 100k 단계를 먼저 수행한다.",
-      "public_commit": "2960dcd3bfb2c36612ffeaf7441f2912e843e065",
+      "summary": "실제 Common Crawl 원본의 현재 checksum과 기존 적재 검증을 대조했다. 단일 archive의 전체 66,190 raw record가 사전 등록된 100,000 고유 문서 최소 규모보다 적고 중복 확장은 금지되어 C2를 계속 차단했다. C1 profile과 현재 corpus의 frequency-index 판단은 재검증했다.",
+      "blocker": "현재 승인된 Common Crawl archive는 하나이며 전체 raw record가 66,190개로 100,000 고유 문서 목표보다 적다. 검증된 benchmark baseline은 21,873개 고유 문서와 21,825개 384차원 vector이고, profile은 중복·재표본을 금지한다. 추가 승인 문서나 기존 승인 모델로 vector를 생성할 권한이 없어 100k/1m 검색·적재와 p95/p99·CPU/RSS/temp/WAL/disk 측정을 실행하지 않았다.",
+      "resume_condition": "출처와 정확한 문서 길이가 보존된 승인 실제 자료로 고유 문서 100,000개와 대응하는 불변 384차원 vector를 제공한 뒤 1,000,000개까지 확장하거나, 이미 승인된 모델로 새 vector를 생성할 권한을 명시적으로 부여한다. 등록된 동일 profile로 100k 단계를 먼저 수행한다.",
+      "public_commit": "2473ded92fc6a856fcf84e270930c528b8621557",
       "criteria_passed": [
         "C1",
         "C3"
