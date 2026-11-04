@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-11-03T22:45:26.136307+00:00",
+  "updated_at": "2026-11-04T23:16:34.900959+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -274,10 +274,10 @@
         15
       ],
       "status": "blocked",
-      "summary": "실제 Common Crawl 원본의 현재 checksum과 기존 적재 검증을 대조했다. 단일 archive의 전체 66,190 raw record가 사전 등록된 100,000 고유 문서 최소 규모보다 적고 중복 확장은 금지되어 C2를 계속 차단했다. C1 profile과 현재 corpus의 frequency-index 판단은 재검증했다.",
-      "blocker": "현재 승인된 Common Crawl archive는 하나이며 전체 raw record가 66,190개로 100,000 고유 문서 목표보다 적다. 검증된 benchmark baseline은 21,873개 고유 문서와 21,825개 384차원 vector이고, profile은 중복·재표본을 금지한다. 추가 승인 문서나 기존 승인 모델로 vector를 생성할 권한이 없어 100k/1m 검색·적재와 p95/p99·CPU/RSS/temp/WAL/disk 측정을 실행하지 않았다.",
-      "resume_condition": "출처와 정확한 문서 길이가 보존된 승인 실제 자료로 고유 문서 100,000개와 대응하는 불변 384차원 vector를 제공한 뒤 1,000,000개까지 확장하거나, 이미 승인된 모델로 새 vector를 생성할 권한을 명시적으로 부여한다. 등록된 동일 profile로 100k 단계를 먼저 수행한다.",
-      "public_commit": "2473ded92fc6a856fcf84e270930c528b8621557",
+      "summary": "기존 0.1.1/0.1.5 순서 교차 비교의 실제 산출물을 검증하고 공개 성능 문서에 수치와 한계를 반영했다. 승인된 코퍼스는 첫 100k 규모 기준에 미달해 확장 실측은 차단 상태다.",
+      "blocker": "현재 승인된 원본에는 66,190 raw records만 있고, 검증된 distinct 문서는 21,873개라 100,000 문서 1단계에 도달할 수 없다. 복제·재표본 문서는 프로필에서 금지되고 추가 벡터나 생성 승인은 제공되지 않았다.",
+      "resume_condition": "출처와 길이를 보존한 distinct 문서 100,000개 이상 및 일치하는 immutable 384차원 벡터를 제공하거나, 이미 승인된 모델로 벡터 생성할 권한을 명시한다. 그 뒤 100k 시험을 먼저 통과하고 1m 시험을 진행한다.",
+      "public_commit": "e45d41d667686b9a08673ee7478531ddf59636f3",
       "criteria_passed": [
         "C1",
         "C3"

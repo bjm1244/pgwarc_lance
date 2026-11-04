@@ -760,11 +760,11 @@ were excluded. All 5,760 requests succeeded. Candidate p95 values in millisecond
 | 4 | 370.78 | 60.62 | 480.67 |
 | 8 | 789.74 | 178.70 | 1039.65 |
 
-The historical 0.1.1 run used the same query mix and request protocol, but was not
-a simultaneous controlled experiment. Its eight-client BM25/hybrid p95 values
-were 300.94/504.81 ms; this candidate measured 789.74/1,039.65 ms. The observed
-slowdown remains a production concern requiring profiling and a controlled
-repeat. A zero-error run does not satisfy a production latency/SLA gate.
+The historical 0.1.1 run used the same query mix and request protocol, but was
+not a simultaneous controlled experiment. Its eight-client BM25/hybrid p95
+values were 300.94/504.81 ms; this candidate measured 789.74/1,039.65 ms. That
+initial result motivated the later order-reversed comparison recorded below.
+A zero-error run does not satisfy a production latency/SLA gate.
 
 Full raw-input conversion reached EOF in 213.37 seconds, but **did not pass full
 import acceptance**: 21,872 responses converted, 190 were empty, and one explicit
@@ -982,3 +982,24 @@ This verifies the outbox contract on the tested Linux x86_64 / PostgreSQL
 under production load, multi-host Lance coordination, other PostgreSQL majors,
 binary redistribution rights or production approval. GitHub `main` remains
 unchanged until the separate publisher reviews and fast-forwards the source.
+
+## 2026-11-05 — 0.1.1 / 0.1.5 paired baseline recheck
+
+The preserved 0.1.1 and 0.1.5 binaries were compared on one PostgreSQL 16.15
+validation instance with the same loaded 21,873-document corpus, 8,240,889 BM25
+postings, and 21,825 384-dimensional vectors. The instance used four CPUs and
+16 GiB of memory. The run order was reversed: 0.1.1 → 0.1.5 → 0.1.6, then
+0.1.6 → 0.1.5 → 0.1.1. Each eight-client arm used the same eight queries, eight
+warmups, top-k five, and 128 requests per client; all 1,024 requests in each
+reported arm succeeded.
+
+| Version | BM25 p95, forward / reverse (ms) | Hybrid p95, forward / reverse (ms) |
+| --- | ---: | ---: |
+| 0.1.1 | 621.48 / 592.86 | 645.67 / 752.75 |
+| 0.1.5 | 1,195.95 / 1,736.09 | 1,678.72 / 1,588.25 |
+
+The earlier 0.1.1 figures of 300.94/504.81 ms were not reproduced by this
+recheck. The paired runs provide a same-corpus, same-instance profile comparison,
+but host activity was not recorded well enough to attribute the latency gap to
+the version change. These measurements do not qualify 100,000 or 1,000,000
+documents, establish a customer SLA, or support a public scale claim.

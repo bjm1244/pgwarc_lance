@@ -1,5 +1,82 @@
 # Development log
 
+## Issue #17 — paired baseline evidence reconciliation; scale gate blocked (2026-11-05)
+
+- The serialized runner continued issue #17 on canonical `development` with
+  `gpt-6-luna` / `max`. C1 and C3 evidence were re-read, their recorded hashes
+  checked, and the current model config, BM25 source hash, Cargo.lock hash and
+  PG16 native receipt still match the registered profile. No native inputs
+  changed, so no new build or SQL regression is claimed.
+- The earlier statement that a 0.1.1 / 0.1.5 comparison remained unverified
+  was stale. The preserved October 20 run contains forward and reverse order
+  passes on the same PostgreSQL 16.15 instance and loaded corpus: 21,873
+  documents, 8,240,889 postings and 21,825 384-dimensional vectors. Its manifest
+  hashes for both result files and the corpus, command and binary-hash records
+  match. The run order was 0.1.1 → 0.1.5 → 0.1.6, then 0.1.6 → 0.1.5 → 0.1.1;
+  the instance was constrained to four CPUs and 16 GiB.
+- At eight clients, 128 requests per client and zero errors per arm, 0.1.1
+  BM25/hybrid p95 was 621.48/645.67 ms in the forward pass and 592.86/752.75 ms
+  in reverse. 0.1.5 was 1,195.95/1,678.72 ms forward and 1,736.09/1,588.25 ms
+  reverse. The old 0.1.1 figures of 300.94/504.81 ms were not reproduced.
+  Host activity was not captured well enough for a causal version claim; the
+  values are reported as paired observations only. `PUBLICATION.md` now records
+  the workload, order, results and limitation.
+- C2 remains blocked. The authorized archive's current size and SHA-256 still
+  match its input audit; the verified upper bound is 66,190 raw records, against
+  100,000 distinct documents required for the first stage. Existing accounting
+  remains 21,873 indexed documents (48 metadata-only) and 21,825 immutable
+  vectors. The 100k and 1m ingest, latency and resource measurements did not
+  run. No duplicate/resampled rows or new vectors were created.
+- No new workload ran this cycle. An isolated database-copy probe was abandoned
+  when the Docker client stopped responding. Inspection found a container in
+  `created` state that had never started; that container, its anonymous volume
+  and the unverified run-local database copy were removed. The pre-existing
+  stopped validation container and source database were left unchanged.
+- `python3 tools/check_docs.py` and `git diff --check` passed after the
+  documentation update. C2 resumes with at least 100,000 provenance- and
+  length-preserving distinct documents plus matching immutable 384-dimensional
+  vectors, or explicit authorization to generate with the already approved
+  model; run and verify 100k before 1m. No supported-scale or production-SLA
+  claim is made.
+
+## Issue #17 — profile and native continuity; scale corpus gate (2026-11-04, blocked)
+
+- The serialized runner selected issue #17 on canonical `development` with
+  `gpt-6-luna` / `max`. C1 was rechecked: the configured model and effort, the
+  PostgreSQL 16.15 profile, fixed query mix, acceptance budgets, and 100,000 /
+  1,000,000 distinct-document targets match the registered profile. The profile
+  remains a relative engineering gate, not a customer SLA or supported-scale
+  claim.
+- C2 source availability was rechecked without reimporting into the preserved
+  database. The authorized Common Crawl directory still contains one WARC; its
+  current size and checksum match the preserved input audit, which records
+  66,190 raw records. The existing full-import accounting has 21,873 document
+  rows (48 metadata-only) and the registered baseline has 21,825 384-dimensional
+  vectors. Neither the raw-record upper bound nor the verified corpus reaches
+  100,000 distinct documents. The 100k and 1m ingest/search/resource trials
+  therefore did not run.
+- C3 was rechecked against the current source and PG16 validation receipt. The
+  frequency-index definition is unchanged; the prior same-workload record still
+  verifies its 17 measurement artifacts, and the current native fingerprint,
+  PG16 artifact, Cargo.lock, and required validation checks match. The old
+  receipt snapshot is not counted as one of those measurement artifacts. The
+  existing evidence supports keeping the index optional pending scale data; it
+  does not settle a production default under 100k/1m workload.
+- The cited 0.1.5 versus 0.1.1 warm 8-client p95 comparison remains unverified.
+  This cycle did not prepare paired runs on the same corpus, artifact, and host
+  profile, so the historical percentiles were not compared or treated as a
+  controlled result.
+- No raw WARC, historical database, Lance dataset, model, or vector file was
+  changed. No synthetic rows or vectors were used. The repeated full-import
+  path was not run because it would only rewrite preserved reports and mutate
+  the protected candidate database. No native input changed, so no new PG16
+  build or SQL regression is claimed.
+- `python3 tools/check_docs.py` and `git diff --check` were run after this log
+  update. The only source change is this checkpoint. C2 resumes when approved
+  provenance-preserving distinct documents and matching immutable 384-dimensional
+  vectors are available at 100,000 documents, or when generation with the
+  already approved model is explicitly authorized; run 100k before 1m.
+
 ## Issue #17 — current source-bound scale audit (2026-11-04, blocked)
 
 - The serialized runner continued issue #17 on clean canonical `development`
