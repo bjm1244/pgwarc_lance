@@ -109,7 +109,7 @@ not covered by this notice/SBOM evidence.
 
 ## Version Coordinates
 
-- Current extension/crate version: `0.1.26` source development candidate (`Cargo.toml`). Its exact PG16 package/build/install evidence is recorded in [PUBLICATION.md](PUBLICATION.md); this does not authorize production or binary redistribution.
+- Current extension/crate version: `0.1.27` source release (`Cargo.toml`). Its exact PG16 package/build/install evidence is recorded in [PUBLICATION.md](PUBLICATION.md); this does not authorize production or binary redistribution.
 - Control file version: `default_version = '@CARGO_VERSION@'`
 - PostgreSQL build target: PostgreSQL 16 by default; optional Docker build arg `PG_MAJOR=13..17`
 - Rust toolchain: `1.96.0`

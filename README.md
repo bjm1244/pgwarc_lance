@@ -1,6 +1,6 @@
 # pgwarc_lance
 
-> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 개발 후보는 **0.1.26**이다. URI별 document revision, tombstone, ordered vector upsert/delete outbox로 삭제·재생성 중 stale vector 노출을 막으며, 필터 검색은 동일 eligibility 집합을 BM25와 정확 vector 후보 탐색에 적용한다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며 outbox 갱신은 commit 뒤 eventual consistency를 제공한다. SQL/CLI 동작과 SemVer 정책은 [SQL/CLI 계약](docs/sql-cli-contract.md)에 고정한다. 후보의 실제 PG16 검증 범위와 한계는 [PUBLICATION.md](PUBLICATION.md)에 기록한다. artifact-bound 의존성 고지는 [THIRD_PARTY.md](THIRD_PARTY.md)에 보존한다. 검증은 binary 재배포·프로덕션 승인을 뜻하지 않는다.
+> **상태: 연구용 프로토타입 — 프로덕션 미지원.** 현재 소스 공개 버전은 **0.1.27**이다. URI별 document revision, tombstone, ordered vector upsert/delete outbox로 삭제·재생성 중 stale vector 노출을 막으며, 필터 검색은 동일 eligibility 집합을 BM25와 정확 vector 후보 탐색에 적용한다. PostgreSQL과 Lance 사이에 분산 원자성은 없으며 outbox 갱신은 commit 뒤 eventual consistency를 제공한다. SQL/CLI 동작과 SemVer 정책은 [SQL/CLI 계약](docs/sql-cli-contract.md)에 고정한다. 후보의 실제 PG16 검증 범위와 한계는 [PUBLICATION.md](PUBLICATION.md)에 기록한다. artifact-bound 의존성 고지는 [THIRD_PARTY.md](THIRD_PARTY.md)에 보존한다. 검증은 binary 재배포·프로덕션 승인을 뜻하지 않는다.
 >
 > 라이선스: Apache-2.0 ([LICENSE](LICENSE)). 기여 전 [CONTRIBUTING.md](CONTRIBUTING.md)·[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)를 참고하라.
 

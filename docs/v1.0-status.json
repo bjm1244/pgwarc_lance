@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "tracking_issue": 1,
-  "updated_at": "2026-11-04T23:16:34.900959+00:00",
+  "updated_at": "2026-11-08T22:07:00.504309+00:00",
   "completion_policy": "done is exported only after publisher validates and pushes the snapshot",
   "tasks": [
     {
@@ -273,11 +273,11 @@
         13,
         15
       ],
-      "status": "blocked",
+      "status": "in_progress",
       "summary": "기존 0.1.1/0.1.5 순서 교차 비교의 실제 산출물을 검증하고 공개 성능 문서에 수치와 한계를 반영했다. 승인된 코퍼스는 첫 100k 규모 기준에 미달해 확장 실측은 차단 상태다.",
       "blocker": "현재 승인된 원본에는 66,190 raw records만 있고, 검증된 distinct 문서는 21,873개라 100,000 문서 1단계에 도달할 수 없다. 복제·재표본 문서는 프로필에서 금지되고 추가 벡터나 생성 승인은 제공되지 않았다.",
       "resume_condition": "출처와 길이를 보존한 distinct 문서 100,000개 이상 및 일치하는 immutable 384차원 벡터를 제공하거나, 이미 승인된 모델로 벡터 생성할 권한을 명시한다. 그 뒤 100k 시험을 먼저 통과하고 1m 시험을 진행한다.",
-      "public_commit": "e45d41d667686b9a08673ee7478531ddf59636f3",
+      "public_commit": "1f480234a3ad39e7caf59da9c7fcdbcf03c1c767",
       "criteria_passed": [
         "C1",
         "C3"

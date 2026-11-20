@@ -1,4 +1,14 @@
-# Source publication review — updated 2026-11-04
+# Source publication review — updated 2026-11-20
+
+## 0.1.27 source release
+
+The patch updates the locked Rust dependencies for the current RustSec
+advisories in Quinn, Arrow, and rustix. The SQL and CLI contracts are retained.
+PostgreSQL can advance from 0.1.26 using the versioned extension migration.
+
+The package checks target PostgreSQL 16.15 on Linux x86_64. The 1.0 scale and
+mixed workload qualification and the independent relevance assessment of the
+operational corpus remain open.
 
 ## Issue #21 — SQL/CLI contract and PG16 package (2026-11-03)
 

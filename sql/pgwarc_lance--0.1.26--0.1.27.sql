@@ -1,0 +1,1 @@
+-- Advance the extension version without changing SQL objects or grants.
